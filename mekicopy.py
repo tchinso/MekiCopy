@@ -88,10 +88,15 @@ def postprocess_text(text: str) -> str:
 
 
 def run_meikiocr(image_path: str) -> str:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
     result = subprocess.run(
         [sys.executable, "-m", "meikiocr.cli", image_path],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
         check=False,
     )
     output = result.stdout.strip()
