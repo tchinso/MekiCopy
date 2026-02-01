@@ -6,6 +6,7 @@ import tempfile
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import messagebox, simpledialog
+from typing import Callable
 
 from PIL import Image
 import mss
@@ -42,6 +43,14 @@ class Rect:
 @dataclass
 class Bookmark:
     name: str
+    left: int
+    top: int
+    width: int
+    height: int
+
+
+@dataclass
+class Region:
     left: int
     top: int
     width: int
@@ -141,7 +150,13 @@ def ocr_and_copy(left: int, top: int, width: int, height: int) -> None:
 
 
 class SelectionUI:
-    def __init__(self, root: tk.Tk, initial_rect: Rect | None = None):
+    def __init__(
+        self,
+        root: tk.Tk,
+        initial_rect: Rect | None = None,
+        on_confirm: Callable[[Region], None] | None = None,
+        capture_on_enter: bool = False,
+    ):
         self.root = root
         self.canvas = None
         self.rect_id = None
@@ -151,6 +166,8 @@ class SelectionUI:
         self.drag_mode: str | None = None
         self.initial_rect = initial_rect
         self.bookmarks = load_bookmarks()
+        self.on_confirm = on_confirm
+        self.capture_on_enter = capture_on_enter
 
         with mss.mss() as sct:
             monitor = sct.monitors[0]
@@ -197,7 +214,16 @@ class SelectionUI:
         self.root.bind("<Key-s>", self._on_save_bookmark)
 
     def _draw_instructions(self) -> None:
-        text = "드래그로 영역 선택 → 가장자리 드래그로 미세 조정 → Enter 캡처 / S 북마크 저장 / Esc 종료"
+        if self.capture_on_enter:
+            text = (
+                "드래그로 영역 선택 → 가장자리 드래그로 미세 조정 → Enter 캡처 / "
+                "S 북마크 저장 / Esc 종료"
+            )
+        else:
+            text = (
+                "드래그로 영역 선택 → 가장자리 드래그로 미세 조정 → Enter 선택 완료 / "
+                "S 북마크 저장 / Esc 종료"
+            )
         self.canvas.create_text(
             20,
             20,
@@ -333,9 +359,12 @@ class SelectionUI:
         left, top = self._screen_coords(rect.left, rect.top)
         width = rect.width
         height = rect.height
-        self.root.withdraw()
-        self.root.update_idletasks()
-        ocr_and_copy(left, top, width, height)
+        if self.capture_on_enter:
+            self.root.withdraw()
+            self.root.update_idletasks()
+            ocr_and_copy(left, top, width, height)
+        elif self.on_confirm:
+            self.on_confirm(Region(left=left, top=top, width=width, height=height))
         self.root.destroy()
 
     def _on_save_bookmark(self, event: tk.Event | None = None) -> None:
@@ -401,26 +430,154 @@ def run_picker_and_capture() -> None:
         ocr_and_copy(bookmark.left, bookmark.top, bookmark.width, bookmark.height)
 
 
-def run_selection(initial_bookmark: Bookmark | None = None) -> None:
-    root = tk.Tk()
-    initial_rect = None
-    if initial_bookmark:
-        rect_left = initial_bookmark.left
-        rect_top = initial_bookmark.top
-        rect_right = rect_left + initial_bookmark.width
-        rect_bottom = rect_top + initial_bookmark.height
-        with mss.mss() as sct:
-            monitor = sct.monitors[0]
-        left_offset = monitor["left"]
-        top_offset = monitor["top"]
-        initial_rect = Rect(
-            rect_left - left_offset,
-            rect_top - top_offset,
-            rect_right - left_offset,
-            rect_bottom - top_offset,
+def pick_bookmark() -> Bookmark | None:
+    bookmarks = load_bookmarks()
+    if not bookmarks:
+        messagebox.showerror("MekiCopy", "저장된 북마크가 없습니다.")
+        return None
+    picker = BookmarkPicker(bookmarks)
+    picker.mainloop()
+    return picker.selected
+
+
+def build_initial_rect(region: Region | Bookmark | None) -> Rect | None:
+    if not region:
+        return None
+    rect_left = region.left
+    rect_top = region.top
+    rect_right = rect_left + region.width
+    rect_bottom = rect_top + region.height
+    with mss.mss() as sct:
+        monitor = sct.monitors[0]
+    left_offset = monitor["left"]
+    top_offset = monitor["top"]
+    return Rect(
+        rect_left - left_offset,
+        rect_top - top_offset,
+        rect_right - left_offset,
+        rect_bottom - top_offset,
+    )
+
+
+def run_selection(
+    initial_region: Region | Bookmark | None = None,
+    capture_on_enter: bool = True,
+    parent: tk.Tk | None = None,
+) -> Region | None:
+    selection: Region | None = None
+
+    def store_selection(region: Region) -> None:
+        nonlocal selection
+        selection = region
+
+    initial_rect = build_initial_rect(initial_region)
+    if parent:
+        root = tk.Toplevel(parent)
+    else:
+        root = tk.Tk()
+    SelectionUI(
+        root,
+        initial_rect=initial_rect,
+        on_confirm=store_selection,
+        capture_on_enter=capture_on_enter,
+    )
+    if parent:
+        parent.wait_window(root)
+    else:
+        root.mainloop()
+    return selection
+
+
+class MainWindow(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("MekiCopy")
+        self.geometry("360x260")
+        self.resizable(False, False)
+        self.draft_region: Region | None = None
+        self.active_region: Region | None = None
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        header = tk.Label(self, text="MekiCopy 빠른 실행", font=("Segoe UI", 12, "bold"))
+        header.pack(pady=10)
+
+        self.status_label = tk.Label(self, text="", justify="left")
+        self.status_label.pack(padx=12, pady=6, fill=tk.X)
+
+        button_frame = tk.Frame(self)
+        button_frame.pack(padx=12, pady=6, fill=tk.BOTH, expand=True)
+
+        buttons = [
+            ("영역 지정", self._on_select_region),
+            ("북마크 영역 불러오기", self._on_load_bookmark),
+            ("영역 설정", self._on_set_region),
+            ("인식 후 복사", self._on_ocr_copy),
+        ]
+        for text, command in buttons:
+            button = tk.Button(button_frame, text=text, command=command)
+            button.pack(fill=tk.X, pady=4)
+
+        self._update_status()
+
+    def _format_region(self, region: Region | None) -> str:
+        if not region:
+            return "설정되지 않음"
+        return f"left={region.left}, top={region.top}, width={region.width}, height={region.height}"
+
+    def _update_status(self) -> None:
+        draft_text = self._format_region(self.draft_region)
+        active_text = self._format_region(self.active_region)
+        self.status_label.config(
+            text=f"현재 영역(임시): {draft_text}\n설정된 영역: {active_text}"
         )
-    SelectionUI(root, initial_rect=initial_rect)
-    root.mainloop()
+
+    def _on_select_region(self) -> None:
+        initial = self.draft_region or self.active_region
+        selection = run_selection(
+            initial_region=initial,
+            capture_on_enter=False,
+            parent=self,
+        )
+        if selection:
+            self.draft_region = selection
+            self._update_status()
+
+    def _on_load_bookmark(self) -> None:
+        bookmark = pick_bookmark()
+        if not bookmark:
+            return
+        self.draft_region = Region(
+            left=bookmark.left,
+            top=bookmark.top,
+            width=bookmark.width,
+            height=bookmark.height,
+        )
+        self._update_status()
+
+    def _on_set_region(self) -> None:
+        if not self.draft_region:
+            messagebox.showerror("MekiCopy", "먼저 영역을 지정하거나 북마크를 불러오세요.")
+            return
+        self.active_region = Region(
+            left=self.draft_region.left,
+            top=self.draft_region.top,
+            width=self.draft_region.width,
+            height=self.draft_region.height,
+        )
+        self._update_status()
+        messagebox.showinfo("MekiCopy", "인식 영역이 설정되었습니다!")
+
+    def _on_ocr_copy(self) -> None:
+        if not self.active_region:
+            messagebox.showerror("MekiCopy", "설정된 영역이 없습니다.")
+            return
+        ocr_and_copy(
+            self.active_region.left,
+            self.active_region.top,
+            self.active_region.width,
+            self.active_region.height,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -450,9 +607,10 @@ def main() -> None:
         if not bookmark:
             messagebox.showerror("MekiCopy", "북마크를 찾을 수 없습니다.")
             return
-        run_selection(initial_bookmark=bookmark)
+        run_selection(initial_region=bookmark, capture_on_enter=False)
         return
-    run_selection()
+    app = MainWindow()
+    app.mainloop()
 
 
 if __name__ == "__main__":
