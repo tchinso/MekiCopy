@@ -492,7 +492,7 @@ class MainWindow(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("MekiCopy")
-        self.geometry("360x260")
+        self.geometry("360x280")
         self.resizable(False, False)
         self.draft_region: Region | None = None
         self.active_region: Region | None = None
