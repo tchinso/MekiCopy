@@ -29,6 +29,6 @@ MEKIOCR.md 파일에 있으니 읽어봐
 
 복사를 시행했더니
 
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads. Traceback (most recent call last): File "<frozen runpy>", line 198, in _run_module_as_main File "<frozen runpy>", line 88, in _run_code File "C:\Users\chuum\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\meikiocr\cli.py", line 79, in <module> main() ~~~~^^ File "C:\Users\chuum\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\meikiocr\cli.py", line 63, in main print('\n'.join(valid_lines)) ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^ UnicodeEncodeError: 'cp949' codec can't encode character '\u30fb' in position 6: illegal multibyte sequence
+Error initializing MeikiOCR: module 'onnxruntime' has no attribute 'set_default_logger_severity'
 
- 라는 응답이 나옴. 아마 HF Hub를 이용하는 거 같은데, 나는 사용자 컴퓨터에 설치된 MekiOCR을 이용하는 거라 이러한 오류가 없어야만함. 뭔가 니가 코드를 잘못 짠 거 같음.
+라는 문장만 복사가 되었어.
