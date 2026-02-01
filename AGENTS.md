@@ -12,7 +12,7 @@ MEKIOCR.md 파일에 있으니 읽어봐
 
 그래서 각각의 화면 비율과 해상도를 각각 인식해야함.
 
-### 니가 만들 것
+### 니가 만든 것
 
 1. 사용자가 MS 스토어판 Python 3.13만 설치했다는 가정하에 MekiOCR과 기타 필요한 파이썬 라이브러리들을 설치할 수 있도록 하는 Windows 배치 파일.
 
@@ -25,3 +25,10 @@ MEKIOCR.md 파일에 있으니 읽어봐
 4. 사용자가 특정 북마크를 지정하면 해당 북마크가 가리키는 영역을 캡쳐하여 MekiOCR로 인식한 후 한 줄로 합쳐서 클립보드에 바로 복사
  (사용자가 복사 버튼을 한 번 더 누르는 일이 없도록, 바로 복사하고 복사되었습니다! 라는 메시지를 표시)
 
+### 발생한 문제
+
+복사를 시행했더니
+
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads. Traceback (most recent call last): File "<frozen runpy>", line 198, in _run_module_as_main File "<frozen runpy>", line 88, in _run_code File "C:\Users\chuum\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\meikiocr\cli.py", line 79, in <module> main() ~~~~^^ File "C:\Users\chuum\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\meikiocr\cli.py", line 63, in main print('\n'.join(valid_lines)) ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^ UnicodeEncodeError: 'cp949' codec can't encode character '\u30fb' in position 6: illegal multibyte sequence
+
+ 라는 응답이 나옴. 아마 HF Hub를 이용하는 거 같은데, 나는 사용자 컴퓨터에 설치된 MekiOCR을 이용하는 거라 이러한 오류가 없어야만함. 뭔가 니가 코드를 잘못 짠 거 같음.
