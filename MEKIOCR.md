@@ -26,3 +26,6 @@ NVIDIA 그래픽카드를 사용하는 경우에만 권장됩니다.
 python -m pip uninstall onnxruntime
 python -m pip install onnxruntime-gpu
 ```
+
+### 후처리 작업
+MekiOCR의 작업 결과는 줄을 과하게 나누는 경우가 있으므로, 인식된 결과를 한 줄로 합치는 과정이 필요하다.
