@@ -90,6 +90,11 @@ def postprocess_text(text: str) -> str:
 def run_meikiocr(image_path: str) -> str:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    repo_root = os.path.dirname(__file__)
+    pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        f"{repo_root}{os.pathsep}{pythonpath}" if pythonpath else repo_root
+    )
     result = subprocess.run(
         [sys.executable, "-m", "meikiocr.cli", image_path],
         capture_output=True,
