@@ -16,6 +16,7 @@ MIN_SIZE_PX = 10
 _OCR_ENGINE = None
 _DLL_DIR_HANDLES = []
 _RUNTIME_PATH_READY = False
+_WINDOW_STREAM = None
 
 
 def _get_app_dir() -> str:
@@ -64,6 +65,15 @@ def _prepare_native_runtime_paths() -> None:
             except OSError:
                 continue
     _RUNTIME_PATH_READY = True
+
+
+def _prepare_windowed_streams() -> None:
+    global _WINDOW_STREAM
+    if sys.stderr is None:
+        _WINDOW_STREAM = open(os.devnull, "w", encoding="utf-8")
+        sys.stderr = _WINDOW_STREAM
+    if sys.stdout is None:
+        sys.stdout = sys.stderr
 
 
 BOOKMARKS_FILE = os.path.join(_get_app_dir(), "bookmarks.txt")
@@ -210,7 +220,10 @@ def _get_ocr_engine():
     if _OCR_ENGINE is not None:
         return _OCR_ENGINE
 
+    _prepare_windowed_streams()
     _prepare_native_runtime_paths()
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TQDM_DISABLE", "1")
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     _patch_onnxruntime_compat()
     import meikiocr.ocr as meikiocr_ocr

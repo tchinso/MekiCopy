@@ -21,16 +21,27 @@ New-Item -ItemType Directory -Path $modelDir -Force | Out-Null
 from pathlib import Path
 import shutil
 from huggingface_hub import hf_hub_download
+import meikiocr.ocr as o
 
 models = [
-    ("rtr46/meiki.text.detect.v0", "meiki.text.detect.v0.1.960x544.onnx"),
-    ("rtr46/meiki.txt.recognition.v0", "meiki.text.rec.v0.960x32.onnx"),
+    (o.DET_MODEL_REPO, o.DET_MODEL_NAME),
+    (o.REC_MODEL_REPO, o.REC_MODEL_NAME),
 ]
+if hasattr(o, "VREC_MODEL_NAME"):
+    models.append((o.REC_MODEL_REPO, o.VREC_MODEL_NAME))
+
+seen = set()
+unique_models = []
+for model in models:
+    if model in seen:
+        continue
+    seen.add(model)
+    unique_models.append(model)
 
 dest = Path("runtime_models") / "meikiocr"
 dest.mkdir(parents=True, exist_ok=True)
 
-for repo_id, filename in models:
+for repo_id, filename in unique_models:
     src = hf_hub_download(repo_id=repo_id, filename=filename)
     target = dest / filename
     shutil.copy2(src, target)
