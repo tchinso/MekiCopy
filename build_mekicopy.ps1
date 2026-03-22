@@ -11,7 +11,7 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
 
 if (-not $SkipDependencyInstall) {
     python -m pip install --upgrade pip
-    python -m pip install pyinstaller meikiocr mss pillow
+    python -m pip install pyinstaller meikiocr==0.3.2 mss pillow
 }
 
 $modelDir = Join-Path $PSScriptRoot "runtime_models\\meikiocr"

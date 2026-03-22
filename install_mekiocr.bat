@@ -8,7 +8,7 @@ if errorlevel 1 (
 )
 
 python -m pip install --upgrade pip
-python -m pip install meikiocr mss pillow
+python -m pip install meikiocr==0.3.2 mss pillow
 
 echo 설치가 완료되었습니다.
 endlocal
