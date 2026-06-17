@@ -380,7 +380,6 @@ class SelectionUI:
         self.selection: Rect | None = None
         self.drag_mode: str | None = None
         self.initial_rect = initial_rect
-        self.bookmarks = load_bookmarks()
         self.on_confirm = on_confirm
         self.capture_on_enter = capture_on_enter
 
@@ -409,6 +408,7 @@ class SelectionUI:
         self.root.geometry(geometry)
         self.root.configure(bg="black")
         self.root.attributes("-alpha", 0.25)
+        self.root.focus_force()
 
     def _setup_canvas(self) -> None:
         self.canvas = tk.Canvas(
@@ -426,18 +426,17 @@ class SelectionUI:
         self.canvas.bind("<ButtonRelease-1>", self._on_mouse_up)
         self.root.bind("<Return>", self._on_capture)
         self.root.bind("<Escape>", self._on_cancel)
-        self.root.bind("<Key-s>", self._on_save_bookmark)
 
     def _draw_instructions(self) -> None:
         if self.capture_on_enter:
             text = (
                 "드래그로 영역 선택 → 가장자리 드래그로 미세 조정 → Enter 캡처 / "
-                "S 북마크 저장 / Esc 종료"
+                "Esc 종료"
             )
         else:
             text = (
-                "드래그로 영역 선택 → 가장자리 드래그로 미세 조정 → Enter 선택 완료 / "
-                "S 북마크 저장 / Esc 종료"
+                "영역을 선택하고 조정한 후 <Enter>을 눌러서 임시 영역을 설정\n"
+                "Esc 취소"
             )
         self.canvas.create_text(
             20,
@@ -582,23 +581,92 @@ class SelectionUI:
             self.on_confirm(Region(left=left, top=top, width=width, height=height))
         self.root.destroy()
 
-    def _on_save_bookmark(self, event: tk.Event | None = None) -> None:
-        if not self.selection:
-            return
-        name = simpledialog.askstring("MekiCopy", "북마크 이름을 입력하세요")
-        if not name:
-            return
-        rect = self.selection.normalized()
-        left, top = self._screen_coords(rect.left, rect.top)
-        self.bookmarks[name] = Bookmark(
-            name=name,
-            left=left,
-            top=top,
-            width=rect.width,
-            height=rect.height,
+    def _on_cancel(self, event: tk.Event | None = None) -> None:
+        self.root.destroy()
+
+
+class RegionViewUI:
+    def __init__(
+        self,
+        root: tk.Toplevel | tk.Tk,
+        draft_region: Region | None,
+        active_region: Region | None,
+    ):
+        self.root = root
+        self.canvas = None
+        self.draft_region = draft_region
+        self.active_region = active_region
+
+        with mss.mss() as sct:
+            monitor = sct.monitors[0]
+        self.virtual_left = monitor["left"]
+        self.virtual_top = monitor["top"]
+        self.virtual_width = monitor["width"]
+        self.virtual_height = monitor["height"]
+
+        self._setup_root()
+        self._setup_canvas()
+        self._bind_events()
+        self._draw_regions()
+
+    def _setup_root(self) -> None:
+        self.root.attributes("-topmost", True)
+        self.root.attributes("-fullscreen", False)
+        self.root.overrideredirect(True)
+        geometry = (
+            f"{self.virtual_width}x{self.virtual_height}"
+            f"+{self.virtual_left}+{self.virtual_top}"
         )
-        save_bookmarks(self.bookmarks)
-        messagebox.showinfo("MekiCopy", "북마크가 저장되었습니다!")
+        self.root.geometry(geometry)
+        self.root.configure(bg="black")
+        self.root.attributes("-alpha", 0.30)
+        self.root.focus_force()
+
+    def _setup_canvas(self) -> None:
+        self.canvas = tk.Canvas(
+            self.root,
+            bg="black",
+            highlightthickness=0,
+            width=self.virtual_width,
+            height=self.virtual_height,
+        )
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
+    def _bind_events(self) -> None:
+        self.root.bind("<Escape>", self._on_cancel)
+
+    def _to_canvas_rect(self, region: Region) -> Rect:
+        return Rect(
+            region.left - self.virtual_left,
+            region.top - self.virtual_top,
+            region.left + region.width - self.virtual_left,
+            region.top + region.height - self.virtual_top,
+        )
+
+    def _draw_regions(self) -> None:
+        self.canvas.create_text(
+            20,
+            20,
+            anchor="nw",
+            text="임시 영역: 파란색 / 확정 영역: 빨간색 / Esc 닫기",
+            fill="white",
+            font=("Segoe UI", 12, "bold"),
+        )
+        if self.draft_region:
+            self._draw_region(self.draft_region, outline="#00d7ff", width=3)
+        if self.active_region:
+            self._draw_region(self.active_region, outline="#ff405c", width=5)
+
+    def _draw_region(self, region: Region, outline: str, width: int) -> None:
+        rect = self._to_canvas_rect(region).normalized()
+        self.canvas.create_rectangle(
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            outline=outline,
+            width=width,
+        )
 
     def _on_cancel(self, event: tk.Event | None = None) -> None:
         self.root.destroy()
@@ -703,11 +771,27 @@ def run_selection(
     return selection
 
 
+def run_region_view(
+    draft_region: Region | None,
+    active_region: Region | None,
+    parent: tk.Tk | None = None,
+) -> None:
+    if parent:
+        root = tk.Toplevel(parent)
+    else:
+        root = tk.Tk()
+    RegionViewUI(root, draft_region=draft_region, active_region=active_region)
+    if parent:
+        parent.wait_window(root)
+    else:
+        root.mainloop()
+
+
 class MainWindow(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("MekiCopy")
-        self.geometry("360x280")
+        self.geometry("460x400")
         self.resizable(False, False)
         self.draft_region: Region | None = None
         self.active_region: Region | None = None
@@ -724,9 +808,11 @@ class MainWindow(tk.Tk):
         button_frame.pack(padx=12, pady=6, fill=tk.BOTH, expand=True)
 
         buttons = [
-            ("영역 지정", self._on_select_region),
+            ("임시 영역 선택", self._on_select_region),
+            ("임시 영역을 확정 영역으로 덮어쓰기", self._on_set_region),
+            ("영역 보기", self._on_view_regions),
+            ("확정 영역을 북마크에 추가", self._on_save_active_bookmark),
             ("북마크 영역 불러오기", self._on_load_bookmark),
-            ("영역 설정", self._on_set_region),
             ("인식 후 복사", self._on_ocr_copy),
         ]
         for text, command in buttons:
@@ -744,10 +830,15 @@ class MainWindow(tk.Tk):
         draft_text = self._format_region(self.draft_region)
         active_text = self._format_region(self.active_region)
         self.status_label.config(
-            text=f"현재 영역(임시): {draft_text}\n설정된 영역: {active_text}"
+            text=f"임시 영역 :\n{draft_text}\n확정 영역 :\n{active_text}"
         )
 
     def _on_select_region(self) -> None:
+        messagebox.showinfo(
+            "MekiCopy",
+            "영역을 선택하고 조정한 후 <Enter>을 눌러서 임시 영역을 설정",
+            parent=self,
+        )
         initial = self.draft_region or self.active_region
         selection = run_selection(
             initial_region=initial,
@@ -757,6 +848,39 @@ class MainWindow(tk.Tk):
         if selection:
             self.draft_region = selection
             self._update_status()
+
+    def _on_view_regions(self) -> None:
+        if not self.draft_region and not self.active_region:
+            messagebox.showerror("MekiCopy", "표시할 영역이 없습니다.")
+            return
+        run_region_view(self.draft_region, self.active_region, parent=self)
+
+    def _on_save_active_bookmark(self) -> None:
+        if not self.active_region:
+            messagebox.showerror("MekiCopy", "확정 영역이 없습니다.")
+            return
+        name = simpledialog.askstring("MekiCopy", "북마크 이름을 입력하세요", parent=self)
+        if not name:
+            return
+        name = name.strip()
+        if not name:
+            return
+        bookmarks = load_bookmarks()
+        if name in bookmarks and not messagebox.askyesno(
+            "MekiCopy",
+            "같은 이름의 북마크가 있습니다. 덮어쓸까요?",
+            parent=self,
+        ):
+            return
+        bookmarks[name] = Bookmark(
+            name=name,
+            left=self.active_region.left,
+            top=self.active_region.top,
+            width=self.active_region.width,
+            height=self.active_region.height,
+        )
+        save_bookmarks(bookmarks)
+        messagebox.showinfo("MekiCopy", "확정 영역이 북마크에 추가되었습니다!", parent=self)
 
     def _on_load_bookmark(self) -> None:
         bookmark = pick_bookmark()
