@@ -5,14 +5,29 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import tcl_tk
 
-datas = [('runtime_models', 'runtime_models')]
+datas = [('runtime_models', 'runtime_models'), ('MekiCopy.ico', '.')]
 binaries = []
-hiddenimports = ['onnxruntime.capi.onnxruntime_pybind11_state']
+hiddenimports = [
+    'onnxruntime.capi.onnxruntime_pybind11_state',
+    'tkinter',
+    'tkinter.constants',
+    'tkinter.messagebox',
+    'tkinter.simpledialog',
+]
 python_root = Path(sys.base_prefix)
+tcl_tk.tcltk_info.available = True
+tcl_tk.tcltk_info.data_files = []
 tcl_dir = python_root / 'tcl'
 if tcl_dir.exists():
     datas.append((str(tcl_dir), 'tcl'))
+    tcl_library_dir = tcl_dir / 'tcl8.6'
+    tk_library_dir = tcl_dir / 'tk8.6'
+    if tcl_library_dir.exists():
+        datas.append((str(tcl_library_dir), '_tcl_data'))
+    if tk_library_dir.exists():
+        datas.append((str(tk_library_dir), '_tk_data'))
 for dll_name in ('tcl86t.dll', 'tk86t.dll', '_tkinter.pyd'):
     dll_path = python_root / 'DLLs' / dll_name
     if dll_path.exists():
@@ -55,6 +70,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='MekiCopy.ico',
 )
 coll = COLLECT(
     exe,
