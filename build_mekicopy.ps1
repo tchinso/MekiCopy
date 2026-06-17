@@ -4,6 +4,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     throw "python 명령을 찾을 수 없습니다."
@@ -11,7 +13,10 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
 
 if (-not $SkipDependencyInstall) {
     python -m pip install --upgrade pip
-    python -m pip install pyinstaller meikiocr==0.3.2 mss pillow
+    python -m pip install --upgrade --upgrade-strategy eager pyinstaller meikiocr mss pillow
+    # onnxruntime-gpu exposes the same Python package name as onnxruntime.
+    # Install it last so PyInstaller bundles the CUDA-capable runtime DLLs.
+    python -m pip install --upgrade --upgrade-strategy eager --force-reinstall onnxruntime-gpu
 }
 
 $modelDir = Join-Path $PSScriptRoot "runtime_models\\meikiocr"
@@ -54,28 +59,11 @@ if (Test-Path ".\\build") {
 if (Test-Path ".\\dist") {
     Remove-Item ".\\dist" -Recurse -Force
 }
-if (Test-Path ".\\MekiCopy.spec") {
-    Remove-Item ".\\MekiCopy.spec" -Force
-}
 
 python -m PyInstaller `
     --noconfirm `
     --clean `
-    --windowed `
-    --onedir `
-    --name MekiCopy `
-    --collect-submodules meikiocr `
-    --collect-binaries onnxruntime `
-    --collect-submodules onnxruntime.capi `
-    --collect-data huggingface_hub `
-    --hidden-import onnxruntime.capi.onnxruntime_pybind11_state `
-    --exclude-module PyQt5 `
-    --exclude-module PyQt6 `
-    --exclude-module PySide2 `
-    --exclude-module PySide6 `
-    --exclude-module pyperclip `
-    --add-data "runtime_models;runtime_models" `
-    .\mekicopy.py
+    .\MekiCopy.spec
 
 Write-Host ""
 Write-Host "Build complete:"

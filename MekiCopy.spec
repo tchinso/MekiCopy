@@ -7,6 +7,7 @@ datas = [('runtime_models', 'runtime_models')]
 binaries = []
 hiddenimports = ['onnxruntime.capi.onnxruntime_pybind11_state']
 datas += collect_data_files('huggingface_hub')
+# Install onnxruntime-gpu last before building; its import package is onnxruntime.
 binaries += collect_dynamic_libs('onnxruntime')
 hiddenimports += collect_submodules('meikiocr')
 hiddenimports += collect_submodules('onnxruntime.capi')
