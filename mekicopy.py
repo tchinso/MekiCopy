@@ -17,6 +17,7 @@ _OCR_ENGINE = None
 _DLL_DIR_HANDLES = []
 _RUNTIME_PATH_READY = False
 _WINDOW_STREAM = None
+_ORT_PRELOAD_READY = False
 
 
 def _get_app_dir() -> str:
@@ -171,6 +172,17 @@ def _log_runtime_error(stage: str, exc: Exception) -> None:
         pass
 
 
+def _log_runtime_message(stage: str, message: str) -> None:
+    log_path = os.path.join(_get_app_dir(), "mekicopy_error.log")
+    try:
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write("\n=== INFO ===\n")
+            handle.write(f"stage: {stage}\n")
+            handle.write(message.rstrip() + "\n")
+    except OSError:
+        pass
+
+
 def _patch_onnxruntime_compat() -> None:
     try:
         import onnxruntime as ort
@@ -183,6 +195,28 @@ def _patch_onnxruntime_compat() -> None:
             return None
 
         ort.set_default_logger_severity = _noop_set_default_logger_severity
+
+
+def _preload_onnxruntime_gpu_dlls() -> None:
+    global _ORT_PRELOAD_READY
+    if _ORT_PRELOAD_READY:
+        return
+
+    _ORT_PRELOAD_READY = True
+    try:
+        import onnxruntime as ort
+    except Exception as exc:
+        _log_runtime_error("import_onnxruntime", exc)
+        return
+
+    preload_dlls = getattr(ort, "preload_dlls", None)
+    if not callable(preload_dlls):
+        return
+
+    try:
+        preload_dlls(cuda=True, cudnn=True, msvc=True)
+    except Exception as exc:
+        _log_runtime_error("preload_onnxruntime_gpu_dlls", exc)
 
 
 def _find_bundled_model(filename: str) -> str | None:
@@ -215,6 +249,45 @@ def _patch_meikiocr_model_loader(meikiocr_ocr) -> None:
     meikiocr_ocr._mekicopy_patched = True
 
 
+def _get_available_ort_providers() -> list[str]:
+    try:
+        import onnxruntime as ort
+    except Exception as exc:
+        _log_runtime_error("get_available_ort_providers", exc)
+        return []
+    try:
+        return list(ort.get_available_providers())
+    except Exception as exc:
+        _log_runtime_error("get_available_ort_providers", exc)
+        return []
+
+
+def _create_meikiocr_engine(meikiocr_ocr, provider: str):
+    engine = meikiocr_ocr.MeikiOCR(provider=provider)
+    active_provider = getattr(engine, "active_provider", provider)
+    _log_runtime_message(
+        "create_meikiocr_engine",
+        f"requested_provider: {provider}\nactive_provider: {active_provider}",
+    )
+    return engine
+
+
+def _create_best_meikiocr_engine(meikiocr_ocr):
+    available_providers = _get_available_ort_providers()
+    _log_runtime_message(
+        "onnxruntime_providers",
+        "available_providers: " + ", ".join(available_providers),
+    )
+
+    if "CUDAExecutionProvider" in available_providers:
+        try:
+            return _create_meikiocr_engine(meikiocr_ocr, "CUDAExecutionProvider")
+        except Exception as exc:
+            _log_runtime_error("create_cuda_meikiocr_engine", exc)
+
+    return _create_meikiocr_engine(meikiocr_ocr, "CPUExecutionProvider")
+
+
 def _get_ocr_engine():
     global _OCR_ENGINE
     if _OCR_ENGINE is not None:
@@ -226,10 +299,11 @@ def _get_ocr_engine():
     os.environ.setdefault("TQDM_DISABLE", "1")
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     _patch_onnxruntime_compat()
+    _preload_onnxruntime_gpu_dlls()
     import meikiocr.ocr as meikiocr_ocr
 
     _patch_meikiocr_model_loader(meikiocr_ocr)
-    _OCR_ENGINE = meikiocr_ocr.MeikiOCR(provider="CPUExecutionProvider")
+    _OCR_ENGINE = _create_best_meikiocr_engine(meikiocr_ocr)
     return _OCR_ENGINE
 
 
@@ -726,11 +800,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bookmark", help="저장된 북마크 이름으로 캡처")
     parser.add_argument("--pick-bookmark", action="store_true", help="북마크 목록에서 선택")
     parser.add_argument("--adjust-bookmark", help="북마크 영역을 불러와 미세조정 후 저장")
+    parser.add_argument("--self-test-runtime", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.self_test_runtime:
+        engine = _get_ocr_engine()
+        _log_runtime_message(
+            "self_test_runtime",
+            f"active_provider: {getattr(engine, 'active_provider', 'unknown')}",
+        )
+        return
     if args.bookmark:
         bookmarks = load_bookmarks()
         bookmark = bookmarks.get(args.bookmark)
