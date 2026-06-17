@@ -429,22 +429,24 @@ class SelectionUI:
 
     def _draw_instructions(self) -> None:
         if self.capture_on_enter:
-            text = (
-                "드래그로 영역 선택 → 가장자리 드래그로 미세 조정 → Enter 캡처 / "
-                "Esc 종료"
-            )
+            text = "드래그로 미세 조정, <Enter> 캡처"
         else:
-            text = (
-                "영역을 선택하고 조정한 후 <Enter>을 눌러서 임시 영역을 설정\n"
-                "Esc 취소"
-            )
+            text = "드래그로 미세 조정, <Enter> 설정"
         self.canvas.create_text(
-            20,
-            20,
+            26,
+            26,
+            anchor="nw",
+            text=text,
+            fill="black",
+            font=("Segoe UI", 18, "bold"),
+        )
+        self.canvas.create_text(
+            24,
+            24,
             anchor="nw",
             text=text,
             fill="white",
-            font=("Segoe UI", 12, "bold"),
+            font=("Segoe UI", 18, "bold"),
         )
 
     def _canvas_coords(self, x: int, y: int) -> tuple[int, int]:
@@ -688,9 +690,15 @@ class BookmarkPicker(tk.Tk):
         for name in sorted(self.bookmarks):
             self.listbox.insert(tk.END, name)
         self.listbox.pack(fill=tk.BOTH, expand=True, padx=10)
+        if self.listbox.size():
+            self.listbox.selection_set(0)
+            self.listbox.activate(0)
+            self.listbox.focus_set()
         button = tk.Button(self, text="선택", command=self._on_select)
         button.pack(pady=10)
         self.bind("<Return>", lambda _event: self._on_select())
+        self.listbox.bind("<Return>", lambda _event: self._on_select())
+        self.listbox.bind("<Double-Button-1>", lambda _event: self._on_select())
 
     def _on_select(self) -> None:
         selection = self.listbox.curselection()
@@ -834,11 +842,6 @@ class MainWindow(tk.Tk):
         )
 
     def _on_select_region(self) -> None:
-        messagebox.showinfo(
-            "MekiCopy",
-            "영역을 선택하고 조정한 후 <Enter>을 눌러서 임시 영역을 설정",
-            parent=self,
-        )
         initial = self.draft_region or self.active_region
         selection = run_selection(
             initial_region=initial,
@@ -886,11 +889,18 @@ class MainWindow(tk.Tk):
         bookmark = pick_bookmark()
         if not bookmark:
             return
-        self.draft_region = Region(
+        region = Region(
             left=bookmark.left,
             top=bookmark.top,
             width=bookmark.width,
             height=bookmark.height,
+        )
+        self.draft_region = region
+        self.active_region = Region(
+            left=region.left,
+            top=region.top,
+            width=region.width,
+            height=region.height,
         )
         self._update_status()
 
