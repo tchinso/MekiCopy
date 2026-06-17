@@ -2,6 +2,18 @@ import argparse
 import os
 import sys
 import tempfile
+
+if getattr(sys, "frozen", False):
+    _frozen_resource_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    os.environ.setdefault(
+        "TCL_LIBRARY",
+        os.path.join(_frozen_resource_dir, "tcl", "tcl8.6"),
+    )
+    os.environ.setdefault(
+        "TK_LIBRARY",
+        os.path.join(_frozen_resource_dir, "tcl", "tk8.6"),
+    )
+
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import messagebox, simpledialog
@@ -385,10 +397,13 @@ class SelectionUI:
 
         with mss.mss() as sct:
             monitor = sct.monitors[0]
+            self.monitors = list(sct.monitors[1:])
         self.virtual_left = monitor["left"]
         self.virtual_top = monitor["top"]
         self.virtual_width = monitor["width"]
         self.virtual_height = monitor["height"]
+        if not self.monitors:
+            self.monitors = [monitor]
 
         self._setup_root()
         self._setup_canvas()
@@ -432,22 +447,25 @@ class SelectionUI:
             text = "드래그로 미세 조정, <Enter> 캡처"
         else:
             text = "드래그로 미세 조정, <Enter> 설정"
-        self.canvas.create_text(
-            26,
-            26,
-            anchor="nw",
-            text=text,
-            fill="black",
-            font=("Segoe UI", 18, "bold"),
-        )
-        self.canvas.create_text(
-            24,
-            24,
-            anchor="nw",
-            text=text,
-            fill="white",
-            font=("Segoe UI", 18, "bold"),
-        )
+        for monitor in self.monitors:
+            x = monitor["left"] - self.virtual_left + 24
+            y = monitor["top"] - self.virtual_top + 24
+            self.canvas.create_text(
+                x + 2,
+                y + 2,
+                anchor="nw",
+                text=text,
+                fill="black",
+                font=("Segoe UI", 18, "bold"),
+            )
+            self.canvas.create_text(
+                x,
+                y,
+                anchor="nw",
+                text=text,
+                fill="white",
+                font=("Segoe UI", 18, "bold"),
+            )
 
     def _canvas_coords(self, x: int, y: int) -> tuple[int, int]:
         return x - self.virtual_left, y - self.virtual_top
@@ -601,10 +619,13 @@ class RegionViewUI:
 
         with mss.mss() as sct:
             monitor = sct.monitors[0]
+            self.monitors = list(sct.monitors[1:])
         self.virtual_left = monitor["left"]
         self.virtual_top = monitor["top"]
         self.virtual_width = monitor["width"]
         self.virtual_height = monitor["height"]
+        if not self.monitors:
+            self.monitors = [monitor]
 
         self._setup_root()
         self._setup_canvas()

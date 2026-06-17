@@ -1,4 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_submodules
@@ -6,6 +9,14 @@ from PyInstaller.utils.hooks import collect_submodules
 datas = [('runtime_models', 'runtime_models')]
 binaries = []
 hiddenimports = ['onnxruntime.capi.onnxruntime_pybind11_state']
+python_root = Path(sys.base_prefix)
+tcl_dir = python_root / 'tcl'
+if tcl_dir.exists():
+    datas.append((str(tcl_dir), 'tcl'))
+for dll_name in ('tcl86t.dll', 'tk86t.dll', '_tkinter.pyd'):
+    dll_path = python_root / 'DLLs' / dll_name
+    if dll_path.exists():
+        binaries.append((str(dll_path), '.'))
 datas += collect_data_files('huggingface_hub')
 # Install onnxruntime-gpu last before building; its import package is onnxruntime.
 binaries += collect_dynamic_libs('onnxruntime')
