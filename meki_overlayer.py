@@ -8,7 +8,6 @@ import os
 import queue
 import shutil
 import sys
-import tempfile
 import threading
 import traceback
 from dataclasses import dataclass
@@ -16,6 +15,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+from runtime_paths import log_dir as runtime_log_dir
+from runtime_paths import path_for_tcl, tk_runtime_roots
 
 TK_RUNTIME_DIRNAME = "MekiCopyRuntime"
 _DLL_DIR_HANDLES = []
@@ -81,17 +83,8 @@ def _tcl_runtime_can_read(path: str) -> bool:
         return os.path.exists(path)
 
 
-def _app_data_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA")
-    if base:
-        return Path(base) / "MekiOverlayer"
-    return Path.home() / "AppData" / "Local" / "MekiOverlayer"
-
-
 def _log_dir(kind: str) -> Path:
-    path = _app_data_dir() / kind
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return runtime_log_dir("MekiOverlayer", kind)
 
 
 def _timestamp() -> str:
@@ -147,13 +140,6 @@ def _prepare_tk_library_paths() -> None:
     if os.name != "nt":
         return
 
-    def is_ascii_path(path: str) -> bool:
-        try:
-            path.encode("ascii")
-            return True
-        except UnicodeEncodeError:
-            return False
-
     resource_dir = _get_resource_dir()
     tcl_candidates = [
         os.path.join(resource_dir, "_tcl_data"),
@@ -184,20 +170,22 @@ def _prepare_tk_library_paths() -> None:
     if not source_tcl or not source_tk:
         return
 
-    safe_roots = []
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        safe_roots.append(os.path.join(local_appdata, TK_RUNTIME_DIRNAME))
-    safe_roots.extend(
-        [
-            os.path.join(tempfile.gettempdir(), TK_RUNTIME_DIRNAME),
-            os.path.join(os.path.expanduser("~"), TK_RUNTIME_DIRNAME),
-        ]
-    )
+    def use_tk_paths(tcl_path: str, tk_path: str) -> bool:
+        tcl_env = path_for_tcl(tcl_path)
+        tk_env = path_for_tcl(tk_path)
+        safe_init = os.path.join(tcl_env, "init.tcl")
+        safe_tk_script = os.path.join(tk_env, "tk.tcl")
+        if _tcl_runtime_can_read(safe_init) and _tcl_runtime_can_read(safe_tk_script):
+            os.environ["TCL_LIBRARY"] = tcl_env.replace("\\", "/")
+            os.environ["TK_LIBRARY"] = tk_env.replace("\\", "/")
+            return True
+        return False
 
-    for safe_root in safe_roots:
-        if not is_ascii_path(safe_root):
-            continue
+    if use_tk_paths(source_tcl, source_tk):
+        return
+
+    for safe_root_path in tk_runtime_roots(TK_RUNTIME_DIRNAME):
+        safe_root = str(safe_root_path)
         safe_tcl = os.path.join(safe_root, "tcl8.6")
         safe_tk = os.path.join(safe_root, "tk8.6")
         try:
@@ -205,20 +193,12 @@ def _prepare_tk_library_paths() -> None:
                 shutil.copytree(source_tcl, safe_tcl, dirs_exist_ok=True)
             if not os.path.exists(os.path.join(safe_tk, "tk.tcl")):
                 shutil.copytree(source_tk, safe_tk, dirs_exist_ok=True)
-            safe_init = os.path.join(safe_tcl, "init.tcl")
-            safe_tk_script = os.path.join(safe_tk, "tk.tcl")
-            if _tcl_runtime_can_read(safe_init) and _tcl_runtime_can_read(safe_tk_script):
-                os.environ["TCL_LIBRARY"] = safe_tcl.replace("\\", "/")
-                os.environ["TK_LIBRARY"] = safe_tk.replace("\\", "/")
+            if use_tk_paths(safe_tcl, safe_tk):
                 return
         except OSError as exc:
             log_error("prepare_tk_library_paths", exc)
 
-    source_init = os.path.join(source_tcl, "init.tcl")
-    source_tk_script = os.path.join(source_tk, "tk.tcl")
-    if _tcl_runtime_can_read(source_init) and _tcl_runtime_can_read(source_tk_script):
-        os.environ["TCL_LIBRARY"] = source_tcl.replace("\\", "/")
-        os.environ["TK_LIBRARY"] = source_tk.replace("\\", "/")
+    use_tk_paths(source_tcl, source_tk)
 
 
 @dataclass

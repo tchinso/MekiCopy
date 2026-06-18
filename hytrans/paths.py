@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
+
+from runtime_paths import writable_app_data_dir
 
 
 def is_frozen() -> bool:
@@ -39,18 +40,15 @@ def models_dir() -> Path:
     return resource_root() / "models"
 
 
-def local_appdata_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA")
-    if base:
-        return Path(base) / "HYTrans"
-    return Path.home() / "AppData" / "Local" / "HYTrans"
+def app_data_dir() -> Path:
+    return writable_app_data_dir("HYTrans")
 
 
 def chrome_profile_dir() -> Path:
-    return local_appdata_dir() / "ChromeProfile"
+    return app_data_dir() / "ChromeProfile"
 
 
 def log_dir(kind: str) -> Path:
-    directory = local_appdata_dir() / kind
+    directory = app_data_dir() / kind
     directory.mkdir(parents=True, exist_ok=True)
     return directory

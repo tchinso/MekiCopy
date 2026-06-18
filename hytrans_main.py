@@ -10,7 +10,7 @@ import urllib.request
 
 import uvicorn
 
-from hytrans.app import app, state
+from hytrans.app import app, configure_worker_opener, state
 from hytrans.browser import BrowserManager
 from hytrans.config import DEFAULT_OVERLAY_URL, DEFAULT_PORT, HOST, configure_server
 from hytrans.logging_setup import configure_logging, debug, error
@@ -75,6 +75,8 @@ def main() -> int:
 
     browser = BrowserManager()
     server: uvicorn.Server | None = None
+    worker_url = f"http://{args.host}:{args.port}/worker.html"
+    configure_worker_opener(lambda: browser.start(worker_url))
     try:
         ensure_port_available(args.host, args.port)
         config = uvicorn.Config(
@@ -93,7 +95,7 @@ def main() -> int:
 
         if not args.no_browser:
             state.state = "BROWSER_OPENING"
-            browser.start(f"http://{args.host}:{args.port}/worker.html")
+            browser.start(worker_url)
 
         debug("main", f"server running on {args.host}:{args.port}")
         while server_thread.is_alive():

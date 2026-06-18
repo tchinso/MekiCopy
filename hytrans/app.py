@@ -4,6 +4,7 @@ import asyncio
 import json
 import urllib.error
 import urllib.request
+from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -30,6 +31,7 @@ app = FastAPI(title="HYTrans")
 state = AppState()
 translation_queue = TranslationQueue()
 queue_task: asyncio.Task | None = None
+worker_opener: Callable[[], None] | None = None
 
 
 class TranslateBody(BaseModel):
@@ -54,6 +56,11 @@ def _json_response(ok: bool, text: str = "") -> dict[str, object]:
         "model": state.model,
         "dtype": state.dtype,
     }
+
+
+def configure_worker_opener(opener: Callable[[], None] | None) -> None:
+    global worker_opener
+    worker_opener = opener
 
 
 def _post_overlay_text(url: str, text: str) -> None:
@@ -130,6 +137,24 @@ async def health() -> dict[str, object]:
 @app.get("/ready")
 async def ready() -> dict[str, object]:
     return state.as_ready_payload()
+
+
+@app.post("/worker/reopen")
+async def reopen_worker() -> dict[str, object]:
+    if state.worker_connected:
+        return {"ok": True, "workerConnected": True, "state": state.state}
+    if worker_opener is None:
+        raise HTTPException(status_code=503, detail="worker opener is unavailable")
+    try:
+        state.state = "BROWSER_OPENING"
+        state.error = None
+        await asyncio.to_thread(worker_opener)
+        return {"ok": True, "workerConnected": False, "state": state.state}
+    except Exception as exc:
+        state.state = "ERROR"
+        state.error = str(exc)
+        error("worker_reopen", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/config")

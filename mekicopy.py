@@ -31,6 +31,7 @@ import traceback
 
 from PIL import Image
 import mss
+from runtime_paths import path_for_tcl, tk_runtime_roots
 
 EDGE_GRAB_PX = 8
 MIN_SIZE_PX = 10
@@ -39,8 +40,7 @@ SELECTION_INSTRUCTION_FONT_SIZE = 36
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 ICON_FILENAME = "MekiCopy.ico"
 HYTRANS_DEFAULT_PORT = 6550
-OVERLAYER_PORT = 6551
-OVERLAYER_SHOW_URL = f"http://127.0.0.1:{OVERLAYER_PORT}/show"
+OVERLAYER_DEFAULT_PORT = 6551
 _OCR_ENGINE = None
 _DLL_DIR_HANDLES = []
 _RUNTIME_PATH_READY = False
@@ -103,13 +103,6 @@ def _prepare_tk_library_paths() -> None:
     if os.name != "nt":
         return
 
-    def is_ascii_path(path: str) -> bool:
-        try:
-            path.encode("ascii")
-            return True
-        except UnicodeEncodeError:
-            return False
-
     resource_dir = _get_resource_dir()
     tcl_candidates = [
         os.path.join(resource_dir, "_tcl_data"),
@@ -140,20 +133,22 @@ def _prepare_tk_library_paths() -> None:
     if not source_tcl or not source_tk:
         return
 
-    safe_roots = []
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        safe_roots.append(os.path.join(local_appdata, "MekiCopyRuntime"))
-    safe_roots.extend(
-        [
-            os.path.join(tempfile.gettempdir(), "MekiCopyRuntime"),
-            os.path.join(os.path.expanduser("~"), "MekiCopyRuntime"),
-        ]
-    )
+    def use_tk_paths(tcl_path: str, tk_path: str) -> bool:
+        tcl_env = path_for_tcl(tcl_path)
+        tk_env = path_for_tcl(tk_path)
+        safe_init = os.path.join(tcl_env, "init.tcl")
+        safe_tk_script = os.path.join(tk_env, "tk.tcl")
+        if _tcl_runtime_can_read(safe_init) and _tcl_runtime_can_read(safe_tk_script):
+            os.environ["TCL_LIBRARY"] = tcl_env.replace("\\", "/")
+            os.environ["TK_LIBRARY"] = tk_env.replace("\\", "/")
+            return True
+        return False
 
-    for safe_root in safe_roots:
-        if not is_ascii_path(safe_root):
-            continue
+    if use_tk_paths(source_tcl, source_tk):
+        return
+
+    for safe_root_path in tk_runtime_roots("MekiCopyRuntime"):
+        safe_root = str(safe_root_path)
         safe_tcl = os.path.join(safe_root, "tcl8.6")
         safe_tk = os.path.join(safe_root, "tk8.6")
         try:
@@ -161,20 +156,12 @@ def _prepare_tk_library_paths() -> None:
                 shutil.copytree(source_tcl, safe_tcl, dirs_exist_ok=True)
             if not os.path.exists(os.path.join(safe_tk, "tk.tcl")):
                 shutil.copytree(source_tk, safe_tk, dirs_exist_ok=True)
-            safe_init = os.path.join(safe_tcl, "init.tcl")
-            safe_tk_script = os.path.join(safe_tk, "tk.tcl")
-            if _tcl_runtime_can_read(safe_init) and _tcl_runtime_can_read(safe_tk_script):
-                os.environ["TCL_LIBRARY"] = safe_tcl
-                os.environ["TK_LIBRARY"] = safe_tk
+            if use_tk_paths(safe_tcl, safe_tk):
                 return
         except OSError as exc:
             _log_runtime_error("prepare_tk_library_paths", exc)
 
-    source_init = os.path.join(source_tcl, "init.tcl")
-    source_tk_script = os.path.join(source_tk, "tk.tcl")
-    if _tcl_runtime_can_read(source_init) and _tcl_runtime_can_read(source_tk_script):
-        os.environ["TCL_LIBRARY"] = source_tcl
-        os.environ["TK_LIBRARY"] = source_tk
+    use_tk_paths(source_tcl, source_tk)
 
 
 def _prepare_native_runtime_paths() -> None:
@@ -279,6 +266,7 @@ class AppSettings:
     detached_fixed_height: int = 160
     overlay_translation_mode: bool = False
     hytrans_port: int = HYTRANS_DEFAULT_PORT
+    overlayer_port: int = OVERLAYER_DEFAULT_PORT
     overlayer_always_on_top: bool = True
     overlayer_hide_titlebar: bool = False
     overlayer_fixed_size: bool = False
@@ -288,6 +276,21 @@ class AppSettings:
     overlayer_text_size: int = 28
     overlayer_text_font: str = "Malgun Gothic"
     debug_logging: bool = False
+
+
+def _normalize_port(port: int, fallback: int) -> int:
+    try:
+        value = int(port)
+    except (TypeError, ValueError):
+        value = fallback
+    return max(1, min(65535, value))
+
+
+def _alternate_port(blocked_port: int) -> int:
+    for candidate in (OVERLAYER_DEFAULT_PORT, HYTRANS_DEFAULT_PORT, 6552, 6553):
+        if candidate != blocked_port:
+            return candidate
+    return 65535 if blocked_port != 65535 else 65534
 
 
 def load_settings() -> AppSettings:
@@ -337,6 +340,9 @@ def load_settings() -> AppSettings:
     settings.hytrans_port = parser.getint(
         section, "hytrans_port", fallback=settings.hytrans_port
     )
+    settings.overlayer_port = parser.getint(
+        section, "overlayer_port", fallback=settings.overlayer_port
+    )
     settings.overlayer_always_on_top = parser.getboolean(
         section,
         "overlayer_always_on_top",
@@ -372,7 +378,12 @@ def load_settings() -> AppSettings:
     settings.debug_logging = parser.getboolean(
         section, "debug_logging", fallback=settings.debug_logging
     )
-    settings.hytrans_port = max(1, min(65535, settings.hytrans_port))
+    settings.hytrans_port = _normalize_port(settings.hytrans_port, HYTRANS_DEFAULT_PORT)
+    settings.overlayer_port = _normalize_port(
+        settings.overlayer_port, OVERLAYER_DEFAULT_PORT
+    )
+    if settings.hytrans_port == settings.overlayer_port:
+        settings.overlayer_port = _alternate_port(settings.hytrans_port)
     settings.overlayer_bg_opacity = max(0.1, min(1.0, settings.overlayer_bg_opacity))
     settings.overlayer_text_size = max(8, min(96, settings.overlayer_text_size))
     return settings
@@ -392,6 +403,7 @@ def save_settings(settings: AppSettings) -> None:
         "detached_fixed_height": str(settings.detached_fixed_height),
         "overlay_translation_mode": str(settings.overlay_translation_mode).lower(),
         "hytrans_port": str(settings.hytrans_port),
+        "overlayer_port": str(settings.overlayer_port),
         "overlayer_always_on_top": str(settings.overlayer_always_on_top).lower(),
         "overlayer_hide_titlebar": str(settings.overlayer_hide_titlebar).lower(),
         "overlayer_fixed_size": str(settings.overlayer_fixed_size).lower(),
@@ -1462,6 +1474,7 @@ class SettingsWindow(tk.Toplevel):
         )
         self.overlay_mode_var = tk.BooleanVar(value=settings.overlay_translation_mode)
         self.hytrans_port_var = tk.IntVar(value=settings.hytrans_port)
+        self.overlayer_port_var = tk.IntVar(value=settings.overlayer_port)
         self.overlayer_topmost_var = tk.BooleanVar(value=settings.overlayer_always_on_top)
         self.overlayer_hide_titlebar_var = tk.BooleanVar(
             value=settings.overlayer_hide_titlebar
@@ -1545,6 +1558,20 @@ class SettingsWindow(tk.Toplevel):
         )
         port_spin.pack(side=tk.RIGHT)
         self.overlay_only_widgets.extend([port_label, port_spin])
+
+        overlayer_port_row = tk.Frame(overlay_frame)
+        overlayer_port_row.pack(fill=tk.X, pady=3)
+        overlayer_port_label = tk.Label(overlayer_port_row, text="MekiOverlayer 포트")
+        overlayer_port_label.pack(side=tk.LEFT)
+        overlayer_port_spin = tk.Spinbox(
+            overlayer_port_row,
+            from_=1,
+            to=65535,
+            width=8,
+            textvariable=self.overlayer_port_var,
+        )
+        overlayer_port_spin.pack(side=tk.RIGHT)
+        self.overlay_only_widgets.extend([overlayer_port_label, overlayer_port_spin])
 
         overlayer_options = [
             ("MekiOverlayer를 항상 위로", self.overlayer_topmost_var),
@@ -1685,9 +1712,18 @@ class SettingsWindow(tk.Toplevel):
                     except tk.TclError:
                         pass
 
+    def _read_port(self, variable: tk.IntVar, label: str) -> int:
+        try:
+            return _normalize_port(variable.get(), 0)
+        except (tk.TclError, ValueError):
+            raise ValueError(f"{label} 포트 번호는 1부터 65535 사이의 숫자여야 합니다.")
+
     def _collect_settings(self) -> AppSettings:
         current = self.owner.settings
-        port = max(1, min(65535, int(self.hytrans_port_var.get())))
+        hytrans_port = self._read_port(self.hytrans_port_var, "HYTrans")
+        overlayer_port = self._read_port(self.overlayer_port_var, "MekiOverlayer")
+        if hytrans_port == overlayer_port:
+            raise ValueError("HYTrans와 MekiOverlayer의 포트 번호는 같을 수 없습니다.")
         opacity = max(0.1, min(1.0, self.overlayer_opacity_var.get() / 100.0))
         text_size = max(8, min(96, int(self.overlayer_text_size_var.get())))
         return AppSettings(
@@ -1701,7 +1737,8 @@ class SettingsWindow(tk.Toplevel):
             detached_fixed_width=current.detached_fixed_width,
             detached_fixed_height=current.detached_fixed_height,
             overlay_translation_mode=self.overlay_mode_var.get(),
-            hytrans_port=port,
+            hytrans_port=hytrans_port,
+            overlayer_port=overlayer_port,
             overlayer_always_on_top=self.overlayer_topmost_var.get(),
             overlayer_hide_titlebar=self.overlayer_hide_titlebar_var.get(),
             overlayer_fixed_size=self.overlayer_fixed_size_var.get(),
@@ -1716,7 +1753,11 @@ class SettingsWindow(tk.Toplevel):
     def _on_save(self) -> None:
         if self.owner.detached_window:
             self.owner.detached_window.capture_geometry()
-        settings = self._collect_settings()
+        try:
+            settings = self._collect_settings()
+        except ValueError as exc:
+            messagebox.showerror("MekiCopy", str(exc), parent=self)
+            return
         if settings.detached_fixed_size and self.owner.detached_window:
             width, height = self.owner.detached_window.current_size()
             settings.detached_fixed_width = width
@@ -1725,7 +1766,11 @@ class SettingsWindow(tk.Toplevel):
         self._on_close()
 
     def _on_test_connection(self) -> None:
-        settings = self._collect_settings()
+        try:
+            settings = self._collect_settings()
+        except ValueError as exc:
+            messagebox.showerror("MekiCopy", str(exc), parent=self)
+            return
         self.owner.apply_settings(settings, persist=True)
         self.owner._on_test_overlay_connection(parent=self)
 
@@ -2143,7 +2188,10 @@ class MainWindow(tk.Tk):
         return f"http://127.0.0.1:{self.settings.hytrans_port}"
 
     def _overlayer_base_url(self) -> str:
-        return f"http://127.0.0.1:{OVERLAYER_PORT}"
+        return f"http://127.0.0.1:{self.settings.overlayer_port}"
+
+    def _overlayer_show_url(self) -> str:
+        return f"{self._overlayer_base_url()}/show"
 
     def _overlayer_config_payload(self) -> dict:
         return {
@@ -2175,6 +2223,23 @@ class MainWindow(tk.Tk):
     def _on_start_hytrans(self) -> None:
         try:
             _json_request(f"{self._hytrans_base_url()}/health", timeout=1)
+            try:
+                ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=1)
+                if not (ready.get("workerConnected") or ready.get("ready")):
+                    _json_request(
+                        f"{self._hytrans_base_url()}/worker/reopen",
+                        {},
+                        timeout=3,
+                        method="POST",
+                    )
+                    messagebox.showinfo(
+                        "MekiCopy",
+                        "HYTrans Worker 창을 다시 열었습니다.",
+                        parent=self,
+                    )
+                    return
+            except Exception as exc:
+                _log_runtime_error("restart_hytrans_worker", exc)
             messagebox.showinfo("MekiCopy", "HYTrans 서버가 이미 실행 중입니다.", parent=self)
             return
         except Exception:
@@ -2193,7 +2258,7 @@ class MainWindow(tk.Tk):
             "--port",
             str(self.settings.hytrans_port),
             "--overlay-url",
-            OVERLAYER_SHOW_URL,
+            self._overlayer_show_url(),
         ]
         if self.settings.debug_logging:
             command.append("--debug-log")
@@ -2234,7 +2299,7 @@ class MainWindow(tk.Tk):
         cfg = self._overlayer_config_payload()
         command += [
             "--port",
-            str(OVERLAYER_PORT),
+            str(self.settings.overlayer_port),
             "--topmost",
             "1" if cfg["topmost"] else "0",
             "--hide-titlebar",
@@ -2286,7 +2351,7 @@ class MainWindow(tk.Tk):
         try:
             _json_request(
                 f"{self._hytrans_base_url()}/overlay-test",
-                {"text": "MekiCopy 연결 테스트", "overlayUrl": OVERLAYER_SHOW_URL},
+                {"text": "MekiCopy 연결 테스트", "overlayUrl": self._overlayer_show_url()},
                 timeout=5,
                 method="POST",
             )
@@ -2304,7 +2369,7 @@ class MainWindow(tk.Tk):
     def _request_translate_and_show(self, text: str) -> dict:
         return _json_request(
             f"{self._hytrans_base_url()}/translate-and-show",
-            {"text": text, "overlayUrl": OVERLAYER_SHOW_URL},
+            {"text": text, "overlayUrl": self._overlayer_show_url()},
             timeout=130,
             method="POST",
         )

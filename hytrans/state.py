@@ -21,6 +21,7 @@ class AppState:
     def as_ready_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "ready": self.worker_ready,
+            "workerConnected": self.worker_connected,
             "state": self.state,
             "device": self.device,
             "model": self.model,
@@ -31,4 +32,3 @@ class AppState:
         if self.warning:
             payload["warning"] = self.warning
         return payload
-
