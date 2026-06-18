@@ -1,0 +1,251 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import urllib.error
+import urllib.request
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from .config import (
+    MAX_INPUT_CHARS,
+    TRANSLATE_TIMEOUT_SECONDS,
+    options,
+    runtime_config,
+)
+from .logging_setup import debug, error
+from .paths import assets_dir, models_dir
+from .queue import TranslationQueue
+from .state import AppState
+
+app = FastAPI(title="HYTrans")
+state = AppState()
+translation_queue = TranslationQueue()
+queue_task: asyncio.Task | None = None
+
+
+class TranslateBody(BaseModel):
+    text: str
+    overlayUrl: str | None = None
+
+
+def _validate_text(text: str) -> str:
+    text = text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is empty")
+    if len(text) > MAX_INPUT_CHARS:
+        raise HTTPException(status_code=413, detail="text is too long")
+    return text
+
+
+def _json_response(ok: bool, text: str = "") -> dict[str, object]:
+    return {
+        "ok": ok,
+        "text": text,
+        "device": state.device,
+        "model": state.model,
+        "dtype": state.dtype,
+    }
+
+
+def _post_overlay_text(url: str, text: str) -> None:
+    data = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        if response.status >= 400:
+            raise RuntimeError(f"overlay returned HTTP {response.status}")
+
+
+async def _send_to_overlay(text: str, overlay_url: str | None = None) -> None:
+    target = overlay_url or options.overlay_url
+    debug("overlay_send", f"url: {target}\nchars: {len(text)}")
+    await asyncio.to_thread(_post_overlay_text, target, text)
+
+
+async def _translate_text(text: str) -> str:
+    if not state.worker_ready:
+        raise HTTPException(status_code=503, detail="model is not ready")
+    try:
+        state.state = "BUSY"
+        result = await translation_queue.submit(
+            text=text,
+            timeout=TRANSLATE_TIMEOUT_SECONDS,
+        )
+        state.state = "READY"
+        debug("translation_success", f"input_chars: {len(text)}\noutput_chars: {len(result)}")
+        return result
+    except asyncio.TimeoutError:
+        state.state = "READY" if state.worker_ready else "ERROR"
+        raise HTTPException(status_code=504, detail="translation timeout")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        state.state = "ERROR"
+        state.error = str(exc)
+        error("translate", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    global queue_task
+    state.state = "STARTING"
+    config = runtime_config()
+    queue_task = asyncio.create_task(
+        translation_queue.run(max_new_tokens=config.maxNewTokens)
+    )
+    debug("startup", f"model_mode: {config.modelMode}\nport: {options.port}")
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    state.state = "STOPPING"
+    translation_queue.stop()
+    if queue_task:
+        queue_task.cancel()
+
+
+@app.get("/health")
+async def health() -> dict[str, object]:
+    return {
+        "ok": True,
+        "app": "HYTrans",
+        "server": "running",
+    }
+
+
+@app.get("/ready")
+async def ready() -> dict[str, object]:
+    return state.as_ready_payload()
+
+
+@app.get("/config")
+async def get_config() -> dict[str, object]:
+    return runtime_config().model_dump()
+
+
+@app.get("/worker.html")
+async def worker_html() -> FileResponse:
+    return FileResponse(assets_dir() / "worker.html")
+
+
+@app.get("/translate", response_model=None)
+async def translate_get(
+    text: str = "",
+    format: str = "text",
+    source: str | None = None,
+    target: str | None = None,
+) -> PlainTextResponse | dict[str, object]:
+    del source, target
+    clean_text = _validate_text(text)
+    result = await _translate_text(clean_text)
+    if format == "json":
+        return _json_response(True, result)
+    return PlainTextResponse(result, media_type="text/plain; charset=utf-8")
+
+
+@app.post("/translate", response_model=None)
+async def translate_post(
+    body: TranslateBody,
+    format: str = "text",
+) -> PlainTextResponse | dict[str, object]:
+    clean_text = _validate_text(body.text)
+    result = await _translate_text(clean_text)
+    if format == "json":
+        return _json_response(True, result)
+    return PlainTextResponse(result, media_type="text/plain; charset=utf-8")
+
+
+@app.post("/translate-and-show")
+async def translate_and_show(body: TranslateBody) -> dict[str, object]:
+    clean_text = _validate_text(body.text)
+    result = await _translate_text(clean_text)
+    try:
+        await _send_to_overlay(result, body.overlayUrl)
+    except Exception as exc:
+        error("overlay_send", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return _json_response(True, result)
+
+
+@app.post("/overlay-test")
+async def overlay_test(body: TranslateBody) -> dict[str, object]:
+    clean_text = _validate_text(body.text)
+    try:
+        await _send_to_overlay(clean_text, body.overlayUrl)
+    except Exception as exc:
+        error("overlay_test", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, "text": clean_text}
+
+
+@app.websocket("/ws/worker")
+async def worker_ws(websocket: WebSocket) -> None:
+    await websocket.accept()
+    state.worker_connected = True
+    state.worker_ready = False
+    state.state = "WORKER_CONNECTED"
+    translation_queue.set_worker(websocket)
+    debug("worker_connected", "websocket connected")
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            message = json.loads(raw)
+            msg_type = message.get("type")
+
+            if msg_type == "loading":
+                state.state = "WORKER_LOADING"
+                debug("worker_loading", str(message.get("message", "")))
+
+            elif msg_type == "ready":
+                state.worker_ready = True
+                state.state = "READY"
+                state.device = message.get("device")
+                state.model = message.get("model")
+                state.dtype = message.get("dtype")
+                state.model_mode = message.get("modelMode")
+                state.warning = message.get("warning")
+                state.error = None
+                debug("worker_ready", json.dumps(message, ensure_ascii=False))
+
+            elif msg_type == "result":
+                translation_queue.resolve(
+                    request_id=message["id"],
+                    text=message.get("text", ""),
+                )
+
+            elif msg_type == "error":
+                translation_queue.reject(
+                    request_id=message["id"],
+                    message=message.get("message", "worker error"),
+                )
+
+            elif msg_type == "fatal":
+                state.worker_ready = False
+                state.state = "ERROR"
+                state.error = message.get("message", "worker fatal error")
+                error("worker_fatal", state.error)
+
+    except WebSocketDisconnect:
+        state.worker_connected = False
+        state.worker_ready = False
+        state.state = "ERROR"
+        state.error = "worker disconnected"
+        translation_queue.clear_worker()
+        debug("worker_disconnected", "websocket disconnected")
+
+
+if assets_dir().exists():
+    app.mount("/assets", StaticFiles(directory=assets_dir()), name="assets")
+
+if models_dir().exists():
+    app.mount("/models", StaticFiles(directory=models_dir()), name="models")

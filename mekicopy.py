@@ -1,10 +1,15 @@
 import argparse
 import configparser
 import ctypes
+import datetime as _dt
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 
 if getattr(sys, "frozen", False):
     _frozen_resource_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
@@ -19,7 +24,7 @@ if getattr(sys, "frozen", False):
 
 import tkinter as tk
 from dataclasses import dataclass
-from tkinter import messagebox, simpledialog
+from tkinter import colorchooser, font as tkfont, messagebox, simpledialog
 from ctypes import wintypes
 from typing import Callable
 import traceback
@@ -33,6 +38,9 @@ OCR_BUTTON_HEIGHT_PX = 400
 SELECTION_INSTRUCTION_FONT_SIZE = 36
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 ICON_FILENAME = "MekiCopy.ico"
+HYTRANS_DEFAULT_PORT = 6550
+OVERLAYER_PORT = 6551
+OVERLAYER_SHOW_URL = f"http://127.0.0.1:{OVERLAYER_PORT}/show"
 _OCR_ENGINE = None
 _DLL_DIR_HANDLES = []
 _RUNTIME_PATH_READY = False
@@ -74,6 +82,13 @@ def _prepare_tk_library_paths() -> None:
     if os.name != "nt":
         return
 
+    def is_ascii_path(path: str) -> bool:
+        try:
+            path.encode("ascii")
+            return True
+        except UnicodeEncodeError:
+            return False
+
     resource_dir = _get_resource_dir()
     tcl_candidates = [
         os.path.join(resource_dir, "_tcl_data"),
@@ -104,20 +119,35 @@ def _prepare_tk_library_paths() -> None:
     if not source_tcl or not source_tk:
         return
 
-    safe_root = os.path.join(os.path.expanduser("~"), "MekiCopyRuntime")
-    safe_tcl = os.path.join(safe_root, "tcl8.6")
-    safe_tk = os.path.join(safe_root, "tk8.6")
-    try:
-        if not os.path.exists(os.path.join(safe_tcl, "init.tcl")):
-            shutil.copytree(source_tcl, safe_tcl, dirs_exist_ok=True)
-        if not os.path.exists(os.path.join(safe_tk, "tk.tcl")):
-            shutil.copytree(source_tk, safe_tk, dirs_exist_ok=True)
-        os.environ["TCL_LIBRARY"] = safe_tcl
-        os.environ["TK_LIBRARY"] = safe_tk
-    except OSError as exc:
-        _log_runtime_error("prepare_tk_library_paths", exc)
-        os.environ["TCL_LIBRARY"] = source_tcl
-        os.environ["TK_LIBRARY"] = source_tk
+    safe_roots = []
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        safe_roots.append(os.path.join(local_appdata, "MekiCopyRuntime"))
+    safe_roots.extend(
+        [
+            os.path.join(tempfile.gettempdir(), "MekiCopyRuntime"),
+            os.path.join(os.path.expanduser("~"), "MekiCopyRuntime"),
+        ]
+    )
+
+    for safe_root in safe_roots:
+        if not is_ascii_path(safe_root):
+            continue
+        safe_tcl = os.path.join(safe_root, "tcl8.6")
+        safe_tk = os.path.join(safe_root, "tk8.6")
+        try:
+            if not os.path.exists(os.path.join(safe_tcl, "init.tcl")):
+                shutil.copytree(source_tcl, safe_tcl, dirs_exist_ok=True)
+            if not os.path.exists(os.path.join(safe_tk, "tk.tcl")):
+                shutil.copytree(source_tk, safe_tk, dirs_exist_ok=True)
+            os.environ["TCL_LIBRARY"] = safe_tcl
+            os.environ["TK_LIBRARY"] = safe_tk
+            return
+        except OSError as exc:
+            _log_runtime_error("prepare_tk_library_paths", exc)
+
+    os.environ["TCL_LIBRARY"] = source_tcl
+    os.environ["TK_LIBRARY"] = source_tk
 
 
 def _prepare_native_runtime_paths() -> None:
@@ -220,6 +250,17 @@ class AppSettings:
     detached_geometry: str = DETACHED_DEFAULT_GEOMETRY
     detached_fixed_width: int = 260
     detached_fixed_height: int = 160
+    overlay_translation_mode: bool = False
+    hytrans_port: int = HYTRANS_DEFAULT_PORT
+    overlayer_always_on_top: bool = True
+    overlayer_hide_titlebar: bool = False
+    overlayer_fixed_size: bool = False
+    overlayer_bg_color: str = "#111111"
+    overlayer_bg_opacity: float = 0.78
+    overlayer_text_color: str = "#ffffff"
+    overlayer_text_size: int = 28
+    overlayer_text_font: str = "Malgun Gothic"
+    debug_logging: bool = False
 
 
 def load_settings() -> AppSettings:
@@ -261,6 +302,52 @@ def load_settings() -> AppSettings:
     settings.detached_fixed_height = parser.getint(
         section, "detached_fixed_height", fallback=settings.detached_fixed_height
     )
+    settings.overlay_translation_mode = parser.getboolean(
+        section,
+        "overlay_translation_mode",
+        fallback=settings.overlay_translation_mode,
+    )
+    settings.hytrans_port = parser.getint(
+        section, "hytrans_port", fallback=settings.hytrans_port
+    )
+    settings.overlayer_always_on_top = parser.getboolean(
+        section,
+        "overlayer_always_on_top",
+        fallback=settings.overlayer_always_on_top,
+    )
+    settings.overlayer_hide_titlebar = parser.getboolean(
+        section,
+        "overlayer_hide_titlebar",
+        fallback=settings.overlayer_hide_titlebar,
+    )
+    settings.overlayer_fixed_size = parser.getboolean(
+        section,
+        "overlayer_fixed_size",
+        fallback=settings.overlayer_fixed_size,
+    )
+    settings.overlayer_bg_color = parser.get(
+        section, "overlayer_bg_color", fallback=settings.overlayer_bg_color
+    )
+    settings.overlayer_bg_opacity = parser.getfloat(
+        section,
+        "overlayer_bg_opacity",
+        fallback=settings.overlayer_bg_opacity,
+    )
+    settings.overlayer_text_color = parser.get(
+        section, "overlayer_text_color", fallback=settings.overlayer_text_color
+    )
+    settings.overlayer_text_size = parser.getint(
+        section, "overlayer_text_size", fallback=settings.overlayer_text_size
+    )
+    settings.overlayer_text_font = parser.get(
+        section, "overlayer_text_font", fallback=settings.overlayer_text_font
+    )
+    settings.debug_logging = parser.getboolean(
+        section, "debug_logging", fallback=settings.debug_logging
+    )
+    settings.hytrans_port = max(1, min(65535, settings.hytrans_port))
+    settings.overlayer_bg_opacity = max(0.1, min(1.0, settings.overlayer_bg_opacity))
+    settings.overlayer_text_size = max(8, min(96, settings.overlayer_text_size))
     return settings
 
 
@@ -276,6 +363,17 @@ def save_settings(settings: AppSettings) -> None:
         "detached_geometry": settings.detached_geometry,
         "detached_fixed_width": str(settings.detached_fixed_width),
         "detached_fixed_height": str(settings.detached_fixed_height),
+        "overlay_translation_mode": str(settings.overlay_translation_mode).lower(),
+        "hytrans_port": str(settings.hytrans_port),
+        "overlayer_always_on_top": str(settings.overlayer_always_on_top).lower(),
+        "overlayer_hide_titlebar": str(settings.overlayer_hide_titlebar).lower(),
+        "overlayer_fixed_size": str(settings.overlayer_fixed_size).lower(),
+        "overlayer_bg_color": settings.overlayer_bg_color,
+        "overlayer_bg_opacity": str(settings.overlayer_bg_opacity),
+        "overlayer_text_color": settings.overlayer_text_color,
+        "overlayer_text_size": str(settings.overlayer_text_size),
+        "overlayer_text_font": settings.overlayer_text_font,
+        "debug_logging": str(settings.debug_logging).lower(),
     }
     with open(SETTINGS_FILE, "w", encoding="utf-8") as handle:
         parser.write(handle)
@@ -320,11 +418,31 @@ def postprocess_text(text: str) -> str:
     return " ".join(text.split())
 
 
+def _log_timestamp() -> str:
+    return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _log_file_path(kind: str, filename: str) -> str:
+    directory = os.path.join(_get_app_dir(), kind)
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, filename)
+
+
+def _is_debug_logging_enabled() -> bool:
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(SETTINGS_FILE, encoding="utf-8")
+        return parser.getboolean("settings", "debug_logging", fallback=False)
+    except configparser.Error:
+        return False
+
+
 def _log_runtime_error(stage: str, exc: Exception) -> None:
-    log_path = os.path.join(_get_app_dir(), "mekicopy_error.log")
+    log_path = _log_file_path("error_log", "mekicopy_error.log")
     try:
         with open(log_path, "a", encoding="utf-8") as handle:
             handle.write("\n=== ERROR ===\n")
+            handle.write(f"time: {_log_timestamp()}\n")
             handle.write(f"stage: {stage}\n")
             handle.write(f"type: {type(exc).__name__}\n")
             handle.write(f"message: {exc}\n")
@@ -334,10 +452,13 @@ def _log_runtime_error(stage: str, exc: Exception) -> None:
 
 
 def _log_runtime_message(stage: str, message: str) -> None:
-    log_path = os.path.join(_get_app_dir(), "mekicopy_error.log")
+    if not _is_debug_logging_enabled():
+        return
+    log_path = _log_file_path("debug_log", "mekicopy_debug.log")
     try:
         with open(log_path, "a", encoding="utf-8") as handle:
-            handle.write("\n=== INFO ===\n")
+            handle.write("\n=== DEBUG ===\n")
+            handle.write(f"time: {_log_timestamp()}\n")
             handle.write(f"stage: {stage}\n")
             handle.write(message.rstrip() + "\n")
     except OSError:
@@ -519,18 +640,16 @@ def copy_text_to_clipboard(
         messagebox.showinfo("MekiCopy", "복사되었습니다!", parent=parent)
 
 
-def ocr_and_copy(
+def ocr_region(
     left: int,
     top: int,
     width: int,
     height: int,
-    notify: bool = True,
     parent: tk.Misc | None = None,
-    on_copy_complete: Callable[[], None] | None = None,
-) -> None:
+) -> str | None:
     if width < MIN_SIZE_PX or height < MIN_SIZE_PX:
         messagebox.showerror("MekiCopy", "캡처 영역이 너무 작습니다.", parent=parent)
-        return
+        return None
     image = capture_region(left, top, width, height)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
         temp_path = temp_file.name
@@ -542,6 +661,21 @@ def ocr_and_copy(
             os.remove(temp_path)
         except OSError:
             pass
+    return text
+
+
+def ocr_and_copy(
+    left: int,
+    top: int,
+    width: int,
+    height: int,
+    notify: bool = True,
+    parent: tk.Misc | None = None,
+    on_copy_complete: Callable[[], None] | None = None,
+) -> None:
+    text = ocr_region(left, top, width, height, parent=parent)
+    if text is None:
+        return
     copy_text_to_clipboard(text, notify=notify, parent=parent)
     if on_copy_complete:
         on_copy_complete()
@@ -1230,12 +1364,62 @@ def run_region_view(
         root.mainloop()
 
 
+def _json_request(
+    url: str,
+    payload: dict | None = None,
+    timeout: float = 5.0,
+    method: str | None = None,
+) -> dict:
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json; charset=utf-8"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read().decode("utf-8")
+    if not raw:
+        return {}
+    return json.loads(raw)
+
+
+def _is_process_alive(process: subprocess.Popen | None) -> bool:
+    return bool(process and process.poll() is None)
+
+
+def _find_companion_executable(app_name: str, script_name: str) -> list[str] | None:
+    exe_name = f"{app_name}.exe"
+    app_dir = _get_app_dir()
+    candidates = [
+        os.path.join(app_dir, exe_name),
+        os.path.join(os.path.dirname(app_dir), app_name, exe_name),
+        os.path.join(os.path.dirname(os.path.dirname(app_dir)), app_name, exe_name),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return [candidate]
+
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), script_name)
+    if os.path.exists(script_path):
+        return [sys.executable, script_path]
+    return None
+
+
+def _startupinfo_for_background() -> subprocess.STARTUPINFO | None:
+    if os.name != "nt":
+        return None
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return startupinfo
+
+
 class SettingsWindow(tk.Toplevel):
     def __init__(self, owner) -> None:
         super().__init__(owner)
         self.owner = owner
         self.title("MekiCopy 설정")
-        self.resizable(False, False)
+        self.resizable(False, True)
         _set_window_icon(self)
 
         settings = owner.settings
@@ -1249,11 +1433,30 @@ class SettingsWindow(tk.Toplevel):
         self.simple_copy_complete_var = tk.BooleanVar(
             value=settings.simple_copy_complete
         )
+        self.overlay_mode_var = tk.BooleanVar(value=settings.overlay_translation_mode)
+        self.hytrans_port_var = tk.IntVar(value=settings.hytrans_port)
+        self.overlayer_topmost_var = tk.BooleanVar(value=settings.overlayer_always_on_top)
+        self.overlayer_hide_titlebar_var = tk.BooleanVar(
+            value=settings.overlayer_hide_titlebar
+        )
+        self.overlayer_fixed_size_var = tk.BooleanVar(value=settings.overlayer_fixed_size)
+        self.overlayer_bg_color_var = tk.StringVar(value=settings.overlayer_bg_color)
+        self.overlayer_opacity_var = tk.IntVar(
+            value=max(10, min(100, int(settings.overlayer_bg_opacity * 100)))
+        )
+        self.overlayer_text_color_var = tk.StringVar(value=settings.overlayer_text_color)
+        self.overlayer_text_size_var = tk.IntVar(value=settings.overlayer_text_size)
+        self.overlayer_text_font_var = tk.StringVar(value=settings.overlayer_text_font)
+        self.debug_logging_var = tk.BooleanVar(value=settings.debug_logging)
+        self.overlay_only_widgets: list[tk.Widget] = []
+        self._color_buttons: list[tuple[tk.Button, tk.StringVar]] = []
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.transient(owner)
         self.attributes("-topmost", settings.main_always_on_top)
+        self.overlay_mode_var.trace_add("write", lambda *_: self._update_overlay_controls())
+        self._update_overlay_controls()
 
     def _build_ui(self) -> None:
         body = tk.Frame(self, padx=14, pady=14)
@@ -1283,19 +1486,172 @@ class SettingsWindow(tk.Toplevel):
             checkbox = tk.Checkbutton(body, text=text, variable=variable, anchor="w")
             checkbox.pack(fill=tk.X, pady=4)
 
+        debug_checkbox = tk.Checkbutton(
+            body,
+            text="오류 분석을 위한 디버그 로그 켜기",
+            variable=self.debug_logging_var,
+            anchor="w",
+        )
+        debug_checkbox.pack(fill=tk.X, pady=(4, 8))
+
+        overlay_frame = tk.LabelFrame(body, text="번역 오버레이 모드", padx=10, pady=8)
+        overlay_frame.pack(fill=tk.X, pady=(6, 0))
+
+        overlay_checkbox = tk.Checkbutton(
+            overlay_frame,
+            text="오버레이어 번역 모드사용",
+            variable=self.overlay_mode_var,
+            anchor="w",
+        )
+        overlay_checkbox.pack(fill=tk.X, pady=3)
+
+        port_row = tk.Frame(overlay_frame)
+        port_row.pack(fill=tk.X, pady=3)
+        port_label = tk.Label(port_row, text="HYTrans 포트")
+        port_label.pack(side=tk.LEFT)
+        port_spin = tk.Spinbox(
+            port_row,
+            from_=1,
+            to=65535,
+            width=8,
+            textvariable=self.hytrans_port_var,
+        )
+        port_spin.pack(side=tk.RIGHT)
+        self.overlay_only_widgets.extend([port_label, port_spin])
+
+        overlayer_options = [
+            ("MekiOverlayer을 항상 위로", self.overlayer_topmost_var),
+            ("MekiOverlayer의 제목표시줄 숨김", self.overlayer_hide_titlebar_var),
+            ("MekiOverlayer 크기 고정", self.overlayer_fixed_size_var),
+        ]
+        for text, variable in overlayer_options:
+            checkbox = tk.Checkbutton(
+                overlay_frame,
+                text=text,
+                variable=variable,
+                anchor="w",
+            )
+            checkbox.pack(fill=tk.X, pady=3)
+            self.overlay_only_widgets.append(checkbox)
+
+        overlayer_style = tk.LabelFrame(
+            overlay_frame,
+            text="MekiOverlayer 설정",
+            padx=8,
+            pady=8,
+        )
+        overlayer_style.pack(fill=tk.X, pady=(8, 2))
+        self.overlay_only_widgets.append(overlayer_style)
+
+        bg_button = tk.Button(
+            overlayer_style,
+            text="배경색깔",
+            command=lambda: self._choose_color(self.overlayer_bg_color_var, bg_button),
+        )
+        bg_button.pack(fill=tk.X, pady=2)
+        self._color_buttons.append((bg_button, self.overlayer_bg_color_var))
+        self.overlay_only_widgets.append(bg_button)
+
+        opacity_row = tk.Frame(overlayer_style)
+        opacity_row.pack(fill=tk.X, pady=2)
+        tk.Label(opacity_row, text="배경 투명도").pack(side=tk.LEFT)
+        opacity_scale = tk.Scale(
+            opacity_row,
+            from_=10,
+            to=100,
+            orient=tk.HORIZONTAL,
+            showvalue=True,
+            variable=self.overlayer_opacity_var,
+            length=180,
+        )
+        opacity_scale.pack(side=tk.RIGHT)
+        self.overlay_only_widgets.extend([opacity_row, opacity_scale])
+
+        text_color_button = tk.Button(
+            overlayer_style,
+            text="글씨 색깔",
+            command=lambda: self._choose_color(
+                self.overlayer_text_color_var, text_color_button
+            ),
+        )
+        text_color_button.pack(fill=tk.X, pady=2)
+        self._color_buttons.append((text_color_button, self.overlayer_text_color_var))
+        self.overlay_only_widgets.append(text_color_button)
+
+        size_row = tk.Frame(overlayer_style)
+        size_row.pack(fill=tk.X, pady=2)
+        tk.Label(size_row, text="글씨 크기").pack(side=tk.LEFT)
+        size_spin = tk.Spinbox(
+            size_row,
+            from_=8,
+            to=96,
+            width=6,
+            textvariable=self.overlayer_text_size_var,
+        )
+        size_spin.pack(side=tk.RIGHT)
+        self.overlay_only_widgets.extend([size_row, size_spin])
+
+        font_row = tk.Frame(overlayer_style)
+        font_row.pack(fill=tk.X, pady=2)
+        tk.Label(font_row, text="글씨 폰트").pack(side=tk.LEFT)
+        font_names = sorted(set(tkfont.families(self)))
+        if self.overlayer_text_font_var.get() not in font_names:
+            font_names.insert(0, self.overlayer_text_font_var.get())
+        font_menu = tk.OptionMenu(
+            font_row,
+            self.overlayer_text_font_var,
+            *font_names[:200],
+        )
+        font_menu.config(width=20)
+        font_menu.pack(side=tk.RIGHT)
+        self.overlay_only_widgets.extend([font_row, font_menu])
+
+        test_button = tk.Button(
+            overlay_frame,
+            text="HYTrans, MekiOverlayer 연결 상태 확인",
+            command=self._on_test_connection,
+        )
+        test_button.pack(fill=tk.X, pady=(8, 2))
+        self.overlay_only_widgets.append(test_button)
+
         button_row = tk.Frame(body)
         button_row.pack(fill=tk.X, pady=(14, 0))
         save_button = tk.Button(button_row, text="저장", command=self._on_save)
         save_button.pack(side=tk.RIGHT, padx=(8, 0))
         close_button = tk.Button(button_row, text="닫기", command=self._on_close)
         close_button.pack(side=tk.RIGHT)
+        self._refresh_color_buttons()
 
-    def _on_save(self) -> None:
+    def _choose_color(self, variable: tk.StringVar, button: tk.Button) -> None:
+        color = colorchooser.askcolor(color=variable.get(), parent=self)[1]
+        if not color:
+            return
+        variable.set(color)
+        self._refresh_color_buttons()
+
+    def _refresh_color_buttons(self) -> None:
+        for button, variable in self._color_buttons:
+            color = variable.get()
+            button.config(bg=color, activebackground=color)
+
+    def _update_overlay_controls(self) -> None:
+        state = tk.NORMAL if self.overlay_mode_var.get() else tk.DISABLED
+        for widget in self.overlay_only_widgets:
+            try:
+                widget.configure(state=state)
+            except tk.TclError:
+                for child in widget.winfo_children():
+                    try:
+                        child.configure(state=state)
+                    except tk.TclError:
+                        pass
+
+    def _collect_settings(self) -> AppSettings:
         current = self.owner.settings
-        if self.owner.detached_window:
-            self.owner.detached_window.capture_geometry()
-
-        settings = AppSettings(
+        port = max(1, min(65535, int(self.hytrans_port_var.get())))
+        opacity = max(0.1, min(1.0, self.overlayer_opacity_var.get() / 100.0))
+        text_size = max(8, min(96, int(self.overlayer_text_size_var.get())))
+        return AppSettings(
             minimize_to_tray=self.minimize_to_tray_var.get(),
             main_always_on_top=self.main_topmost_var.get(),
             detached_always_on_top=self.detached_topmost_var.get(),
@@ -1305,13 +1661,34 @@ class SettingsWindow(tk.Toplevel):
             detached_geometry=current.detached_geometry,
             detached_fixed_width=current.detached_fixed_width,
             detached_fixed_height=current.detached_fixed_height,
+            overlay_translation_mode=self.overlay_mode_var.get(),
+            hytrans_port=port,
+            overlayer_always_on_top=self.overlayer_topmost_var.get(),
+            overlayer_hide_titlebar=self.overlayer_hide_titlebar_var.get(),
+            overlayer_fixed_size=self.overlayer_fixed_size_var.get(),
+            overlayer_bg_color=self.overlayer_bg_color_var.get(),
+            overlayer_bg_opacity=opacity,
+            overlayer_text_color=self.overlayer_text_color_var.get(),
+            overlayer_text_size=text_size,
+            overlayer_text_font=self.overlayer_text_font_var.get(),
+            debug_logging=self.debug_logging_var.get(),
         )
+
+    def _on_save(self) -> None:
+        if self.owner.detached_window:
+            self.owner.detached_window.capture_geometry()
+        settings = self._collect_settings()
         if settings.detached_fixed_size and self.owner.detached_window:
             width, height = self.owner.detached_window.current_size()
             settings.detached_fixed_width = width
             settings.detached_fixed_height = height
         self.owner.apply_settings(settings, persist=True)
         self._on_close()
+
+    def _on_test_connection(self) -> None:
+        settings = self._collect_settings()
+        self.owner.apply_settings(settings, persist=True)
+        self.owner._on_test_overlay_connection(parent=self)
 
     def _on_close(self) -> None:
         self.owner.settings_window = None
@@ -1335,7 +1712,7 @@ class DetachedOcrButtonWindow:
 
         self.button = tk.Button(
             self.root,
-            text="인식 후 복사",
+            text=owner.ocr_action_label(),
             command=self._on_button_command,
             font=("Segoe UI", 14, "bold"),
         )
@@ -1371,6 +1748,8 @@ class DetachedOcrButtonWindow:
         if self.root.winfo_exists():
             self.capture_geometry()
 
+        self.root.title(self.owner.ocr_action_label())
+        self.button.config(text=self.owner.ocr_action_label())
         self.root.withdraw()
         self.root.overrideredirect(settings.detached_hide_titlebar)
         if settings.detached_fixed_size:
@@ -1517,6 +1896,8 @@ class MainWindow(tk.Tk):
         self.settings = load_settings()
         self.detached_window: DetachedOcrButtonWindow | None = None
         self.settings_window: SettingsWindow | None = None
+        self.hytrans_process: subprocess.Popen | None = None
+        self.overlayer_process: subprocess.Popen | None = None
         self.tray_icon = WindowsTrayIcon(self, "MekiCopy", self._restore_from_tray)
         self.title("MekiCopy")
         _set_window_icon(self)
@@ -1554,6 +1935,20 @@ class MainWindow(tk.Tk):
             button = tk.Button(button_frame, text=text, command=command)
             button.pack(fill=tk.X, pady=4)
 
+        self.overlay_button_frame = tk.Frame(button_frame)
+        self.hytrans_button = tk.Button(
+            self.overlay_button_frame,
+            text="HYTrans 서버 실행",
+            command=self._on_start_hytrans,
+        )
+        self.hytrans_button.pack(fill=tk.X, pady=4)
+        self.overlayer_button = tk.Button(
+            self.overlay_button_frame,
+            text="MekiOverlayer 실행",
+            command=self._on_start_overlayer,
+        )
+        self.overlayer_button.pack(fill=tk.X, pady=4)
+
         ocr_button_frame = tk.Frame(
             button_frame,
             height=OCR_BUTTON_HEIGHT_PX,
@@ -1569,6 +1964,24 @@ class MainWindow(tk.Tk):
         self.ocr_button.pack(fill=tk.BOTH, expand=True)
 
         self._update_status()
+
+    def ocr_action_label(self) -> str:
+        if self.settings.overlay_translation_mode:
+            return "번역 후 표시"
+        return "인식 후 복사"
+
+    def _apply_overlay_mode_ui(self) -> None:
+        if self.settings.overlay_translation_mode:
+            if not self.overlay_button_frame.winfo_ismapped():
+                self.overlay_button_frame.pack(
+                    fill=tk.X,
+                    pady=(4, 0),
+                    before=self.ocr_button.master,
+                )
+        else:
+            if self.overlay_button_frame.winfo_ismapped():
+                self.overlay_button_frame.pack_forget()
+        self.ocr_button.config(text=self.ocr_action_label())
 
     def _format_region(self, region: Region | None) -> str:
         if not region:
@@ -1674,11 +2087,187 @@ class MainWindow(tk.Tk):
             return
         self.settings_window = SettingsWindow(self)
 
+    def _hytrans_base_url(self) -> str:
+        return f"http://127.0.0.1:{self.settings.hytrans_port}"
+
+    def _overlayer_base_url(self) -> str:
+        return f"http://127.0.0.1:{OVERLAYER_PORT}"
+
+    def _overlayer_config_payload(self) -> dict:
+        return {
+            "topmost": self.settings.overlayer_always_on_top,
+            "hide_titlebar": self.settings.overlayer_hide_titlebar,
+            "fixed_size": self.settings.overlayer_fixed_size,
+            "bg_color": self.settings.overlayer_bg_color,
+            "opacity": self.settings.overlayer_bg_opacity,
+            "text_color": self.settings.overlayer_text_color,
+            "text_size": self.settings.overlayer_text_size,
+            "text_font": self.settings.overlayer_text_font,
+            "debug_log": self.settings.debug_logging,
+        }
+
+    def _send_overlayer_config(self, log_errors: bool = True) -> bool:
+        try:
+            _json_request(
+                f"{self._overlayer_base_url()}/config",
+                self._overlayer_config_payload(),
+                timeout=2,
+                method="POST",
+            )
+            return True
+        except Exception as exc:
+            if log_errors:
+                _log_runtime_error("send_overlayer_config", exc)
+            return False
+
+    def _on_start_hytrans(self) -> None:
+        try:
+            _json_request(f"{self._hytrans_base_url()}/health", timeout=1)
+            messagebox.showinfo("MekiCopy", "HYTrans 서버가 이미 실행 중입니다.", parent=self)
+            return
+        except Exception:
+            pass
+
+        command = _find_companion_executable("HYTrans", "hytrans_main.py")
+        if not command:
+            messagebox.showerror(
+                "MekiCopy",
+                "HYTrans 실행 파일을 찾을 수 없습니다.",
+                parent=self,
+            )
+            return
+
+        command += [
+            "--port",
+            str(self.settings.hytrans_port),
+            "--overlay-url",
+            OVERLAYER_SHOW_URL,
+        ]
+        if self.settings.debug_logging:
+            command.append("--debug-log")
+        try:
+            self.hytrans_process = subprocess.Popen(
+                command,
+                cwd=_get_app_dir(),
+                startupinfo=_startupinfo_for_background(),
+            )
+            _log_runtime_message("start_hytrans", " ".join(command))
+            messagebox.showinfo("MekiCopy", "HYTrans 서버를 실행했습니다.", parent=self)
+        except Exception as exc:
+            _log_runtime_error("start_hytrans", exc)
+            messagebox.showerror("MekiCopy", f"HYTrans 실행 실패:\n{exc}", parent=self)
+
+    def _on_start_overlayer(self) -> None:
+        try:
+            _json_request(f"{self._overlayer_base_url()}/health", timeout=1)
+            self._send_overlayer_config()
+            messagebox.showinfo(
+                "MekiCopy",
+                "MekiOverlayer가 이미 실행 중입니다. 현재 설정을 적용했습니다.",
+                parent=self,
+            )
+            return
+        except Exception:
+            pass
+
+        command = _find_companion_executable("MekiOverlayer", "meki_overlayer.py")
+        if not command:
+            messagebox.showerror(
+                "MekiCopy",
+                "MekiOverlayer 실행 파일을 찾을 수 없습니다.",
+                parent=self,
+            )
+            return
+
+        cfg = self._overlayer_config_payload()
+        command += [
+            "--port",
+            str(OVERLAYER_PORT),
+            "--topmost",
+            "1" if cfg["topmost"] else "0",
+            "--hide-titlebar",
+            "1" if cfg["hide_titlebar"] else "0",
+            "--fixed-size",
+            "1" if cfg["fixed_size"] else "0",
+            "--bg-color",
+            str(cfg["bg_color"]),
+            "--opacity",
+            str(cfg["opacity"]),
+            "--text-color",
+            str(cfg["text_color"]),
+            "--text-size",
+            str(cfg["text_size"]),
+            "--text-font",
+            str(cfg["text_font"]),
+        ]
+        if self.settings.debug_logging:
+            command.append("--debug-log")
+        try:
+            self.overlayer_process = subprocess.Popen(
+                command,
+                cwd=_get_app_dir(),
+                startupinfo=None,
+            )
+            _log_runtime_message("start_overlayer", " ".join(command))
+            messagebox.showinfo("MekiCopy", "MekiOverlayer를 실행했습니다.", parent=self)
+        except Exception as exc:
+            _log_runtime_error("start_overlayer", exc)
+            messagebox.showerror("MekiCopy", f"MekiOverlayer 실행 실패:\n{exc}", parent=self)
+
+    def _on_test_overlay_connection(self, parent: tk.Misc | None = None) -> None:
+        owner = parent or self
+        failures: list[str] = []
+        try:
+            _json_request(f"{self._hytrans_base_url()}/health", timeout=2)
+        except Exception as exc:
+            failures.append(f"HYTrans 연결 실패: {exc}")
+        try:
+            _json_request(f"{self._overlayer_base_url()}/health", timeout=2)
+        except Exception as exc:
+            failures.append(f"MekiOverlayer 연결 실패: {exc}")
+
+        if failures:
+            messagebox.showerror("MekiCopy", "\n".join(failures), parent=owner)
+            return
+
+        self._send_overlayer_config()
+        try:
+            _json_request(
+                f"{self._hytrans_base_url()}/overlay-test",
+                {"text": "MekiCopy 연결 테스트", "overlayUrl": OVERLAYER_SHOW_URL},
+                timeout=5,
+                method="POST",
+            )
+            ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=2)
+            ready_text = "번역 모델 준비됨" if ready.get("ready") else "번역 모델 로딩 중"
+            messagebox.showinfo(
+                "MekiCopy",
+                f"HYTrans -> MekiOverlayer 표시 흐름이 정상입니다.\n{ready_text}",
+                parent=owner,
+            )
+        except Exception as exc:
+            _log_runtime_error("test_overlay_connection", exc)
+            messagebox.showerror("MekiCopy", f"연결 테스트 실패:\n{exc}", parent=owner)
+
+    def _request_translate_and_show(self, text: str) -> dict:
+        return _json_request(
+            f"{self._hytrans_base_url()}/translate-and-show",
+            {"text": text, "overlayUrl": OVERLAYER_SHOW_URL},
+            timeout=130,
+            method="POST",
+        )
+
     def _on_ocr_copy(self, source_button: tk.Button | None = None) -> None:
         if not self.active_region:
             messagebox.showerror("MekiCopy", "설정된 영역이 없습니다.", parent=self)
             return
         simple_feedback = self.settings.simple_copy_complete
+        if self.settings.overlay_translation_mode:
+            self._ocr_translate_and_show(
+                source_button=source_button or self.ocr_button,
+                simple_feedback=simple_feedback,
+            )
+            return
         ocr_and_copy(
             self.active_region.left,
             self.active_region.top,
@@ -1692,6 +2281,49 @@ class MainWindow(tk.Tk):
                 else None
             ),
         )
+
+    def _ocr_translate_and_show(
+        self,
+        source_button: tk.Button,
+        simple_feedback: bool,
+    ) -> None:
+        assert self.active_region is not None
+        text = ocr_region(
+            self.active_region.left,
+            self.active_region.top,
+            self.active_region.width,
+            self.active_region.height,
+            parent=self,
+        )
+        if text is None:
+            return
+        if not text.strip():
+            messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=self)
+            return
+        try:
+            self._send_overlayer_config()
+            self._request_translate_and_show(text)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            _log_runtime_error("ocr_translate_and_show_http", exc)
+            messagebox.showerror(
+                "MekiCopy",
+                f"번역 후 표시 실패:\nHTTP {exc.code}\n{detail}",
+                parent=self,
+            )
+            return
+        except Exception as exc:
+            _log_runtime_error("ocr_translate_and_show", exc)
+            messagebox.showerror("MekiCopy", f"번역 후 표시 실패:\n{exc}", parent=self)
+            return
+        if simple_feedback:
+            self._show_copy_feedback(source_button)
+        else:
+            messagebox.showinfo(
+                "MekiCopy",
+                "번역 결과를 MekiOverlayer에 표시했습니다.",
+                parent=self,
+            )
 
     def _show_copy_feedback(self, button: tk.Button) -> None:
         if not button.winfo_exists():
@@ -1740,8 +2372,11 @@ class MainWindow(tk.Tk):
             self.detached_window.capture_geometry()
         self.settings = settings
         self.attributes("-topmost", self.settings.main_always_on_top)
+        self._apply_overlay_mode_ui()
         if self.detached_window:
             self.detached_window.apply_settings()
+        if self.settings.overlay_translation_mode:
+            self._send_overlayer_config(log_errors=False)
         if persist:
             save_settings(self.settings)
 
@@ -1775,6 +2410,12 @@ class MainWindow(tk.Tk):
         if self.detached_window and self.detached_window.root.winfo_exists():
             self.detached_window.capture_geometry()
         save_settings(self.settings)
+        for process in (self.hytrans_process, self.overlayer_process):
+            if _is_process_alive(process):
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
         self.destroy()
 
 

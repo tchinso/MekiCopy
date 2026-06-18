@@ -1,5 +1,6 @@
 param(
-    [switch]$SkipDependencyInstall
+    [switch]$SkipDependencyInstall,
+    [string]$PythonExe = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -7,16 +8,28 @@ Set-Location -Path $PSScriptRoot
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-    throw "python 명령을 찾을 수 없습니다."
+if (-not $PythonExe) {
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonCommand) {
+        $PythonExe = $pythonCommand.Source
+    }
+}
+if (-not $PythonExe) {
+    $pyCommand = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyCommand) {
+        $PythonExe = $pyCommand.Source
+    }
+}
+if (-not $PythonExe) {
+    throw "Python 실행 파일을 찾을 수 없습니다. -PythonExe 경로를 지정하세요."
 }
 
 if (-not $SkipDependencyInstall) {
-    python -m pip install --upgrade pip
-    python -m pip install --upgrade --upgrade-strategy eager pyinstaller meikiocr mss pillow
+    & $PythonExe -m pip install --upgrade pip
+    & $PythonExe -m pip install --upgrade --upgrade-strategy eager pyinstaller meikiocr mss pillow fastapi "uvicorn[standard]"
     # onnxruntime-gpu exposes the same Python package name as onnxruntime.
     # Install it last so PyInstaller bundles the CUDA-capable runtime DLLs.
-    python -m pip install --upgrade --upgrade-strategy eager --force-reinstall onnxruntime-gpu
+    & $PythonExe -m pip install --upgrade --upgrade-strategy eager --force-reinstall onnxruntime-gpu
 }
 
 $modelDir = Join-Path $PSScriptRoot "runtime_models\\meikiocr"
@@ -51,7 +64,7 @@ for repo_id, filename in unique_models:
     target = dest / filename
     shutil.copy2(src, target)
     print(f"Prepared model: {target}")
-'@ | python -
+'@ | & $PythonExe -
 
 if (Test-Path ".\\build") {
     Remove-Item ".\\build" -Recurse -Force
@@ -60,11 +73,21 @@ if (Test-Path ".\\dist") {
     Remove-Item ".\\dist" -Recurse -Force
 }
 
-python -m PyInstaller `
-    --noconfirm `
-    --clean `
-    .\MekiCopy.spec
+$specs = @(
+    ".\MekiCopy.spec",
+    ".\HYTrans.spec",
+    ".\MekiOverlayer.spec"
+)
+
+foreach ($spec in $specs) {
+    & $PythonExe -m PyInstaller `
+        --noconfirm `
+        --clean `
+        $spec
+}
 
 Write-Host ""
 Write-Host "Build complete:"
 Write-Host (Join-Path $PSScriptRoot "dist\\MekiCopy\\MekiCopy.exe")
+Write-Host (Join-Path $PSScriptRoot "dist\\HYTrans\\HYTrans.exe")
+Write-Host (Join-Path $PSScriptRoot "dist\\MekiOverlayer\\MekiOverlayer.exe")

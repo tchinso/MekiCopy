@@ -1,14 +1,5 @@
-from __future__ import annotations
+"""Project-local startup hook.
 
-try:
-    import onnxruntime as ort
-except Exception:
-    ort = None
-
-
-if ort is not None and not hasattr(ort, "set_default_logger_severity"):
-
-    def _noop_set_default_logger_severity(_level: int) -> None:
-        return None
-
-    ort.set_default_logger_severity = _noop_set_default_logger_severity
+Runtime compatibility patches live in mekicopy.py so unrelated executables do
+not import OCR/GPU packages at startup.
+"""
