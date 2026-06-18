@@ -30,6 +30,7 @@ import mss
 EDGE_GRAB_PX = 8
 MIN_SIZE_PX = 10
 OCR_BUTTON_HEIGHT_PX = 400
+SELECTION_INSTRUCTION_FONT_SIZE = 36
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 ICON_FILENAME = "MekiCopy.ico"
 _OCR_ENGINE = None
@@ -621,12 +622,12 @@ class SelectionUI:
             x = monitor["left"] - self.virtual_left + 24
             y = monitor["top"] - self.virtual_top + 24
             self.canvas.create_text(
-                x + 2,
-                y + 2,
+                x + 4,
+                y + 4,
                 anchor="nw",
                 text=text,
                 fill="black",
-                font=("Segoe UI", 18, "bold"),
+                font=("Segoe UI", SELECTION_INSTRUCTION_FONT_SIZE, "bold"),
             )
             self.canvas.create_text(
                 x,
@@ -634,7 +635,7 @@ class SelectionUI:
                 anchor="nw",
                 text=text,
                 fill="white",
-                font=("Segoe UI", 18, "bold"),
+                font=("Segoe UI", SELECTION_INSTRUCTION_FONT_SIZE, "bold"),
             )
 
     def _canvas_coords(self, x: int, y: int) -> tuple[int, int]:
@@ -911,15 +912,22 @@ class WindowsTrayIcon:
         self._hicon: int | None = None
         self._old_wndproc: int | None = None
         self._wndproc = None
+        self._message_window: tk.Toplevel | None = None
         self._active = False
+        self._restore_pending = False
 
     def show(self) -> bool:
         if os.name != "nt" or self._active:
             return False
         try:
             self.root.update_idletasks()
-            self._hwnd = int(self.root.winfo_id())
+            self._message_window = tk.Toplevel(self.root)
+            self._message_window.withdraw()
+            self._message_window.title(self.tooltip)
+            self._message_window.update_idletasks()
+            self._hwnd = int(self._message_window.winfo_id())
             if not self._hwnd:
+                self._destroy_message_window()
                 return False
             self._subclass_window()
             self._hicon = self._load_icon()
@@ -927,24 +935,55 @@ class WindowsTrayIcon:
             shell32 = ctypes.windll.shell32
             if not shell32.Shell_NotifyIconW(self.NIM_ADD, ctypes.byref(data)):
                 self._restore_window_proc()
+                self._destroy_message_window()
                 return False
             self._active = True
             return True
         except Exception:
             self._restore_window_proc()
+            self._destroy_message_window()
             return False
 
     def hide(self) -> None:
-        if os.name != "nt" or not self._active or not self._hwnd:
-            self._restore_window_proc()
+        if os.name != "nt":
+            return
+        if self._active and self._hwnd:
+            try:
+                data = self._build_notify_data(0)
+                ctypes.windll.shell32.Shell_NotifyIconW(self.NIM_DELETE, ctypes.byref(data))
+            except Exception:
+                pass
+        self._active = False
+        self._restore_pending = False
+        self._restore_window_proc()
+        self._destroy_message_window()
+        self._hwnd = None
+
+    def _destroy_message_window(self) -> None:
+        if not self._message_window:
             return
         try:
-            data = self._build_notify_data(0)
-            ctypes.windll.shell32.Shell_NotifyIconW(self.NIM_DELETE, ctypes.byref(data))
-        except Exception:
+            if self._message_window.winfo_exists():
+                self._message_window.destroy()
+        except tk.TclError:
             pass
-        self._active = False
-        self._restore_window_proc()
+        self._message_window = None
+
+    def _queue_restore(self) -> None:
+        if self._restore_pending:
+            return
+        self._restore_pending = True
+        self.root.after(0, self._handle_restore_requested)
+
+    def _handle_restore_requested(self) -> None:
+        if not self._active:
+            self._restore_pending = False
+            return
+        try:
+            self.on_restore()
+        except Exception as exc:
+            _log_runtime_error("tray_restore", exc)
+            self._restore_pending = False
 
     def _build_notify_data(self, flags: int) -> _NotifyIconDataW:
         data = _NotifyIconDataW()
@@ -991,9 +1030,11 @@ class WindowsTrayIcon:
                 self.WM_LBUTTONDBLCLK,
                 self.WM_RBUTTONUP,
             ):
-                self.root.after(0, self.on_restore)
+                self._queue_restore()
                 return 0
-            return user32.CallWindowProcW(self._old_wndproc, hwnd, msg, wparam, lparam)
+            if self._old_wndproc:
+                return user32.CallWindowProcW(self._old_wndproc, hwnd, msg, wparam, lparam)
+            return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
         self._wndproc = wndproc_type(_window_proc)
         if ctypes.sizeof(ctypes.c_void_p) == 8:
@@ -1010,6 +1051,13 @@ class WindowsTrayIcon:
         user32.CallWindowProcW.restype = _LRESULT
         user32.CallWindowProcW.argtypes = [
             ctypes.c_void_p,
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.DefWindowProcW.restype = _LRESULT
+        user32.DefWindowProcW.argtypes = [
             wintypes.HWND,
             wintypes.UINT,
             wintypes.WPARAM,
@@ -1034,15 +1082,16 @@ class WindowsTrayIcon:
         self._wndproc = None
 
 
-class BookmarkPicker(tk.Tk):
-    def __init__(self, bookmarks: dict[str, Bookmark]):
-        _prepare_tk_library_paths()
-        super().__init__()
+class BookmarkPicker(tk.Toplevel):
+    def __init__(self, owner: tk.Misc, bookmarks: dict[str, Bookmark]):
+        super().__init__(owner)
         self.title("MekiCopy 북마크 선택")
         _set_window_icon(self)
         self.bookmarks = bookmarks
         self.selected: Bookmark | None = None
         self._build_ui()
+        self.transient(owner)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     def _build_ui(self) -> None:
         self.geometry("320x240")
@@ -1059,6 +1108,7 @@ class BookmarkPicker(tk.Tk):
         button = tk.Button(self, text="선택", command=self._on_select)
         button.pack(pady=10)
         self.bind("<Return>", lambda _event: self._on_select())
+        self.bind("<Escape>", lambda _event: self.destroy())
         self.listbox.bind("<Return>", lambda _event: self._on_select())
         self.listbox.bind("<Double-Button-1>", lambda _event: self._on_select())
 
@@ -1071,26 +1121,47 @@ class BookmarkPicker(tk.Tk):
         self.destroy()
 
 
-def run_picker_and_capture() -> None:
+def _show_bookmark_picker(
+    bookmarks: dict[str, Bookmark],
+    parent: tk.Misc | None = None,
+) -> Bookmark | None:
+    _prepare_tk_library_paths()
+    temporary_root: tk.Tk | None = None
+    owner = parent
+    if owner is None:
+        temporary_root = tk.Tk()
+        temporary_root.withdraw()
+        owner = temporary_root
+
+    picker = BookmarkPicker(owner, bookmarks)
+    try:
+        picker.grab_set()
+    except tk.TclError:
+        pass
+    picker.focus_force()
+    owner.wait_window(picker)
+    selected = picker.selected
+    if temporary_root and temporary_root.winfo_exists():
+        temporary_root.destroy()
+    return selected
+
+
+def run_picker_and_capture(parent: tk.Misc | None = None) -> None:
     bookmarks = load_bookmarks()
     if not bookmarks:
-        messagebox.showerror("MekiCopy", "저장된 북마크가 없습니다.")
+        messagebox.showerror("MekiCopy", "저장된 북마크가 없습니다.", parent=parent)
         return
-    picker = BookmarkPicker(bookmarks)
-    picker.mainloop()
-    if picker.selected:
-        bookmark = picker.selected
+    bookmark = _show_bookmark_picker(bookmarks, parent=parent)
+    if bookmark:
         ocr_and_copy(bookmark.left, bookmark.top, bookmark.width, bookmark.height)
 
 
-def pick_bookmark() -> Bookmark | None:
+def pick_bookmark(parent: tk.Misc | None = None) -> Bookmark | None:
     bookmarks = load_bookmarks()
     if not bookmarks:
-        messagebox.showerror("MekiCopy", "저장된 북마크가 없습니다.")
+        messagebox.showerror("MekiCopy", "저장된 북마크가 없습니다.", parent=parent)
         return None
-    picker = BookmarkPicker(bookmarks)
-    picker.mainloop()
-    return picker.selected
+    return _show_bookmark_picker(bookmarks, parent=parent)
 
 
 def build_initial_rect(region: Region | Bookmark | None) -> Rect | None:
@@ -1453,6 +1524,8 @@ class MainWindow(tk.Tk):
         self.resizable(False, False)
         self.draft_region: Region | None = None
         self.active_region: Region | None = None
+        self._closing = False
+        self._restoring_from_tray = False
         self._build_ui()
         self.apply_settings(self.settings, persist=False)
         self.bind("<Unmap>", self._on_unmap)
@@ -1553,10 +1626,7 @@ class MainWindow(tk.Tk):
         save_bookmarks(bookmarks)
         messagebox.showinfo("MekiCopy", "확정 영역이 북마크에 추가되었습니다!", parent=self)
 
-    def _on_load_bookmark(self) -> None:
-        bookmark = pick_bookmark()
-        if not bookmark:
-            return
+    def _load_bookmark_region(self, bookmark: Bookmark) -> None:
         region = Region(
             left=bookmark.left,
             top=bookmark.top,
@@ -1571,6 +1641,12 @@ class MainWindow(tk.Tk):
             height=region.height,
         )
         self._update_status()
+
+    def _on_load_bookmark(self) -> None:
+        bookmark = pick_bookmark(parent=self)
+        if not bookmark:
+            return
+        self._load_bookmark_region(bookmark)
 
     def _on_set_region(self) -> None:
         if not self.draft_region:
@@ -1672,6 +1748,8 @@ class MainWindow(tk.Tk):
     def _on_unmap(self, event: tk.Event) -> None:
         if event.widget != self or not self.settings.minimize_to_tray:
             return
+        if self._closing or self._restoring_from_tray:
+            return
         if self.state() == "iconic":
             self.after(0, self._minimize_to_tray)
 
@@ -1680,14 +1758,19 @@ class MainWindow(tk.Tk):
             self.withdraw()
 
     def _restore_from_tray(self) -> None:
-        self.tray_icon.hide()
-        self.deiconify()
-        self.state("normal")
-        self.lift()
-        self.focus_force()
-        self.attributes("-topmost", self.settings.main_always_on_top)
+        self._restoring_from_tray = True
+        try:
+            self.tray_icon.hide()
+            self.deiconify()
+            self.state("normal")
+            self.lift()
+            self.focus_force()
+            self.attributes("-topmost", self.settings.main_always_on_top)
+        finally:
+            self.after(100, lambda: setattr(self, "_restoring_from_tray", False))
 
     def _on_close(self) -> None:
+        self._closing = True
         self.tray_icon.hide()
         if self.detached_window and self.detached_window.root.winfo_exists():
             self.detached_window.capture_geometry()
@@ -1717,6 +1800,24 @@ def run_ui_self_test() -> None:
                 f"main OCR button height is {ocr_button_height}, expected {OCR_BUTTON_HEIGHT_PX}"
             )
 
+        bookmark = Bookmark(name="self-test", left=11, top=22, width=333, height=44)
+        expected_region = Region(left=11, top=22, width=333, height=44)
+        app._load_bookmark_region(bookmark)
+        if app.active_region != expected_region:
+            raise RuntimeError(f"bookmark did not populate active region: {app.active_region}")
+        if "확정 영역 :\n설정되지 않음" in app.status_label.cget("text"):
+            raise RuntimeError("bookmark status still reports no active region")
+
+        tray_roundtrip = False
+        if os.name == "nt" and app.tray_icon.show():
+            tray_roundtrip = True
+            app.withdraw()
+            app.update_idletasks()
+            app._restore_from_tray()
+            app.update_idletasks()
+            if app.state() != "normal":
+                raise RuntimeError(f"tray restore left app in state: {app.state()}")
+
         app._on_detach_ocr_button()
         app.update_idletasks()
         if not app.detached_window or not app.detached_window.root.winfo_exists():
@@ -1734,6 +1835,7 @@ def run_ui_self_test() -> None:
             "self_test_ui",
             (
                 f"main_ocr_button_height: {ocr_button_height}\n"
+                f"tray_roundtrip: {tray_roundtrip}\n"
                 f"settings_file: {SETTINGS_FILE}\n"
                 f"icon_path: {_get_icon_path()}"
             ),
