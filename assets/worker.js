@@ -5,25 +5,144 @@ let socket = null;
 let config = null;
 let activeDevice = null;
 let warning = null;
+let lastProgressPercent = -1;
+let lastProgressSentAt = 0;
+
+const CLOSE_WARNING =
+  "이 HYTransWorker 창을 닫으면 HYTrans와 연결이 끊겨 번역이 중단될 수 있습니다. 정말 닫을까요?";
 
 const statusEl = document.getElementById("status");
+const progressBarEl = document.getElementById("progress-bar");
+const progressTextEl = document.getElementById("progress-text");
+const progressFiles = new Map();
 
-function setStatus(message) {
+function sendToServer(payload) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(payload));
+  }
+}
+
+function setStatus(message, notifyServer = true) {
   statusEl.textContent = message;
   console.log("[HYTrans Worker]", message);
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: "loading", message }));
+  if (notifyServer) {
+    sendToServer({ type: "loading", message });
   }
+}
+
+function setProgress(percent, message) {
+  const safePercent = Math.max(0, Math.min(100, Math.round(percent)));
+  progressBarEl.style.width = `${safePercent}%`;
+  progressTextEl.textContent = message ? `${safePercent}% - ${message}` : `${safePercent}%`;
+}
+
+function resetProgress(message = "모델 다운로드 준비 중...") {
+  progressFiles.clear();
+  lastProgressPercent = -1;
+  lastProgressSentAt = 0;
+  setProgress(0, message);
+}
+
+function shortFileName(file) {
+  const parts = String(file).split("/");
+  return parts[parts.length - 1] || String(file);
+}
+
+function formatBytes(bytes) {
+  if (!bytes) {
+    return "";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function overallProgress() {
+  let loaded = 0;
+  let total = 0;
+
+  for (const info of progressFiles.values()) {
+    loaded += info.loaded || 0;
+    total += info.total || 0;
+  }
+
+  return total > 0 ? Math.min(100, (loaded / total) * 100) : 0;
+}
+
+function shouldSendProgress(percent, status) {
+  const now = Date.now();
+  if (status === "initiate" || status === "done") {
+    lastProgressPercent = percent;
+    lastProgressSentAt = now;
+    return true;
+  }
+  if (percent >= lastProgressPercent + 5 || now - lastProgressSentAt > 2000) {
+    lastProgressPercent = percent;
+    lastProgressSentAt = now;
+    return true;
+  }
+  return false;
+}
+
+function onProgress(progress) {
+  if (!progress || !progress.file) {
+    return;
+  }
+
+  const file = progress.file;
+  if (!progressFiles.has(file)) {
+    progressFiles.set(file, { loaded: 0, total: 0 });
+  }
+
+  const info = progressFiles.get(file);
+  if (progress.status === "initiate") {
+    info.loaded = 0;
+    info.total = progress.total || 0;
+  } else if (progress.status === "progress") {
+    info.loaded = progress.loaded || 0;
+    info.total = progress.total || info.total || 0;
+  } else if (progress.status === "done") {
+    info.total = info.total || progress.total || progress.loaded || 0;
+    info.loaded = info.total || progress.loaded || 0;
+  }
+
+  const percent = Math.round(overallProgress());
+  const fileLabel = shortFileName(file);
+  const byteLabel = info.total ? ` (${formatBytes(info.loaded)} / ${formatBytes(info.total)})` : "";
+  const message =
+    progress.status === "done"
+      ? `다운로드 완료: ${fileLabel}`
+      : `다운로드 중: ${fileLabel}${byteLabel}`;
+
+  setProgress(percent, message);
+  if (shouldSendProgress(percent, progress.status)) {
+    setStatus(`${message} (${percent}%)`);
+  }
+}
+
+function installCloseWarning() {
+  window.addEventListener("beforeunload", (event) => {
+    event.preventDefault();
+    event.returnValue = CLOSE_WARNING;
+    return CLOSE_WARNING;
+  });
 }
 
 function cleanTranslationOutput(text) {
   return text
-    .replace(/^assistant\s*[:：]\s*/i, "")
+    .replace(/^assistant\s*[:：]?\s*/i, "")
     .trimStart();
 }
 
 function buildPrompt(inputText) {
-  return `Translate the following segment from Japanese into Korean, without additional explanation.\n\n${inputText}`;
+  const source = config?.source || "Japanese";
+  const target = config?.target || "Korean";
+  return `Translate the following segment from ${source} into ${target}, without additional explanation.\n\n${inputText}`;
 }
 
 function extractGeneratedText(result) {
@@ -45,6 +164,7 @@ async function loadConfig() {
 
 function setupTransformersEnv(runtimeConfig) {
   if (runtimeConfig.modelMode === "local") {
+    env.allowLocalModels = true;
     env.allowRemoteModels = false;
     env.localModelPath = "/models/";
   } else {
@@ -56,14 +176,21 @@ function setupTransformersEnv(runtimeConfig) {
   }
 }
 
+async function createPipeline(device) {
+  return await pipeline("text-generation", config.modelId, {
+    dtype: config.dtype,
+    device,
+    progress_callback: onProgress,
+  });
+}
+
 async function createGeneratorWithFallback() {
   const preferredDevice = navigator.gpu ? "webgpu" : "wasm";
+  resetProgress(`${config.modelId} 자동 다운로드를 시작합니다...`);
+
   try {
-    setStatus(`loading model with ${preferredDevice}...`);
-    const pipe = await pipeline("text-generation", config.modelId, {
-      dtype: config.dtype,
-      device: preferredDevice,
-    });
+    setStatus(`모델을 ${preferredDevice}로 불러오는 중...`);
+    const pipe = await createPipeline(preferredDevice);
     activeDevice = preferredDevice;
     return pipe;
   } catch (err) {
@@ -72,87 +199,112 @@ async function createGeneratorWithFallback() {
     }
     console.warn("WebGPU failed, fallback to wasm:", err);
     warning = "webgpu failed, using wasm fallback";
-    setStatus("WebGPU failed. fallback to wasm...");
-    const pipe = await pipeline("text-generation", config.modelId, {
-      dtype: config.dtype,
-      device: "wasm",
-    });
+    setStatus("WebGPU 로드 실패. CPU(wasm)로 다시 시도합니다...");
+    const pipe = await createPipeline("wasm");
     activeDevice = "wasm";
     return pipe;
   }
 }
 
+function announceReady() {
+  sendToServer({
+    type: "ready",
+    device: activeDevice,
+    model: config.modelId,
+    dtype: config.dtype,
+    modelMode: config.modelMode,
+    warning,
+  });
+  setProgress(100, "모델 준비 완료");
+  setStatus(`ready: ${activeDevice}`, false);
+}
+
+async function handleTranslateRequest(req) {
+  if (!generator) {
+    sendToServer({
+      type: "error",
+      id: req.id,
+      message: "model is not ready",
+    });
+    return;
+  }
+
+  try {
+    const result = await generator([{ role: "user", content: buildPrompt(req.text) }], {
+      max_new_tokens: req.max_new_tokens ?? config.maxNewTokens ?? 2048,
+      do_sample: false,
+    });
+    const rawText = extractGeneratedText(result);
+    const translated = cleanTranslationOutput(rawText).trim();
+    sendToServer({
+      type: "result",
+      id: req.id,
+      text: translated,
+    });
+  } catch (err) {
+    sendToServer({
+      type: "error",
+      id: req.id,
+      message: err?.message ?? String(err),
+    });
+  }
+}
+
 function connectWebSocket() {
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  socket = new WebSocket(`${protocol}//${location.host}/ws/worker`);
+  return new Promise((resolve, reject) => {
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    let opened = false;
 
-  socket.onopen = () => {
-    socket.send(JSON.stringify({
-      type: "ready",
-      device: activeDevice,
-      model: config.modelId,
-      dtype: config.dtype,
-      modelMode: config.modelMode,
-      warning,
-    }));
-    setStatus(`ready: ${activeDevice}`);
-  };
+    socket = new WebSocket(`${protocol}//${location.host}/ws/worker`);
 
-  socket.onmessage = async (event) => {
-    const req = JSON.parse(event.data);
-    if (req.type !== "translate") {
-      return;
-    }
+    socket.onopen = () => {
+      opened = true;
+      setStatus("HYTrans에 연결되었습니다. 모델을 준비합니다.");
+      resolve();
+    };
 
-    try {
-      const result = await generator([{ role: "user", content: buildPrompt(req.text) }], {
-        max_new_tokens: req.max_new_tokens ?? config.maxNewTokens ?? 2048,
-        do_sample: false,
-      });
-      const rawText = extractGeneratedText(result);
-      const translated = cleanTranslationOutput(rawText).trim();
-      socket.send(JSON.stringify({
-        type: "result",
-        id: req.id,
-        text: translated,
-      }));
-    } catch (err) {
-      socket.send(JSON.stringify({
-        type: "error",
-        id: req.id,
-        message: err?.message ?? String(err),
-      }));
-    }
-  };
+    socket.onmessage = async (event) => {
+      const req = JSON.parse(event.data);
+      if (req.type !== "translate") {
+        return;
+      }
+      await handleTranslateRequest(req);
+    };
 
-  socket.onclose = () => {
-    setStatus("WebSocket closed");
-  };
+    socket.onclose = () => {
+      setStatus("WebSocket closed. HYTrans 연결이 끊겼습니다.", false);
+      if (!opened) {
+        reject(new Error("websocket closed before connection"));
+      }
+    };
 
-  socket.onerror = () => {
-    setStatus("WebSocket error");
-  };
+    socket.onerror = () => {
+      setStatus("WebSocket error", false);
+      if (!opened) {
+        reject(new Error("failed to connect websocket"));
+      }
+    };
+  });
 }
 
 async function main() {
+  installCloseWarning();
+
   try {
-    setStatus("loading config...");
+    setStatus("설정을 불러오는 중...", false);
     config = await loadConfig();
     setupTransformersEnv(config);
+    await connectWebSocket();
     generator = await createGeneratorWithFallback();
-    setStatus("connecting websocket...");
-    connectWebSocket();
+    announceReady();
   } catch (err) {
     console.error(err);
     setStatus(`ERROR: ${err?.message ?? String(err)}`);
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({
-        type: "fatal",
-        message: err?.message ?? String(err),
-      }));
-    }
+    sendToServer({
+      type: "fatal",
+      message: err?.message ?? String(err),
+    });
   }
 }
 
 main();
-
