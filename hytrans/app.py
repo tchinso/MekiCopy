@@ -5,7 +5,7 @@ import json
 import urllib.error
 import urllib.request
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -17,6 +17,11 @@ from .config import (
     runtime_config,
 )
 from .logging_setup import debug, error
+from .model_cache import (
+    model_cache_file_response,
+    model_cache_status,
+    save_model_cache_file,
+)
 from .paths import assets_dir, models_dir
 from .queue import TranslationQueue
 from .state import AppState
@@ -130,6 +135,21 @@ async def ready() -> dict[str, object]:
 @app.get("/config")
 async def get_config() -> dict[str, object]:
     return runtime_config().model_dump()
+
+
+@app.get("/model-cache-status")
+async def get_model_cache_status(url: str) -> dict[str, object]:
+    return model_cache_status(url)
+
+
+@app.get("/model-cache")
+async def get_model_cache_file(url: str) -> FileResponse:
+    return model_cache_file_response(url)
+
+
+@app.post("/model-cache")
+async def post_model_cache_file(url: str, request: Request) -> dict[str, object]:
+    return await save_model_cache_file(url, request)
 
 
 @app.get("/worker.html")

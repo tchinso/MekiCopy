@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import datetime as _dt
 import json
 import os
 import queue
+import shutil
 import sys
+import tempfile
 import threading
 import traceback
 from dataclasses import dataclass
@@ -14,10 +17,68 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+TK_RUNTIME_DIRNAME = "MekiCopyRuntime"
+_DLL_DIR_HANDLES = []
+
+if getattr(sys, "frozen", False):
+    _frozen_resource_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    if os.name == "nt":
+        path_items = os.environ.get("PATH", "").split(os.pathsep)
+        if _frozen_resource_dir not in path_items:
+            os.environ["PATH"] = os.pathsep.join([_frozen_resource_dir, *path_items])
+        if hasattr(os, "add_dll_directory"):
+            try:
+                _DLL_DIR_HANDLES.append(os.add_dll_directory(_frozen_resource_dir))
+            except OSError:
+                pass
+    os.environ.setdefault(
+        "TCL_LIBRARY",
+        os.path.join(_frozen_resource_dir, "tcl", "tcl8.6"),
+    )
+    os.environ.setdefault(
+        "TK_LIBRARY",
+        os.path.join(_frozen_resource_dir, "tcl", "tk8.6"),
+    )
+
+
 import tkinter as tk
 
 DEFAULT_PORT = 6551
 DEFAULT_GEOMETRY = "780x180+120+120"
+_WINDOW_STREAM = None
+
+
+def _get_app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _get_resource_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", _get_app_dir())
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _tcl_runtime_can_read(path: str) -> bool:
+    if os.name != "nt":
+        return os.path.exists(path)
+    try:
+        dll = ctypes.CDLL("tcl86t.dll")
+        dll.Tcl_CreateInterp.restype = ctypes.c_void_p
+        interp = dll.Tcl_CreateInterp()
+        if not interp:
+            return os.path.exists(path)
+        dll.Tcl_Eval.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        dll.Tcl_Eval.restype = ctypes.c_int
+        dll.Tcl_GetStringResult.argtypes = [ctypes.c_void_p]
+        dll.Tcl_GetStringResult.restype = ctypes.c_char_p
+        tcl_path = path.replace("\\", "/")
+        dll.Tcl_Eval(interp, f"file exists {{{tcl_path}}}".encode("utf-8"))
+        result = dll.Tcl_GetStringResult(interp)
+        return bool(result and result.decode("ascii", errors="ignore") == "1")
+    except Exception:
+        return os.path.exists(path)
 
 
 def _app_data_dir() -> Path:
@@ -38,9 +99,19 @@ def _timestamp() -> str:
 
 
 def _write_log(kind: str, filename: str, text: str) -> None:
+    content = text.rstrip() + "\n"
     try:
         with (_log_dir(kind) / filename).open("a", encoding="utf-8") as handle:
-            handle.write(text.rstrip() + "\n")
+            handle.write(content)
+            return
+    except OSError:
+        pass
+
+    try:
+        fallback = Path(_get_app_dir()) / kind
+        fallback.mkdir(parents=True, exist_ok=True)
+        with (fallback / filename).open("a", encoding="utf-8") as handle:
+            handle.write(content)
     except OSError:
         pass
 
@@ -61,6 +132,93 @@ def log_debug(enabled: bool, stage: str, message: str) -> None:
         return
     lines = ["", "=== DEBUG ===", f"time: {_timestamp()}", f"stage: {stage}", message]
     _write_log("debug_log", "mekioverlayer_debug.log", "\n".join(lines))
+
+
+def _prepare_windowed_streams() -> None:
+    global _WINDOW_STREAM
+    if sys.stderr is None:
+        _WINDOW_STREAM = open(os.devnull, "w", encoding="utf-8")
+        sys.stderr = _WINDOW_STREAM
+    if sys.stdout is None:
+        sys.stdout = sys.stderr
+
+
+def _prepare_tk_library_paths() -> None:
+    if os.name != "nt":
+        return
+
+    def is_ascii_path(path: str) -> bool:
+        try:
+            path.encode("ascii")
+            return True
+        except UnicodeEncodeError:
+            return False
+
+    resource_dir = _get_resource_dir()
+    tcl_candidates = [
+        os.path.join(resource_dir, "_tcl_data"),
+        os.path.join(resource_dir, "tcl", "tcl8.6"),
+        os.path.join(sys.base_prefix, "tcl", "tcl8.6"),
+    ]
+    tk_candidates = [
+        os.path.join(resource_dir, "_tk_data"),
+        os.path.join(resource_dir, "tcl", "tk8.6"),
+        os.path.join(sys.base_prefix, "tcl", "tk8.6"),
+    ]
+    source_tcl = next(
+        (
+            path
+            for path in tcl_candidates
+            if os.path.exists(os.path.join(path, "init.tcl"))
+        ),
+        None,
+    )
+    source_tk = next(
+        (
+            path
+            for path in tk_candidates
+            if os.path.exists(os.path.join(path, "tk.tcl"))
+        ),
+        None,
+    )
+    if not source_tcl or not source_tk:
+        return
+
+    safe_roots = []
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        safe_roots.append(os.path.join(local_appdata, TK_RUNTIME_DIRNAME))
+    safe_roots.extend(
+        [
+            os.path.join(tempfile.gettempdir(), TK_RUNTIME_DIRNAME),
+            os.path.join(os.path.expanduser("~"), TK_RUNTIME_DIRNAME),
+        ]
+    )
+
+    for safe_root in safe_roots:
+        if not is_ascii_path(safe_root):
+            continue
+        safe_tcl = os.path.join(safe_root, "tcl8.6")
+        safe_tk = os.path.join(safe_root, "tk8.6")
+        try:
+            if not os.path.exists(os.path.join(safe_tcl, "init.tcl")):
+                shutil.copytree(source_tcl, safe_tcl, dirs_exist_ok=True)
+            if not os.path.exists(os.path.join(safe_tk, "tk.tcl")):
+                shutil.copytree(source_tk, safe_tk, dirs_exist_ok=True)
+            safe_init = os.path.join(safe_tcl, "init.tcl")
+            safe_tk_script = os.path.join(safe_tk, "tk.tcl")
+            if _tcl_runtime_can_read(safe_init) and _tcl_runtime_can_read(safe_tk_script):
+                os.environ["TCL_LIBRARY"] = safe_tcl.replace("\\", "/")
+                os.environ["TK_LIBRARY"] = safe_tk.replace("\\", "/")
+                return
+        except OSError as exc:
+            log_error("prepare_tk_library_paths", exc)
+
+    source_init = os.path.join(source_tcl, "init.tcl")
+    source_tk_script = os.path.join(source_tk, "tk.tcl")
+    if _tcl_runtime_can_read(source_init) and _tcl_runtime_can_read(source_tk_script):
+        os.environ["TCL_LIBRARY"] = source_tcl.replace("\\", "/")
+        os.environ["TK_LIBRARY"] = source_tk.replace("\\", "/")
 
 
 @dataclass
@@ -275,6 +433,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    _prepare_windowed_streams()
+    _prepare_tk_library_paths()
     args = parse_args()
     config = OverlayConfig(
         topmost=bool(args.topmost),
@@ -301,4 +461,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

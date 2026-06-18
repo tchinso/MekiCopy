@@ -15,6 +15,7 @@ const statusEl = document.getElementById("status");
 const progressBarEl = document.getElementById("progress-bar");
 const progressTextEl = document.getElementById("progress-text");
 const progressFiles = new Map();
+let modelBackupCacheInstalled = false;
 
 function sendToServer(payload) {
   if (socket && socket.readyState === WebSocket.OPEN) {
@@ -46,6 +47,17 @@ function resetProgress(message = "모델 다운로드 준비 중...") {
 function shortFileName(file) {
   const parts = String(file).split("/");
   return parts[parts.length - 1] || String(file);
+}
+
+function requestUrl(request) {
+  if (typeof request === "string") {
+    return request;
+  }
+  return request?.url || String(request || "");
+}
+
+function isModelRequest(url) {
+  return Boolean(config?.modelId && String(url).includes(config.modelId));
 }
 
 function formatBytes(bytes) {
@@ -162,13 +174,178 @@ async function loadConfig() {
   return await response.json();
 }
 
+async function getServerModelCacheStatus(url) {
+  const response = await fetch(`/model-cache-status?url=${encodeURIComponent(url)}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    return { exists: false };
+  }
+  return await response.json();
+}
+
+async function uploadModelResponseToServer(url, response) {
+  if (!response?.ok || !isModelRequest(url)) {
+    return;
+  }
+
+  const status = await getServerModelCacheStatus(url);
+  const contentLength = Number(response.headers.get("content-length") || 0);
+  if (status.exists && contentLength > 0 && Number(status.size || 0) === contentLength) {
+    return;
+  }
+
+  const fileLabel = shortFileName(new URL(url, location.href).pathname);
+  setStatus(`모델 파일 백업 중: ${fileLabel}`);
+
+  let upload = null;
+  if (response.body) {
+    try {
+      upload = await fetch(`/model-cache?url=${encodeURIComponent(url)}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/octet-stream",
+        },
+        body: response.clone().body,
+        duplex: "half",
+      });
+    } catch (err) {
+      console.warn("streaming model backup failed, retrying with Blob:", err);
+    }
+  }
+
+  if (!upload) {
+    const blob = await response.clone().blob();
+    if (status.exists && Number(status.size || 0) === blob.size) {
+      return;
+    }
+    upload = await fetch(`/model-cache?url=${encodeURIComponent(url)}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+      },
+      body: blob,
+    });
+  }
+
+  if (!upload.ok) {
+    throw new Error(`model backup failed: HTTP ${upload.status}`);
+  }
+  setStatus(`모델 파일 백업 완료: ${fileLabel}`);
+}
+
+async function findBrowserCachedModelResponse(request) {
+  if (!("caches" in window)) {
+    return undefined;
+  }
+
+  const names = await caches.keys();
+  const preferredName = env.cacheKey || "transformers-cache";
+  const orderedNames = [
+    preferredName,
+    ...names.filter((name) => name !== preferredName),
+  ].filter((name, index, all) => all.indexOf(name) === index);
+
+  for (const name of orderedNames) {
+    try {
+      const cache = await caches.open(name);
+      const response = await cache.match(request);
+      if (response?.ok) {
+        return response;
+      }
+    } catch (err) {
+      console.warn("browser cache lookup failed:", err);
+    }
+  }
+
+  return undefined;
+}
+
+async function syncBrowserModelCacheToServer() {
+  if (!("caches" in window)) {
+    return;
+  }
+
+  const names = await caches.keys();
+  for (const name of names) {
+    const cache = await caches.open(name);
+    const requests = await cache.keys();
+    for (const request of requests) {
+      const url = requestUrl(request);
+      if (!isModelRequest(url)) {
+        continue;
+      }
+      const response = await cache.match(request);
+      if (response?.ok) {
+        await uploadModelResponseToServer(url, response);
+      }
+    }
+  }
+}
+
+function installModelBackupCache() {
+  if (modelBackupCacheInstalled) {
+    return;
+  }
+
+  env.useCustomCache = true;
+  env.customCache = {
+    async match(request) {
+      const url = requestUrl(request);
+      if (!isModelRequest(url)) {
+        return undefined;
+      }
+
+      try {
+        const response = await fetch(`/model-cache?url=${encodeURIComponent(url)}`, {
+          cache: "no-store",
+        });
+        if (response.ok) {
+          return response;
+        }
+      } catch (err) {
+        console.warn("server model cache lookup failed:", err);
+      }
+
+      const browserResponse = await findBrowserCachedModelResponse(request);
+      if (browserResponse?.ok) {
+        try {
+          await uploadModelResponseToServer(url, browserResponse);
+        } catch (err) {
+          console.warn("browser cache backup failed:", err);
+        }
+        return browserResponse;
+      }
+
+      return undefined;
+    },
+
+    async put(request, response) {
+      const sourceUrl = requestUrl(request);
+      const url = isModelRequest(sourceUrl) ? sourceUrl : response?.url || sourceUrl;
+      if (!isModelRequest(url)) {
+        return;
+      }
+      try {
+        await uploadModelResponseToServer(url, response);
+      } catch (err) {
+        console.warn("server model backup failed:", err);
+      }
+    },
+  };
+
+  modelBackupCacheInstalled = true;
+}
+
 function setupTransformersEnv(runtimeConfig) {
+  env.allowLocalModels = true;
+  env.localModelPath = "/models/";
+
   if (runtimeConfig.modelMode === "local") {
-    env.allowLocalModels = true;
     env.allowRemoteModels = false;
-    env.localModelPath = "/models/";
   } else {
     env.allowRemoteModels = true;
+    installModelBackupCache();
   }
 
   if (runtimeConfig.hasLocalWasm && env.backends?.onnx?.wasm) {
@@ -186,7 +363,11 @@ async function createPipeline(device) {
 
 async function createGeneratorWithFallback() {
   const preferredDevice = navigator.gpu ? "webgpu" : "wasm";
-  resetProgress(`${config.modelId} 자동 다운로드를 시작합니다...`);
+  const loadMessage =
+    config.modelMode === "local"
+      ? `${config.modelId} 로컬 모델을 불러오는 중...`
+      : `${config.modelId} 자동 다운로드를 시작합니다...`;
+  resetProgress(loadMessage);
 
   try {
     setStatus(`모델을 ${preferredDevice}로 불러오는 중...`);
@@ -296,6 +477,9 @@ async function main() {
     setupTransformersEnv(config);
     await connectWebSocket();
     generator = await createGeneratorWithFallback();
+    if (config.modelMode !== "local") {
+      await syncBrowserModelCacheToServer();
+    }
     announceReady();
   } catch (err) {
     console.error(err);

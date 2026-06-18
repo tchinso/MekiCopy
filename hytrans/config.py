@@ -53,13 +53,16 @@ def configure_server(
 
 
 def detect_model_mode() -> str:
-    model_path = models_dir() / "onnx-community" / "HY-MT1.5-1.8B-ONNX"
+    model_path = models_dir().joinpath(*MODEL_ID.split("/"))
+    onnx_dir = model_path / "onnx"
     required = [
         model_path / "config.json",
         model_path / "tokenizer.json",
-        model_path / "onnx",
     ]
-    if all(path.exists() for path in required):
+    has_onnx_file = onnx_dir.exists() and any(
+        path.suffix == ".onnx" for path in onnx_dir.rglob("*")
+    )
+    if all(path.exists() for path in required) and has_onnx_file:
         return "local"
     return "remote"
 
@@ -76,4 +79,3 @@ def runtime_config() -> RuntimeConfig:
         modelMode=detect_model_mode(),
         hasLocalWasm=has_local_wasm_files(),
     )
-

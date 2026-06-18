@@ -38,7 +38,6 @@ New-Item -ItemType Directory -Path $modelDir -Force | Out-Null
 @'
 from pathlib import Path
 import shutil
-from huggingface_hub import hf_hub_download
 import meikiocr.ocr as o
 
 models = [
@@ -59,7 +58,18 @@ for model in models:
 dest = Path("runtime_models") / "meikiocr"
 dest.mkdir(parents=True, exist_ok=True)
 
+missing_models = []
 for repo_id, filename in unique_models:
+    target = dest / filename
+    if target.exists() and target.stat().st_size > 0:
+        print(f"Using prepared model: {target}")
+    else:
+        missing_models.append((repo_id, filename))
+
+if missing_models:
+    from huggingface_hub import hf_hub_download
+
+for repo_id, filename in missing_models:
     src = hf_hub_download(repo_id=repo_id, filename=filename)
     target = dest / filename
     shutil.copy2(src, target)

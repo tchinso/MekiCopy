@@ -30,8 +30,12 @@ def assets_dir() -> Path:
 
 def models_dir() -> Path:
     external = app_root() / "models"
-    if external.exists():
+    try:
+        external.mkdir(parents=True, exist_ok=True)
         return external
+    except OSError:
+        pass
+
     return resource_root() / "models"
 
 

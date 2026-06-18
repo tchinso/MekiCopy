@@ -60,6 +60,27 @@ def _get_resource_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _tcl_runtime_can_read(path: str) -> bool:
+    if os.name != "nt":
+        return os.path.exists(path)
+    try:
+        dll = ctypes.CDLL("tcl86t.dll")
+        dll.Tcl_CreateInterp.restype = ctypes.c_void_p
+        interp = dll.Tcl_CreateInterp()
+        if not interp:
+            return os.path.exists(path)
+        dll.Tcl_Eval.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        dll.Tcl_Eval.restype = ctypes.c_int
+        dll.Tcl_GetStringResult.argtypes = [ctypes.c_void_p]
+        dll.Tcl_GetStringResult.restype = ctypes.c_char_p
+        tcl_path = path.replace("\\", "/")
+        dll.Tcl_Eval(interp, f"file exists {{{tcl_path}}}".encode("utf-8"))
+        result = dll.Tcl_GetStringResult(interp)
+        return bool(result and result.decode("ascii", errors="ignore") == "1")
+    except Exception:
+        return os.path.exists(path)
+
+
 def _get_icon_path() -> str | None:
     for directory in (_get_resource_dir(), _get_app_dir()):
         candidate = os.path.join(directory, ICON_FILENAME)
@@ -140,14 +161,20 @@ def _prepare_tk_library_paths() -> None:
                 shutil.copytree(source_tcl, safe_tcl, dirs_exist_ok=True)
             if not os.path.exists(os.path.join(safe_tk, "tk.tcl")):
                 shutil.copytree(source_tk, safe_tk, dirs_exist_ok=True)
-            os.environ["TCL_LIBRARY"] = safe_tcl
-            os.environ["TK_LIBRARY"] = safe_tk
-            return
+            safe_init = os.path.join(safe_tcl, "init.tcl")
+            safe_tk_script = os.path.join(safe_tk, "tk.tcl")
+            if _tcl_runtime_can_read(safe_init) and _tcl_runtime_can_read(safe_tk_script):
+                os.environ["TCL_LIBRARY"] = safe_tcl
+                os.environ["TK_LIBRARY"] = safe_tk
+                return
         except OSError as exc:
             _log_runtime_error("prepare_tk_library_paths", exc)
 
-    os.environ["TCL_LIBRARY"] = source_tcl
-    os.environ["TK_LIBRARY"] = source_tk
+    source_init = os.path.join(source_tcl, "init.tcl")
+    source_tk_script = os.path.join(source_tk, "tk.tcl")
+    if _tcl_runtime_can_read(source_init) and _tcl_runtime_can_read(source_tk_script):
+        os.environ["TCL_LIBRARY"] = source_tcl
+        os.environ["TK_LIBRARY"] = source_tk
 
 
 def _prepare_native_runtime_paths() -> None:
@@ -1449,13 +1476,15 @@ class SettingsWindow(tk.Toplevel):
         self.overlayer_text_font_var = tk.StringVar(value=settings.overlayer_text_font)
         self.debug_logging_var = tk.BooleanVar(value=settings.debug_logging)
         self.overlay_only_widgets: list[tk.Widget] = []
+        self.detached_label_controls: list[tuple[tk.Widget, str]] = []
         self._color_buttons: list[tuple[tk.Button, tk.StringVar]] = []
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.transient(owner)
         self.attributes("-topmost", settings.main_always_on_top)
-        self.overlay_mode_var.trace_add("write", lambda *_: self._update_overlay_controls())
+        self.overlay_mode_var.trace_add("write", lambda *_: self._on_overlay_mode_changed())
+        self._update_mode_labels()
         self._update_overlay_controls()
 
     def _build_ui(self) -> None:
@@ -1468,23 +1497,21 @@ class SettingsWindow(tk.Toplevel):
                 self.minimize_to_tray_var,
             ),
             ("MekiCopy를 항상 위로", self.main_topmost_var),
-            (
-                "분리된 '인식 후 복사' 버튼을 항상 위로",
-                self.detached_topmost_var,
-            ),
-            (
-                "분리된 '인식 후 복사' 버튼의 제목표시줄 숨김",
-                self.detached_hide_titlebar_var,
-            ),
-            (
-                "분리된 '인식 후 복사' 버튼의 크기를 고정",
-                self.detached_fixed_size_var,
-            ),
             ("복사 완료를 간단하게 표시하기", self.simple_copy_complete_var),
         ]
         for text, variable in options:
             checkbox = tk.Checkbutton(body, text=text, variable=variable, anchor="w")
             checkbox.pack(fill=tk.X, pady=4)
+
+        detached_options = [
+            ("버튼을 항상 위로", self.detached_topmost_var),
+            ("버튼의 제목표시줄 숨김", self.detached_hide_titlebar_var),
+            ("버튼의 크기를 고정", self.detached_fixed_size_var),
+        ]
+        for suffix, variable in detached_options:
+            checkbox = tk.Checkbutton(body, variable=variable, anchor="w")
+            checkbox.pack(fill=tk.X, pady=4)
+            self.detached_label_controls.append((checkbox, suffix))
 
         debug_checkbox = tk.Checkbutton(
             body,
@@ -1499,7 +1526,7 @@ class SettingsWindow(tk.Toplevel):
 
         overlay_checkbox = tk.Checkbutton(
             overlay_frame,
-            text="오버레이어 번역 모드사용",
+            text="오버레이어 번역 모드 사용",
             variable=self.overlay_mode_var,
             anchor="w",
         )
@@ -1520,7 +1547,7 @@ class SettingsWindow(tk.Toplevel):
         self.overlay_only_widgets.extend([port_label, port_spin])
 
         overlayer_options = [
-            ("MekiOverlayer을 항상 위로", self.overlayer_topmost_var),
+            ("MekiOverlayer를 항상 위로", self.overlayer_topmost_var),
             ("MekiOverlayer의 제목표시줄 숨김", self.overlayer_hide_titlebar_var),
             ("MekiOverlayer 크기 고정", self.overlayer_fixed_size_var),
         ]
@@ -1633,6 +1660,18 @@ class SettingsWindow(tk.Toplevel):
         for button, variable in self._color_buttons:
             color = variable.get()
             button.config(bg=color, activebackground=color)
+
+    def _mode_action_label(self) -> str:
+        return "번역 후 표시" if self.overlay_mode_var.get() else "인식 후 복사"
+
+    def _update_mode_labels(self) -> None:
+        action_label = self._mode_action_label()
+        for widget, suffix in self.detached_label_controls:
+            widget.configure(text=f"분리된 '{action_label}' {suffix}")
+
+    def _on_overlay_mode_changed(self) -> None:
+        self._update_mode_labels()
+        self._update_overlay_controls()
 
     def _update_overlay_controls(self) -> None:
         state = tk.NORMAL if self.overlay_mode_var.get() else tk.DISABLED
@@ -1928,12 +1967,24 @@ class MainWindow(tk.Tk):
             ("영역 보기", self._on_view_regions),
             ("확정 영역을 북마크에 추가", self._on_save_active_bookmark),
             ("북마크 영역 불러오기", self._on_load_bookmark),
-            ("'인식 후 복사' 버튼 분리하기", self._on_detach_ocr_button),
-            ("설정", self._on_open_settings),
         ]
         for text, command in buttons:
             button = tk.Button(button_frame, text=text, command=command)
             button.pack(fill=tk.X, pady=4)
+
+        self.detach_button = tk.Button(
+            button_frame,
+            text="",
+            command=self._on_detach_ocr_button,
+        )
+        self.detach_button.pack(fill=tk.X, pady=4)
+
+        settings_button = tk.Button(
+            button_frame,
+            text="설정",
+            command=self._on_open_settings,
+        )
+        settings_button.pack(fill=tk.X, pady=4)
 
         self.overlay_button_frame = tk.Frame(button_frame)
         self.hytrans_button = tk.Button(
@@ -1982,6 +2033,7 @@ class MainWindow(tk.Tk):
             if self.overlay_button_frame.winfo_ismapped():
                 self.overlay_button_frame.pack_forget()
         self.ocr_button.config(text=self.ocr_action_label())
+        self.detach_button.config(text=f"'{self.ocr_action_label()}' 버튼 분리하기")
 
     def _format_region(self, region: Region | None) -> str:
         if not region:

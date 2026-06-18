@@ -1,0 +1,42 @@
+
+=== ERROR ===
+time: 2026-06-18 19:35:40
+stage: prepare_tk_library_paths
+type: PermissionError
+message: [WinError 5] 액세스가 거부되었습니다: 'C:\\Users\\chuum\\AppData\\Local\\MekiOverlayerRuntime'
+Traceback (most recent call last):
+  File "C:\Users\chuum\OneDrive\문서\GitHub\MekiCopy\meki_overlayer.py", line 170, in _prepare_tk_library_paths
+    shutil.copytree(source_tcl, safe_tcl, dirs_exist_ok=True)
+  File "C:\Users\chuum\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\shutil.py", line 600, in copytree
+    return _copytree(entries=entries, src=src, dst=dst, symlinks=symlinks,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\chuum\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\shutil.py", line 498, in _copytree
+    os.makedirs(dst, exist_ok=dirs_exist_ok)
+  File "<frozen os>", line 215, in makedirs
+  File "<frozen os>", line 225, in makedirs
+PermissionError: [WinError 5] 액세스가 거부되었습니다: 'C:\\Users\\chuum\\AppData\\Local\\MekiOverlayerRuntime'
+
+=== ERROR ===
+time: 2026-06-18 19:35:40
+stage: main
+type: TclError
+message: Can't find a usable init.tcl in the following directories: 
+    {C:\Users\chuum\AppData\Local\Temp\MekiOverlayerRuntime\tcl8.6} C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/lib/tcl8.6 C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/dependencies/lib/tcl8.6 C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/lib/tcl8.6 C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/dependencies/library C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/library C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/tcl8.6.12/library C:/Users/chuum/.cache/codex-runtimes/tcl8.6.12/library
+
+
+
+This probably means that Tcl wasn't installed properly.
+
+Traceback (most recent call last):
+  File "C:\Users\chuum\OneDrive\문서\GitHub\MekiCopy\meki_overlayer.py", line 410, in main
+    root = tk.Tk()
+           ^^^^^^^
+  File "C:\Users\chuum\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\tkinter\__init__.py", line 2346, in __init__
+    self.tk = _tkinter.create(screenName, baseName, className, interactive, wantobjects, useTk, sync, use)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_tkinter.TclError: Can't find a usable init.tcl in the following directories: 
+    {C:\Users\chuum\AppData\Local\Temp\MekiOverlayerRuntime\tcl8.6} C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/lib/tcl8.6 C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/dependencies/lib/tcl8.6 C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/lib/tcl8.6 C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/dependencies/library C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/library C:/Users/chuum/.cache/codex-runtimes/codex-primary-runtime/tcl8.6.12/library C:/Users/chuum/.cache/codex-runtimes/tcl8.6.12/library
+
+
+
+This probably means that Tcl wasn't installed properly.
