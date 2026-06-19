@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -152,3 +154,40 @@ def tk_runtime_roots(runtime_dirname: str) -> list[Path]:
     candidates.append(app_root() / runtime_dirname)
     candidates.append(Path(tempfile.gettempdir()) / "MekiCopy" / runtime_dirname)
     return _dedupe(candidates)
+
+
+def sync_tk_runtime(
+    source_tcl: str | Path,
+    source_tk: str | Path,
+    target_root: str | Path,
+) -> tuple[Path, Path]:
+    source_tcl_path = Path(source_tcl)
+    source_tk_path = Path(source_tk)
+    target_root_path = Path(target_root)
+    target_tcl = target_root_path / "tcl8.6"
+    target_tk = target_root_path / "tk8.6"
+    marker = target_root_path / ".runtime_signature"
+
+    digest = hashlib.sha256()
+    for script in (source_tcl_path / "init.tcl", source_tk_path / "tk.tcl"):
+        digest.update(script.read_bytes())
+    expected_signature = digest.hexdigest()
+
+    current_signature = ""
+    try:
+        current_signature = marker.read_text(encoding="ascii").strip()
+    except OSError:
+        pass
+
+    runtime_is_current = (
+        current_signature == expected_signature
+        and (target_tcl / "init.tcl").is_file()
+        and (target_tk / "tk.tcl").is_file()
+    )
+    if not runtime_is_current:
+        target_root_path.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_tcl_path, target_tcl, dirs_exist_ok=True)
+        shutil.copytree(source_tk_path, target_tk, dirs_exist_ok=True)
+        marker.write_text(expected_signature, encoding="ascii")
+
+    return target_tcl, target_tk

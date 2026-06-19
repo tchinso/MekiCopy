@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import datetime as _dt
 import json
 import os
 import queue
-import shutil
 import sys
 import threading
 import traceback
@@ -17,7 +15,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from runtime_paths import log_dir as runtime_log_dir
-from runtime_paths import is_ascii_path, path_for_tcl, tk_runtime_roots
+from runtime_paths import is_ascii_path, path_for_tcl, sync_tk_runtime, tk_runtime_roots
 
 TK_RUNTIME_DIRNAME = "MekiCopyRuntime"
 _DLL_DIR_HANDLES = []
@@ -33,16 +31,6 @@ if getattr(sys, "frozen", False):
                 _DLL_DIR_HANDLES.append(os.add_dll_directory(_frozen_resource_dir))
             except OSError:
                 pass
-    os.environ.setdefault(
-        "TCL_LIBRARY",
-        os.path.join(_frozen_resource_dir, "tcl", "tcl8.6"),
-    )
-    os.environ.setdefault(
-        "TK_LIBRARY",
-        os.path.join(_frozen_resource_dir, "tcl", "tk8.6"),
-    )
-
-
 import tkinter as tk
 
 DEFAULT_PORT = 6551
@@ -60,27 +48,6 @@ def _get_resource_dir() -> str:
     if getattr(sys, "frozen", False):
         return getattr(sys, "_MEIPASS", _get_app_dir())
     return os.path.dirname(os.path.abspath(__file__))
-
-
-def _tcl_runtime_can_read(path: str) -> bool:
-    if os.name != "nt":
-        return os.path.exists(path)
-    try:
-        dll = ctypes.CDLL("tcl86t.dll")
-        dll.Tcl_CreateInterp.restype = ctypes.c_void_p
-        interp = dll.Tcl_CreateInterp()
-        if not interp:
-            return os.path.exists(path)
-        dll.Tcl_Eval.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-        dll.Tcl_Eval.restype = ctypes.c_int
-        dll.Tcl_GetStringResult.argtypes = [ctypes.c_void_p]
-        dll.Tcl_GetStringResult.restype = ctypes.c_char_p
-        tcl_path = path.replace("\\", "/")
-        dll.Tcl_Eval(interp, f"file exists {{{tcl_path}}}".encode("utf-8"))
-        result = dll.Tcl_GetStringResult(interp)
-        return bool(result and result.decode("ascii", errors="ignore") == "1")
-    except Exception:
-        return os.path.exists(path)
 
 
 def _log_dir(kind: str) -> Path:
@@ -177,7 +144,7 @@ def _prepare_tk_library_paths() -> None:
             return False
         safe_init = os.path.join(tcl_env, "init.tcl")
         safe_tk_script = os.path.join(tk_env, "tk.tcl")
-        if _tcl_runtime_can_read(safe_init) and _tcl_runtime_can_read(safe_tk_script):
+        if os.path.exists(safe_init) and os.path.exists(safe_tk_script):
             os.environ["TCL_LIBRARY"] = tcl_env.replace("\\", "/")
             os.environ["TK_LIBRARY"] = tk_env.replace("\\", "/")
             return True
@@ -187,15 +154,12 @@ def _prepare_tk_library_paths() -> None:
         return
 
     for safe_root_path in tk_runtime_roots(TK_RUNTIME_DIRNAME):
-        safe_root = str(safe_root_path)
-        safe_tcl = os.path.join(safe_root, "tcl8.6")
-        safe_tk = os.path.join(safe_root, "tk8.6")
+        safe_root = path_for_tcl(safe_root_path)
+        if not is_ascii_path(safe_root):
+            continue
         try:
-            if not os.path.exists(os.path.join(safe_tcl, "init.tcl")):
-                shutil.copytree(source_tcl, safe_tcl, dirs_exist_ok=True)
-            if not os.path.exists(os.path.join(safe_tk, "tk.tcl")):
-                shutil.copytree(source_tk, safe_tk, dirs_exist_ok=True)
-            if use_tk_paths(safe_tcl, safe_tk):
+            safe_tcl, safe_tk = sync_tk_runtime(source_tcl, source_tk, safe_root)
+            if use_tk_paths(str(safe_tcl), str(safe_tk)):
                 return
         except OSError as exc:
             log_error("prepare_tk_library_paths", exc)
