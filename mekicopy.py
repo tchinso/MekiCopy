@@ -185,6 +185,8 @@ def _prepare_tk_library_paths() -> None:
     def use_tk_paths(tcl_path: str, tk_path: str) -> bool:
         tcl_env = path_for_tcl(tcl_path)
         tk_env = path_for_tcl(tk_path)
+        if not is_ascii_path(tcl_env) or not is_ascii_path(tk_env):
+            return False
         safe_init = os.path.join(tcl_env, "init.tcl")
         safe_tk_script = os.path.join(tk_env, "tk.tcl")
         files_exist = os.path.exists(safe_init) and os.path.exists(safe_tk_script)

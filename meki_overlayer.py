@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from runtime_paths import log_dir as runtime_log_dir
-from runtime_paths import path_for_tcl, tk_runtime_roots
+from runtime_paths import is_ascii_path, path_for_tcl, tk_runtime_roots
 
 TK_RUNTIME_DIRNAME = "MekiCopyRuntime"
 _DLL_DIR_HANDLES = []
@@ -173,6 +173,8 @@ def _prepare_tk_library_paths() -> None:
     def use_tk_paths(tcl_path: str, tk_path: str) -> bool:
         tcl_env = path_for_tcl(tcl_path)
         tk_env = path_for_tcl(tk_path)
+        if not is_ascii_path(tcl_env) or not is_ascii_path(tk_env):
+            return False
         safe_init = os.path.join(tcl_env, "init.tcl")
         safe_tk_script = os.path.join(tk_env, "tk.tcl")
         if _tcl_runtime_can_read(safe_init) and _tcl_runtime_can_read(safe_tk_script):
