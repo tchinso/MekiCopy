@@ -55,7 +55,7 @@ from mekicopy_capture import (
 from runtime_paths import is_ascii_path, path_for_tcl, tk_runtime_roots
 
 EDGE_GRAB_PX = 8
-OCR_BUTTON_HEIGHT_PX = 400
+OCR_BUTTON_HEIGHT_PX = 200
 SELECTION_INSTRUCTION_FONT_SIZE = 36
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 ICON_FILENAME = "MekiCopy.ico"
@@ -2044,7 +2044,7 @@ class MainWindow(tk.Tk):
         self.tray_icon = WindowsTrayIcon(self, "MekiCopy", self._restore_from_tray)
         self.title("MekiCopy")
         _set_window_icon(self)
-        self.geometry("460x820")
+        self.geometry("460x500")
         self.resizable(False, False)
         self.draft_region: Region | None = None
         self.active_region: Region | None = None

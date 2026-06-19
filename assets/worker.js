@@ -9,7 +9,7 @@ let lastProgressPercent = -1;
 let lastProgressSentAt = 0;
 
 const CLOSE_WARNING =
-  "이 HYTransWorker 창을 닫으면 HYTrans와 연결이 끊겨 번역이 중단될 수 있습니다. 정말 닫을까요?";
+  "이 HYTransWorker 창을 닫으면 HYTrans와 연결이 끊겨 번역이 중단될 수 있습니다. 닫는 대신 최소화하는 것을 권장합니다. 정말 닫을까요?";
 
 const statusEl = document.getElementById("status");
 const progressBarEl = document.getElementById("progress-bar");
