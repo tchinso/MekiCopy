@@ -24,22 +24,42 @@ if getattr(sys, "frozen", False):
     )
 
 import tkinter as tk
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from tkinter import colorchooser, font as tkfont, messagebox, simpledialog
 from ctypes import wintypes
 from typing import Callable
 import traceback
 
-from PIL import Image, ImageGrab, ImageStat
 import mss
+from PIL import Image, ImageTk
+from mekicopy_capture import (
+    MIN_SIZE_PX,
+    CaptureStatus,
+    MonitorInfo,
+    Region,
+    RegionRatio,
+    capture_problem_message as _capture_problem_message,
+    capture_region_result,
+    clamp_region_to_monitor as _clamp_region_to_monitor,
+    configure_capture_runtime,
+    enable_dpi_awareness as _enable_dpi_awareness,
+    find_monitor_for_region as _find_monitor_for_region,
+    get_capture_manager,
+    match_monitor_by_previous_rect as _match_monitor_by_previous_rect,
+    monitor_signature as _monitor_signature,
+    ratio_for_region as _ratio_for_region,
+    region_from_ratio as _region_from_ratio,
+    regions_equal as _regions_equal,
+    run_capture_diagnostics,
+)
 from runtime_paths import is_ascii_path, path_for_tcl, tk_runtime_roots
 
 EDGE_GRAB_PX = 8
-MIN_SIZE_PX = 10
 OCR_BUTTON_HEIGHT_PX = 400
 SELECTION_INSTRUCTION_FONT_SIZE = 36
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 ICON_FILENAME = "MekiCopy.ico"
+APP_USER_MODEL_ID = "MekiCopy.MekiCopy"
 HYTRANS_DEFAULT_PORT = 6550
 OVERLAYER_DEFAULT_PORT = 6551
 _OCR_ENGINE = None
@@ -47,8 +67,7 @@ _DLL_DIR_HANDLES = []
 _RUNTIME_PATH_READY = False
 _WINDOW_STREAM = None
 _ORT_PRELOAD_READY = False
-_DPI_AWARENESS_READY = False
-_CAPTURE_MANAGER = None
+_APP_USER_MODEL_ID_READY = False
 
 
 def _get_app_dir() -> str:
@@ -63,25 +82,16 @@ def _get_resource_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def _enable_dpi_awareness() -> None:
-    global _DPI_AWARENESS_READY
-    if _DPI_AWARENESS_READY or os.name != "nt":
+def _set_app_user_model_id() -> None:
+    global _APP_USER_MODEL_ID_READY
+    if _APP_USER_MODEL_ID_READY or os.name != "nt":
         return
-    _DPI_AWARENESS_READY = True
+    _APP_USER_MODEL_ID_READY = True
     try:
-        # Per-monitor v2 keeps Tk coordinates aligned with physical pixels where
-        # Windows allows it. Older systems fall back below.
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
-        return
-    except Exception:
-        pass
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        return
-    except Exception:
-        pass
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
+        shell32 = ctypes.windll.shell32
+        shell32.SetCurrentProcessExplicitAppUserModelID.argtypes = [wintypes.LPCWSTR]
+        shell32.SetCurrentProcessExplicitAppUserModelID.restype = ctypes.c_long
+        shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
     except Exception:
         pass
 
@@ -122,6 +132,14 @@ def _set_window_icon(window: tk.Misc) -> None:
     try:
         window.iconbitmap(icon_path)
     except tk.TclError:
+        pass
+    try:
+        with Image.open(icon_path) as icon_image:
+            icon_image.seek(0)
+            photo = ImageTk.PhotoImage(icon_image.copy())
+        window.iconphoto(True, photo)
+        setattr(window, "_mekicopy_icon_photo", photo)
+    except Exception:
         pass
 
 
@@ -282,14 +300,6 @@ class Bookmark:
 
 
 @dataclass
-class Region:
-    left: int
-    top: int
-    width: int
-    height: int
-
-
-@dataclass
 class AppSettings:
     minimize_to_tray: bool = False
     main_always_on_top: bool = False
@@ -312,758 +322,6 @@ class AppSettings:
     overlayer_text_size: int = 28
     overlayer_text_font: str = "Malgun Gothic"
     debug_logging: bool = False
-
-
-class CaptureStatus:
-    OK = "ok"
-    DISPLAY_CHANGED = "display_changed"
-    REGION_CLAMPED = "region_clamped"
-    REGION_OUT_OF_BOUNDS = "region_out_of_bounds"
-    BLACK_FRAME_SUSPECTED = "black_frame_suspected"
-    CAPTURE_EXCEPTION = "capture_exception"
-    SIZE_MISMATCH = "size_mismatch"
-
-
-@dataclass(frozen=True)
-class MonitorInfo:
-    index: int
-    left: int
-    top: int
-    width: int
-    height: int
-    is_virtual: bool = False
-
-    @property
-    def right(self) -> int:
-        return self.left + self.width
-
-    @property
-    def bottom(self) -> int:
-        return self.top + self.height
-
-    @property
-    def center(self) -> tuple[float, float]:
-        return (self.left + self.width / 2, self.top + self.height / 2)
-
-    @property
-    def signature_part(self) -> tuple[int, int, int, int]:
-        return (self.left, self.top, self.width, self.height)
-
-    def to_dict(self) -> dict:
-        return {
-            "index": self.index,
-            "left": self.left,
-            "top": self.top,
-            "width": self.width,
-            "height": self.height,
-            "is_virtual": self.is_virtual,
-        }
-
-
-@dataclass(frozen=True)
-class RegionRatio:
-    x_ratio: float
-    y_ratio: float
-    w_ratio: float
-    h_ratio: float
-
-    def to_dict(self) -> dict:
-        return {
-            "x_ratio": self.x_ratio,
-            "y_ratio": self.y_ratio,
-            "w_ratio": self.w_ratio,
-            "h_ratio": self.h_ratio,
-        }
-
-
-@dataclass
-class CaptureFrameStats:
-    width: int
-    height: int
-    mean: float
-    stddev: float
-    blank_suspected: bool
-
-    def to_dict(self) -> dict:
-        return {
-            "width": self.width,
-            "height": self.height,
-            "mean": round(self.mean, 3),
-            "stddev": round(self.stddev, 3),
-            "blank_suspected": self.blank_suspected,
-        }
-
-
-@dataclass
-class CaptureResult:
-    image: Image.Image | None
-    status: str
-    strategy: str
-    region: Region
-    monitors: list[MonitorInfo] = field(default_factory=list)
-    stats: CaptureFrameStats | None = None
-    error: str | None = None
-    warnings: list[str] = field(default_factory=list)
-
-
-def _monitor_from_mss(index: int, monitor: dict, is_virtual: bool) -> MonitorInfo:
-    return MonitorInfo(
-        index=index,
-        left=int(monitor.get("left", 0)),
-        top=int(monitor.get("top", 0)),
-        width=int(monitor.get("width", 0)),
-        height=int(monitor.get("height", 0)),
-        is_virtual=is_virtual,
-    )
-
-
-def _monitor_signature(monitors: list[MonitorInfo]) -> tuple[tuple[int, int, int, int], ...]:
-    return tuple(monitor.signature_part for monitor in monitors)
-
-
-def _region_right(region: Region) -> int:
-    return region.left + region.width
-
-
-def _region_bottom(region: Region) -> int:
-    return region.top + region.height
-
-
-def _region_center(region: Region) -> tuple[float, float]:
-    return (region.left + region.width / 2, region.top + region.height / 2)
-
-
-def _point_in_monitor(point: tuple[float, float], monitor: MonitorInfo) -> bool:
-    x, y = point
-    return monitor.left <= x < monitor.right and monitor.top <= y < monitor.bottom
-
-
-def _region_intersection_area(region: Region, monitor: MonitorInfo) -> int:
-    left = max(region.left, monitor.left)
-    top = max(region.top, monitor.top)
-    right = min(_region_right(region), monitor.right)
-    bottom = min(_region_bottom(region), monitor.bottom)
-    return max(0, right - left) * max(0, bottom - top)
-
-
-def _find_monitor_for_region(
-    region: Region,
-    monitors: list[MonitorInfo],
-) -> MonitorInfo | None:
-    if not monitors:
-        return None
-    center = _region_center(region)
-    for monitor in monitors:
-        if _point_in_monitor(center, monitor):
-            return monitor
-    intersecting = [
-        (monitor, _region_intersection_area(region, monitor))
-        for monitor in monitors
-    ]
-    intersecting.sort(key=lambda item: item[1], reverse=True)
-    if intersecting and intersecting[0][1] > 0:
-        return intersecting[0][0]
-    cx, cy = center
-    return min(
-        monitors,
-        key=lambda monitor: (monitor.center[0] - cx) ** 2 + (monitor.center[1] - cy) ** 2,
-    )
-
-
-def _match_monitor_by_previous_rect(
-    previous: MonitorInfo | None,
-    monitors: list[MonitorInfo],
-) -> MonitorInfo | None:
-    if not monitors:
-        return None
-    if previous is None:
-        return monitors[0]
-    for monitor in monitors:
-        if monitor.signature_part == previous.signature_part:
-            return monitor
-    px, py = previous.center
-    return min(
-        monitors,
-        key=lambda monitor: (monitor.center[0] - px) ** 2 + (monitor.center[1] - py) ** 2,
-    )
-
-
-def _ratio_for_region(region: Region, monitor: MonitorInfo) -> RegionRatio:
-    width = max(1, monitor.width)
-    height = max(1, monitor.height)
-    return RegionRatio(
-        x_ratio=(region.left - monitor.left) / width,
-        y_ratio=(region.top - monitor.top) / height,
-        w_ratio=region.width / width,
-        h_ratio=region.height / height,
-    )
-
-
-def _region_from_ratio(monitor: MonitorInfo, ratio: RegionRatio) -> Region:
-    return Region(
-        left=monitor.left + int(round(monitor.width * ratio.x_ratio)),
-        top=monitor.top + int(round(monitor.height * ratio.y_ratio)),
-        width=max(MIN_SIZE_PX, int(round(monitor.width * ratio.w_ratio))),
-        height=max(MIN_SIZE_PX, int(round(monitor.height * ratio.h_ratio))),
-    )
-
-
-def _clamp_region_to_monitor(region: Region, monitor: MonitorInfo) -> Region:
-    left = max(region.left, monitor.left)
-    top = max(region.top, monitor.top)
-    right = min(_region_right(region), monitor.right)
-    bottom = min(_region_bottom(region), monitor.bottom)
-    return Region(
-        left=left,
-        top=top,
-        width=max(0, right - left),
-        height=max(0, bottom - top),
-    )
-
-
-def _regions_equal(first: Region, second: Region) -> bool:
-    return (
-        first.left == second.left
-        and first.top == second.top
-        and first.width == second.width
-        and first.height == second.height
-    )
-
-
-def _capture_stats(image: Image.Image) -> CaptureFrameStats:
-    sample = image.convert("L")
-    if sample.width > 240 or sample.height > 240:
-        sample.thumbnail((240, 240))
-    stat = ImageStat.Stat(sample)
-    mean = float(stat.mean[0]) if stat.mean else 0.0
-    stddev = float(stat.stddev[0]) if stat.stddev else 0.0
-    blank_suspected = mean <= 3.0 and stddev <= 2.0
-    return CaptureFrameStats(
-        width=image.width,
-        height=image.height,
-        mean=mean,
-        stddev=stddev,
-        blank_suspected=blank_suspected,
-    )
-
-
-class CaptureManager:
-    def __init__(self) -> None:
-        self.sct = None
-        self.monitor_signature: tuple[tuple[int, int, int, int], ...] = ()
-        self.last_result: CaptureResult | None = None
-        self.blank_frame_count = 0
-        self.failure_count = 0
-        self.reinitialize("startup")
-
-    def close(self) -> None:
-        if self.sct is None:
-            return
-        try:
-            self.sct.close()
-        except Exception:
-            pass
-        self.sct = None
-
-    def reinitialize(self, reason: str) -> None:
-        self.close()
-        self.sct = mss.mss()
-        self.monitor_signature = _monitor_signature(self.get_monitors(refresh=False))
-        _log_runtime_message(
-            "capture_reinitialize",
-            f"reason: {reason}\nmonitor_signature: {self.monitor_signature}",
-        )
-
-    def get_monitors(self, refresh: bool = True) -> list[MonitorInfo]:
-        if self.sct is None:
-            self.reinitialize("missing_mss")
-        assert self.sct is not None
-        raw_monitors = list(self.sct.monitors)
-        monitors: list[MonitorInfo] = []
-        for index, monitor in enumerate(raw_monitors):
-            monitors.append(_monitor_from_mss(index, monitor, is_virtual=(index == 0)))
-        return monitors
-
-    def get_real_monitors(self) -> list[MonitorInfo]:
-        monitors = [monitor for monitor in self.get_monitors() if not monitor.is_virtual]
-        if monitors:
-            return monitors
-        return self.get_monitors()[:1]
-
-    def refresh_if_display_changed(self) -> bool:
-        try:
-            with mss.mss() as fresh:
-                fresh_monitors = [
-                    _monitor_from_mss(index, monitor, is_virtual=(index == 0))
-                    for index, monitor in enumerate(list(fresh.monitors))
-                ]
-            fresh_signature = _monitor_signature(fresh_monitors)
-        except Exception as exc:
-            _log_runtime_error("capture_check_display_changed", exc)
-            self.reinitialize("display_check_failed")
-            return True
-        if fresh_signature == self.monitor_signature:
-            return False
-        previous = self.monitor_signature
-        self.reinitialize("display_changed")
-        _log_runtime_message(
-            "capture_display_changed",
-            f"before: {previous}\nafter: {fresh_signature}",
-        )
-        return True
-
-    def resolve_region(
-        self,
-        region: Region,
-        previous_monitor: MonitorInfo | None = None,
-        ratio: RegionRatio | None = None,
-    ) -> tuple[Region, MonitorInfo | None, RegionRatio | None, list[str]]:
-        display_changed = self.refresh_if_display_changed()
-        monitors = self.get_real_monitors()
-        messages: list[str] = []
-        target_monitor = _find_monitor_for_region(region, monitors)
-        adjusted = region
-
-        if display_changed and ratio is not None:
-            matched = _match_monitor_by_previous_rect(previous_monitor, monitors)
-            if matched is not None:
-                adjusted = _region_from_ratio(matched, ratio)
-                target_monitor = matched
-                messages.append("디스플레이 변경 감지: 비율 좌표로 OCR 영역을 복구했습니다.")
-        elif ratio is not None and target_monitor is not None:
-            if _region_intersection_area(region, target_monitor) <= 0:
-                adjusted = _region_from_ratio(target_monitor, ratio)
-                messages.append("OCR 영역이 모니터 밖에 있어 비율 좌표로 복구했습니다.")
-
-        if target_monitor is None:
-            target_monitor = _find_monitor_for_region(adjusted, monitors)
-        if target_monitor is None:
-            return adjusted, None, ratio, messages
-
-        clamped = _clamp_region_to_monitor(adjusted, target_monitor)
-        if not _regions_equal(clamped, adjusted):
-            adjusted = clamped
-            messages.append("OCR 영역을 현재 모니터 범위 안으로 보정했습니다.")
-
-        if adjusted.width < MIN_SIZE_PX or adjusted.height < MIN_SIZE_PX:
-            messages.append("OCR 영역이 너무 작습니다. 영역을 다시 지정해주세요.")
-            return adjusted, target_monitor, ratio, messages
-
-        return adjusted, target_monitor, _ratio_for_region(adjusted, target_monitor), messages
-
-    def capture_region(self, requested_region: Region) -> CaptureResult:
-        _enable_dpi_awareness()
-        display_changed = self.refresh_if_display_changed()
-        monitors = self.get_monitors()
-        virtual_monitor = monitors[0] if monitors else None
-        warnings: list[str] = []
-        region = requested_region
-        status = CaptureStatus.DISPLAY_CHANGED if display_changed else CaptureStatus.OK
-
-        if requested_region.width < MIN_SIZE_PX or requested_region.height < MIN_SIZE_PX:
-            result = CaptureResult(
-                image=None,
-                status=CaptureStatus.REGION_OUT_OF_BOUNDS,
-                strategy="none",
-                region=requested_region,
-                monitors=monitors,
-                error="capture region is too small",
-            )
-            self.last_result = result
-            return result
-
-        if virtual_monitor is not None:
-            clamped = _clamp_region_to_monitor(requested_region, virtual_monitor)
-            if clamped.width < MIN_SIZE_PX or clamped.height < MIN_SIZE_PX:
-                result = CaptureResult(
-                    image=None,
-                    status=CaptureStatus.REGION_OUT_OF_BOUNDS,
-                    strategy="none",
-                    region=clamped,
-                    monitors=monitors,
-                    error="capture region is outside the virtual desktop",
-                )
-                self.last_result = result
-                return result
-            if not _regions_equal(clamped, requested_region):
-                region = clamped
-                status = CaptureStatus.REGION_CLAMPED
-                warnings.append("capture region was clamped to the virtual desktop")
-
-        attempts = [
-            ("mss", False),
-            ("mss_reinitialized", True),
-            ("pillow_imagegrab", False),
-            ("gdi_bitblt", False),
-        ]
-        retry_mss = False
-        first_blank: tuple[str, Image.Image, CaptureFrameStats] | None = None
-        errors: list[str] = []
-
-        for strategy, force_reinit in attempts:
-            if strategy == "mss_reinitialized" and not retry_mss:
-                continue
-            try:
-                if force_reinit:
-                    self.reinitialize("retry_after_failed_or_blank_frame")
-                    monitors = self.get_monitors()
-                image = self._capture_with_strategy(strategy, region)
-                if image.size != (region.width, region.height):
-                    stats = _capture_stats(image)
-                    errors.append(
-                        f"{strategy}: size mismatch {image.size} != {(region.width, region.height)}"
-                    )
-                    if first_blank is None:
-                        first_blank = (strategy, image, stats)
-                    retry_mss = retry_mss or strategy == "mss"
-                    continue
-                stats = _capture_stats(image)
-                if stats.blank_suspected:
-                    if first_blank is None:
-                        first_blank = (strategy, image, stats)
-                    retry_mss = retry_mss or strategy == "mss"
-                    continue
-                self.blank_frame_count = 0
-                self.failure_count = 0
-                result = CaptureResult(
-                    image=image,
-                    status=status,
-                    strategy=strategy,
-                    region=region,
-                    monitors=monitors,
-                    stats=stats,
-                    warnings=warnings,
-                )
-                self.last_result = result
-                return result
-            except Exception as exc:
-                errors.append(f"{strategy}: {type(exc).__name__}: {exc}")
-                if strategy == "mss":
-                    retry_mss = True
-                    self.reinitialize("mss_exception")
-
-        if first_blank is not None:
-            strategy, image, stats = first_blank
-            self.blank_frame_count += 1
-            self.failure_count += 1
-            result = CaptureResult(
-                image=image,
-                status=CaptureStatus.BLACK_FRAME_SUSPECTED,
-                strategy=strategy,
-                region=region,
-                monitors=monitors,
-                stats=stats,
-                error="\n".join(errors) if errors else None,
-                warnings=warnings,
-            )
-            self.last_result = result
-            _log_runtime_message(
-                "capture_blank_frame",
-                (
-                    f"count: {self.blank_frame_count}\n"
-                    f"strategy: {strategy}\n"
-                    f"region: {region}\n"
-                    f"stats: {stats.to_dict()}\n"
-                    f"errors: {errors}"
-                ),
-            )
-            return result
-
-        self.failure_count += 1
-        if self.failure_count >= 3:
-            self.reinitialize("repeated_capture_failures")
-        result = CaptureResult(
-            image=None,
-            status=CaptureStatus.CAPTURE_EXCEPTION,
-            strategy="none",
-            region=region,
-            monitors=monitors,
-            error="\n".join(errors) if errors else "capture failed",
-            warnings=warnings,
-        )
-        self.last_result = result
-        _log_runtime_message("capture_failed", result.error or "")
-        return result
-
-    def _capture_with_strategy(self, strategy: str, region: Region) -> Image.Image:
-        if strategy in ("mss", "mss_reinitialized"):
-            return self._capture_with_mss(region)
-        if strategy == "pillow_imagegrab":
-            return self._capture_with_pillow(region)
-        if strategy == "gdi_bitblt":
-            return self._capture_with_gdi(region)
-        raise ValueError(f"unknown capture strategy: {strategy}")
-
-    def _capture_with_mss(self, region: Region) -> Image.Image:
-        if self.sct is None:
-            self.reinitialize("missing_mss_before_capture")
-        assert self.sct is not None
-        mss_region = {
-            "left": region.left,
-            "top": region.top,
-            "width": region.width,
-            "height": region.height,
-        }
-        sct_image = self.sct.grab(mss_region)
-        return Image.frombytes("RGB", sct_image.size, sct_image.rgb)
-
-    def _capture_with_pillow(self, region: Region) -> Image.Image:
-        bbox = (
-            region.left,
-            region.top,
-            _region_right(region),
-            _region_bottom(region),
-        )
-        try:
-            image = ImageGrab.grab(bbox=bbox, all_screens=True)
-        except TypeError:
-            image = ImageGrab.grab(bbox=bbox)
-        return image.convert("RGB")
-
-    def _capture_with_gdi(self, region: Region) -> Image.Image:
-        if os.name != "nt":
-            raise RuntimeError("GDI capture is only available on Windows")
-
-        user32 = ctypes.windll.user32
-        gdi32 = ctypes.windll.gdi32
-        SRCCOPY = 0x00CC0020
-        CAPTUREBLT = 0x40000000
-        DIB_RGB_COLORS = 0
-
-        user32.GetDC.restype = wintypes.HDC
-        user32.GetDC.argtypes = [wintypes.HWND]
-        user32.ReleaseDC.restype = ctypes.c_int
-        user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
-        gdi32.CreateCompatibleDC.restype = wintypes.HDC
-        gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
-        gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
-        gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
-        gdi32.SelectObject.restype = wintypes.HGDIOBJ
-        gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
-        gdi32.BitBlt.restype = wintypes.BOOL
-        gdi32.BitBlt.argtypes = [
-            wintypes.HDC,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            wintypes.HDC,
-            ctypes.c_int,
-            ctypes.c_int,
-            wintypes.DWORD,
-        ]
-        gdi32.GetDIBits.restype = ctypes.c_int
-        gdi32.GetDIBits.argtypes = [
-            wintypes.HDC,
-            wintypes.HBITMAP,
-            wintypes.UINT,
-            wintypes.UINT,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            wintypes.UINT,
-        ]
-        gdi32.DeleteObject.restype = wintypes.BOOL
-        gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
-        gdi32.DeleteDC.restype = wintypes.BOOL
-        gdi32.DeleteDC.argtypes = [wintypes.HDC]
-
-        class BITMAPINFOHEADER(ctypes.Structure):
-            _fields_ = [
-                ("biSize", wintypes.DWORD),
-                ("biWidth", wintypes.LONG),
-                ("biHeight", wintypes.LONG),
-                ("biPlanes", wintypes.WORD),
-                ("biBitCount", wintypes.WORD),
-                ("biCompression", wintypes.DWORD),
-                ("biSizeImage", wintypes.DWORD),
-                ("biXPelsPerMeter", wintypes.LONG),
-                ("biYPelsPerMeter", wintypes.LONG),
-                ("biClrUsed", wintypes.DWORD),
-                ("biClrImportant", wintypes.DWORD),
-            ]
-
-        class BITMAPINFO(ctypes.Structure):
-            _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
-
-        hdc_screen = user32.GetDC(None)
-        if not hdc_screen:
-            raise RuntimeError("GetDC failed")
-        hdc_mem = None
-        hbitmap = None
-        old_bitmap = None
-        try:
-            hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
-            if not hdc_mem:
-                raise RuntimeError("CreateCompatibleDC failed")
-            hbitmap = gdi32.CreateCompatibleBitmap(hdc_screen, region.width, region.height)
-            if not hbitmap:
-                raise RuntimeError("CreateCompatibleBitmap failed")
-            old_bitmap = gdi32.SelectObject(hdc_mem, hbitmap)
-            if not gdi32.BitBlt(
-                hdc_mem,
-                0,
-                0,
-                region.width,
-                region.height,
-                hdc_screen,
-                region.left,
-                region.top,
-                SRCCOPY | CAPTUREBLT,
-            ):
-                raise RuntimeError("BitBlt failed")
-
-            bitmap_info = BITMAPINFO()
-            bitmap_info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-            bitmap_info.bmiHeader.biWidth = region.width
-            bitmap_info.bmiHeader.biHeight = -region.height
-            bitmap_info.bmiHeader.biPlanes = 1
-            bitmap_info.bmiHeader.biBitCount = 32
-            bitmap_info.bmiHeader.biCompression = 0
-            buffer_size = region.width * region.height * 4
-            pixels = ctypes.create_string_buffer(buffer_size)
-            lines = gdi32.GetDIBits(
-                hdc_mem,
-                hbitmap,
-                0,
-                region.height,
-                pixels,
-                ctypes.byref(bitmap_info),
-                DIB_RGB_COLORS,
-            )
-            if lines != region.height:
-                raise RuntimeError("GetDIBits failed")
-            return Image.frombuffer(
-                "RGB",
-                (region.width, region.height),
-                pixels,
-                "raw",
-                "BGRX",
-                0,
-                1,
-            ).copy()
-        finally:
-            if old_bitmap and hdc_mem:
-                gdi32.SelectObject(hdc_mem, old_bitmap)
-            if hbitmap:
-                gdi32.DeleteObject(hbitmap)
-            if hdc_mem:
-                gdi32.DeleteDC(hdc_mem)
-            user32.ReleaseDC(None, hdc_screen)
-
-
-def get_capture_manager() -> CaptureManager:
-    global _CAPTURE_MANAGER
-    if _CAPTURE_MANAGER is None:
-        _CAPTURE_MANAGER = CaptureManager()
-    return _CAPTURE_MANAGER
-
-
-def capture_region_result(left: int, top: int, width: int, height: int) -> CaptureResult:
-    region = Region(left=left, top=top, width=width, height=height)
-    return get_capture_manager().capture_region(region)
-
-
-def _capture_problem_message(result: CaptureResult) -> str:
-    if result.status == CaptureStatus.BLACK_FRAME_SUSPECTED:
-        return (
-            "캡처 결과가 검은 화면으로 의심됩니다.\n\n"
-            "가능한 원인:\n"
-            "- 게임이 독점 전체화면 모드로 실행 중일 수 있습니다.\n"
-            "- 구형 DirectDraw/DirectX 렌더링이 mss/GDI 캡처를 막고 있을 수 있습니다.\n"
-            "- 브라우저, Electron, WebView 기반 게임이면 하드웨어 가속 영향일 수 있습니다.\n\n"
-            "권장 해결:\n"
-            "1. 게임을 창모드 또는 무테창 모드로 바꿔보세요.\n"
-            "2. 구형 게임이면 DxWnd 또는 dgVoodoo2 같은 창모드 래퍼를 검토해보세요.\n"
-            "3. 브라우저/Electron 기반이면 하드웨어 가속을 꺼보세요.\n"
-            "4. 해상도가 바뀐 뒤에는 OCR 영역을 다시 지정해보세요."
-        )
-    if result.status == CaptureStatus.REGION_OUT_OF_BOUNDS:
-        return "OCR 영역이 현재 화면 범위를 벗어났습니다. 영역을 다시 지정해주세요."
-    if result.status == CaptureStatus.CAPTURE_EXCEPTION:
-        return f"화면 캡처에 실패했습니다.\n\n{result.error or '원인을 확인할 수 없습니다.'}"
-    if result.status == CaptureStatus.SIZE_MISMATCH:
-        return "캡처 이미지 크기가 예상과 다릅니다. 모니터를 다시 검색하거나 OCR 영역을 다시 지정해주세요."
-    return result.error or "캡처 상태를 확인해주세요."
-
-
-def run_capture_diagnostics(region: Region | None = None) -> str:
-    manager = get_capture_manager()
-    manager.reinitialize("diagnostics")
-    timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    directory = os.path.join(_get_app_dir(), "diagnostics", timestamp)
-    os.makedirs(directory, exist_ok=True)
-
-    monitors = manager.get_monitors()
-    report: dict = {
-        "timestamp": _dt.datetime.now().isoformat(),
-        "monitor_signature": _monitor_signature(monitors),
-        "monitors": [monitor.to_dict() for monitor in monitors],
-        "captures": [],
-        "last_result": None,
-    }
-
-    for monitor in monitors:
-        if monitor.width < MIN_SIZE_PX or monitor.height < MIN_SIZE_PX:
-            continue
-        capture_region_for_monitor = Region(
-            left=monitor.left,
-            top=monitor.top,
-            width=monitor.width,
-            height=monitor.height,
-        )
-        result = manager.capture_region(capture_region_for_monitor)
-        filename = f"monitor_{monitor.index}{'_virtual' if monitor.is_virtual else ''}.png"
-        entry = {
-            "monitor": monitor.to_dict(),
-            "status": result.status,
-            "strategy": result.strategy,
-            "file": filename if result.image else None,
-            "stats": result.stats.to_dict() if result.stats else None,
-            "error": result.error,
-        }
-        if result.image:
-            result.image.save(os.path.join(directory, filename))
-        report["captures"].append(entry)
-
-    if region is not None:
-        result = manager.capture_region(region)
-        filename = "current_ocr_region.png"
-        if result.image:
-            result.image.save(os.path.join(directory, filename))
-        report["current_ocr_region"] = {
-            "region": {
-                "left": region.left,
-                "top": region.top,
-                "width": region.width,
-                "height": region.height,
-            },
-            "status": result.status,
-            "strategy": result.strategy,
-            "file": filename if result.image else None,
-            "stats": result.stats.to_dict() if result.stats else None,
-            "error": result.error,
-            "warnings": result.warnings,
-        }
-
-    if manager.last_result is not None:
-        report["last_result"] = {
-            "status": manager.last_result.status,
-            "strategy": manager.last_result.strategy,
-            "region": {
-                "left": manager.last_result.region.left,
-                "top": manager.last_result.region.top,
-                "width": manager.last_result.region.width,
-                "height": manager.last_result.region.height,
-            },
-            "stats": manager.last_result.stats.to_dict()
-            if manager.last_result.stats
-            else None,
-            "error": manager.last_result.error,
-        }
-
-    with open(os.path.join(directory, "diagnostics.json"), "w", encoding="utf-8") as handle:
-        json.dump(report, handle, ensure_ascii=False, indent=2)
-    return directory
 
 
 def _normalize_port(port: int, fallback: int) -> int:
@@ -1290,6 +548,13 @@ def _log_runtime_message(stage: str, message: str) -> None:
             handle.write(message.rstrip() + "\n")
     except OSError:
         pass
+
+
+configure_capture_runtime(
+    app_dir_provider=_get_app_dir,
+    error_logger=_log_runtime_error,
+    message_logger=_log_runtime_message,
+)
 
 
 def _patch_onnxruntime_compat() -> None:
@@ -1863,7 +1128,6 @@ class WindowsTrayIcon:
     NIF_TIP = 0x00000004
     WM_USER = 0x0400
     WM_TRAY_CALLBACK = WM_USER + 20
-    WM_LBUTTONUP = 0x0202
     WM_LBUTTONDBLCLK = 0x0203
     WM_RBUTTONUP = 0x0205
     IMAGE_ICON = 1
@@ -1946,7 +1210,7 @@ class WindowsTrayIcon:
         if self._restore_pending:
             return
         self._restore_pending = True
-        self.root.after(0, self._handle_restore_requested)
+        self.root.after(80, self._handle_restore_requested)
 
     def _handle_restore_requested(self) -> None:
         if not self._active:
@@ -1999,7 +1263,6 @@ class WindowsTrayIcon:
 
         def _window_proc(hwnd, msg, wparam, lparam):
             if msg == self.WM_TRAY_CALLBACK and lparam in (
-                self.WM_LBUTTONUP,
                 self.WM_LBUTTONDBLCLK,
                 self.WM_RBUTTONUP,
             ):
@@ -2462,14 +1725,6 @@ class SettingsWindow(tk.Toplevel):
         font_menu.pack(side=tk.RIGHT)
         self.overlay_only_widgets.extend([font_row, font_menu])
 
-        test_button = tk.Button(
-            overlay_frame,
-            text="HYTrans, MekiOverlayer 연결 상태 확인",
-            command=self._on_test_connection,
-        )
-        test_button.pack(fill=tk.X, pady=(8, 2))
-        self.overlay_only_widgets.append(test_button)
-
         button_row = tk.Frame(body)
         button_row.pack(fill=tk.X, pady=(14, 0))
         save_button = tk.Button(button_row, text="저장", command=self._on_save)
@@ -2778,6 +2033,7 @@ class DetachedOcrButtonWindow:
 class MainWindow(tk.Tk):
     def __init__(self) -> None:
         _enable_dpi_awareness()
+        _set_app_user_model_id()
         _prepare_tk_library_paths()
         super().__init__()
         self.settings = load_settings()
@@ -2803,70 +2059,105 @@ class MainWindow(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
-        header = tk.Label(self, text="MekiCopy 빠른 실행", font=("Segoe UI", 12, "bold"))
-        header.pack(pady=10)
+        header = tk.Label(self, text="MekiCopy", font=("Segoe UI", 12, "bold"))
+        header.pack(pady=(10, 6))
 
-        self.status_label = tk.Label(self, text="", justify="left")
-        self.status_label.pack(padx=12, pady=6, fill=tk.X)
+        body = tk.Frame(self)
+        body.pack(padx=10, pady=(0, 10), fill=tk.BOTH, expand=True)
 
-        self.capture_status_label = tk.Label(
-            self,
-            text=self.capture_status_text,
-            justify="left",
-            wraplength=420,
-            fg="#1d4ed8",
-        )
-        self.capture_status_label.pack(padx=12, pady=(0, 6), fill=tk.X)
+        self.tab_buttons: dict[str, tk.Button] = {}
+        self.tab_frames: dict[str, tk.Frame] = {}
+        self.active_tab_name = "영역"
 
-        button_frame = tk.Frame(self)
-        button_frame.pack(padx=12, pady=6, fill=tk.BOTH, expand=True)
+        tab_bar = tk.Frame(body, width=118)
+        tab_bar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        tab_bar.pack_propagate(False)
+
+        content = tk.Frame(body)
+        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        for tab_name in ("영역", "캡쳐", "도구/설정", "행동"):
+            button = tk.Button(
+                tab_bar,
+                text=tab_name,
+                command=lambda name=tab_name: self._select_tab(name),
+                anchor="w",
+                padx=10,
+                pady=8,
+                relief=tk.FLAT,
+            )
+            button.pack(fill=tk.X, pady=2)
+            self.tab_buttons[tab_name] = button
+
+            frame = tk.Frame(content)
+            self.tab_frames[tab_name] = frame
+
+        self._build_region_tab(self.tab_frames["영역"])
+        self._build_capture_tab(self.tab_frames["캡쳐"])
+        self._build_tools_tab(self.tab_frames["도구/설정"])
+        self._build_action_tab(self.tab_frames["행동"])
+
+        self._select_tab(self.active_tab_name)
+        self._update_status()
+
+    def _build_region_tab(self, frame: tk.Frame) -> None:
+        self.status_label = tk.Label(frame, text="", justify="left", wraplength=300)
+        self.status_label.pack(pady=(4, 12), fill=tk.X)
 
         buttons = [
             ("임시 영역 선택", self._on_select_region),
-            ("임시 영역을 확정 영역으로 덮어쓰기", self._on_set_region),
-            ("영역 보기", self._on_view_regions),
-            ("캡처 진단 저장", self._on_capture_diagnostics),
-            ("모니터 다시 검색", self._on_refresh_capture_monitors),
-            ("비율 좌표로 영역 복구", self._on_restore_region_from_ratio),
+            ("현재 임시/확정 영역 보기", self._on_view_regions),
+            ("임시 영역을 확정", self._on_set_region),
             ("확정 영역을 북마크에 추가", self._on_save_active_bookmark),
             ("북마크 영역 불러오기", self._on_load_bookmark),
         ]
         for text, command in buttons:
-            button = tk.Button(button_frame, text=text, command=command)
-            button.pack(fill=tk.X, pady=4)
+            self._pack_tab_button(frame, text, command)
 
-        self.detach_button = tk.Button(
-            button_frame,
-            text="",
-            command=self._on_detach_ocr_button,
+    def _build_capture_tab(self, frame: tk.Frame) -> None:
+        self.capture_status_label = tk.Label(
+            frame,
+            text=self.capture_status_text,
+            justify="left",
+            wraplength=300,
+            fg="#1d4ed8",
         )
-        self.detach_button.pack(fill=tk.X, pady=4)
+        self.capture_status_label.pack(pady=(4, 12), fill=tk.X)
 
-        settings_button = tk.Button(
-            button_frame,
-            text="설정",
-            command=self._on_open_settings,
-        )
-        settings_button.pack(fill=tk.X, pady=4)
+        buttons = [
+            ("캡쳐 진단 저장", self._on_capture_diagnostics),
+            ("모니터 다시 검색", self._on_refresh_capture_monitors),
+            ("비율 좌표로 영역 복구", self._on_restore_region_from_ratio),
+        ]
+        for text, command in buttons:
+            self._pack_tab_button(frame, text, command)
 
-        self.overlay_button_frame = tk.Frame(button_frame)
-        self.hytrans_button = tk.Button(
-            self.overlay_button_frame,
-            text="HYTrans 서버 실행",
-            command=self._on_start_hytrans,
+    def _build_tools_tab(self, frame: tk.Frame) -> None:
+        self.hytrans_button = self._pack_tab_button(
+            frame,
+            "HYTrans 서버 실행",
+            self._on_start_hytrans,
         )
-        self.hytrans_button.pack(fill=tk.X, pady=4)
-        self.overlayer_button = tk.Button(
-            self.overlay_button_frame,
-            text="MekiOverlayer 실행",
-            command=self._on_start_overlayer,
+        self.overlayer_button = self._pack_tab_button(
+            frame,
+            "MekiOverlayer 실행",
+            self._on_start_overlayer,
         )
-        self.overlayer_button.pack(fill=tk.X, pady=4)
+        self._pack_tab_button(
+            frame,
+            "모든 도구 연결 상태확인",
+            self._on_test_overlay_connection,
+        )
+        self._pack_tab_button(frame, "설정", self._on_open_settings)
 
-        ocr_button_frame = tk.Frame(
-            button_frame,
-            height=OCR_BUTTON_HEIGHT_PX,
+    def _build_action_tab(self, frame: tk.Frame) -> None:
+        self.detach_button = self._pack_tab_button(
+            frame,
+            "",
+            self._on_detach_ocr_button,
         )
+
+        ocr_button_frame = tk.Frame(frame, height=OCR_BUTTON_HEIGHT_PX)
         ocr_button_frame.pack(fill=tk.X, pady=(10, 4))
         ocr_button_frame.pack_propagate(False)
         self.ocr_button = tk.Button(
@@ -2877,7 +2168,28 @@ class MainWindow(tk.Tk):
         )
         self.ocr_button.pack(fill=tk.BOTH, expand=True)
 
-        self._update_status()
+    def _pack_tab_button(
+        self,
+        frame: tk.Frame,
+        text: str,
+        command: Callable[[], None],
+    ) -> tk.Button:
+        button = tk.Button(frame, text=text, command=command, anchor="center")
+        button.pack(fill=tk.X, pady=4)
+        return button
+
+    def _select_tab(self, name: str) -> None:
+        self.active_tab_name = name
+        for tab_name, frame in self.tab_frames.items():
+            if tab_name == name:
+                frame.pack(fill=tk.BOTH, expand=True)
+            else:
+                frame.pack_forget()
+        for tab_name, button in self.tab_buttons.items():
+            if tab_name == name:
+                button.config(relief=tk.SUNKEN, bg="#dbeafe")
+            else:
+                button.config(relief=tk.FLAT, bg=self.cget("bg"))
 
     def ocr_action_label(self) -> str:
         if self.settings.overlay_translation_mode:
@@ -2885,16 +2197,11 @@ class MainWindow(tk.Tk):
         return "인식 후 복사"
 
     def _apply_overlay_mode_ui(self) -> None:
-        if self.settings.overlay_translation_mode:
-            if not self.overlay_button_frame.winfo_ismapped():
-                self.overlay_button_frame.pack(
-                    fill=tk.X,
-                    pady=(4, 0),
-                    before=self.ocr_button.master,
-                )
-        else:
-            if self.overlay_button_frame.winfo_ismapped():
-                self.overlay_button_frame.pack_forget()
+        overlay_state = tk.NORMAL if self.settings.overlay_translation_mode else tk.DISABLED
+        for button_name in ("hytrans_button", "overlayer_button"):
+            button = getattr(self, button_name, None)
+            if button is not None and button.winfo_exists():
+                button.config(state=overlay_state)
         self.ocr_button.config(text=self.ocr_action_label())
         self.detach_button.config(text=f"'{self.ocr_action_label()}' 버튼 분리하기")
 
@@ -3506,11 +2813,27 @@ def run_ui_self_test() -> None:
     try:
         app = MainWindow()
         app.update_idletasks()
-        ocr_button_height = app.ocr_button.winfo_height()
+        expected_tabs = {"영역", "캡쳐", "도구/설정", "행동"}
+        if set(app.tab_frames) != expected_tabs:
+            raise RuntimeError(f"unexpected main tabs: {set(app.tab_frames)}")
+        app._select_tab("행동")
+        app.update_idletasks()
+        ocr_button_height = app.ocr_button.master.winfo_height()
         if ocr_button_height != OCR_BUTTON_HEIGHT_PX:
             raise RuntimeError(
                 f"main OCR button height is {ocr_button_height}, expected {OCR_BUTTON_HEIGHT_PX}"
             )
+        app._select_tab("도구/설정")
+        app.update_idletasks()
+        expected_overlay_state = (
+            tk.NORMAL if app.settings.overlay_translation_mode else tk.DISABLED
+        )
+        if app.hytrans_button.cget("state") != expected_overlay_state:
+            raise RuntimeError("HYTrans button state does not match overlay mode")
+        if app.overlayer_button.cget("state") != expected_overlay_state:
+            raise RuntimeError("MekiOverlayer button state does not match overlay mode")
+        app._select_tab("영역")
+        app.update_idletasks()
 
         bookmark = Bookmark(name="self-test", left=11, top=22, width=333, height=44)
         expected_region = Region(left=11, top=22, width=333, height=44)
@@ -3562,6 +2885,7 @@ def run_ui_self_test() -> None:
 
 def main() -> None:
     _enable_dpi_awareness()
+    _set_app_user_model_id()
     args = parse_args()
     if args.self_test_runtime:
         _log_runtime_message("self_test_runtime", "starting")

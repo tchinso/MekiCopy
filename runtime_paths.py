@@ -62,6 +62,15 @@ def _program_data_root() -> Path | None:
     return Path(base) / "MekiCopy"
 
 
+def _local_app_data_root() -> Path | None:
+    if os.name != "nt":
+        return None
+    base = os.environ.get("LOCALAPPDATA")
+    if not base:
+        return None
+    return Path(base) / "MekiCopy"
+
+
 def _can_write_directory(path: Path) -> bool:
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -95,6 +104,10 @@ def writable_app_data_dir(app_name: str) -> Path:
     if override:
         candidates.append(Path(override).expanduser() / app_name)
 
+    local_app_data = _local_app_data_root()
+    if local_app_data:
+        candidates.append(local_app_data / app_name)
+
     program_data = _program_data_root()
     if program_data:
         candidates.append(program_data / app_name)
@@ -127,6 +140,10 @@ def tk_runtime_roots(runtime_dirname: str) -> list[Path]:
     override = os.environ.get(DATA_DIR_ENV)
     if override:
         candidates.append(Path(override).expanduser() / runtime_dirname)
+
+    local_app_data = _local_app_data_root()
+    if local_app_data:
+        candidates.append(local_app_data / runtime_dirname)
 
     program_data = _program_data_root()
     if program_data:
