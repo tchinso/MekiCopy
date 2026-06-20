@@ -7,8 +7,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
-python -m pip install --upgrade pip
-python -m pip install meikiocr==0.3.2 mss pillow
+python -m pip install --upgrade pip==26.1.2
+python -m pip install --upgrade --upgrade-strategy eager --requirement "%~dp0requirements-build.txt"
+python -m pip install --force-reinstall --no-deps onnxruntime-gpu==1.27.0
 
 echo 설치가 완료되었습니다.
 endlocal

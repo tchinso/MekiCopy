@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 from runtime_paths import log_dir as runtime_log_dir
 from runtime_paths import is_ascii_path, path_for_tcl, sync_tk_runtime, tk_runtime_roots
+from runtime_paths import prepare_tk_environment
 
 TK_RUNTIME_DIRNAME = "MekiCopyRuntime"
 _DLL_DIR_HANDLES = []
@@ -33,6 +34,7 @@ if getattr(sys, "frozen", False):
                 _DLL_DIR_HANDLES.append(os.add_dll_directory(_frozen_resource_dir))
             except OSError:
                 pass
+prepare_tk_environment(TK_RUNTIME_DIRNAME)
 import tkinter as tk
 
 DEFAULT_PORT = 6551

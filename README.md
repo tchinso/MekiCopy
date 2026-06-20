@@ -34,7 +34,7 @@ MekiCopy는 화면의 특정 영역을 지정한 뒤 OCR로 글자를 인식하�
 1. Python 3.13 이상을 설치합니다.
 2. `install_mekiocr.bat`을 실행해 필요한 패키지를 설치합니다.
    ```
-   meikiocr==0.3.2, mss, pillow
+   meikiocr==0.3.4, mss==10.2.0, pillow==12.2.0
    ```
 3. `run_mekicopy.bat`을 실행하거나, 직접 `python mekicopy.py`를 실행합니다.
 

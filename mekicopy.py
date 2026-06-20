@@ -16,6 +16,16 @@ import urllib.request
 import time
 import zipfile
 
+from runtime_paths import (
+    is_ascii_path,
+    path_for_tcl,
+    prepare_tk_environment,
+    sync_tk_runtime,
+    tk_runtime_roots,
+)
+
+prepare_tk_environment("MekiCopyRuntime")
+
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import colorchooser, font as tkfont, messagebox, simpledialog
@@ -45,13 +55,6 @@ from mekicopy_capture import (
     regions_equal as _regions_equal,
     run_capture_diagnostics,
 )
-from runtime_paths import (
-    is_ascii_path,
-    path_for_tcl,
-    sync_tk_runtime,
-    tk_runtime_roots,
-)
-
 EDGE_GRAB_PX = 8
 OCR_BUTTON_HEIGHT_PX = 200
 SELECTION_INSTRUCTION_FONT_SIZE = 36
@@ -3217,10 +3220,20 @@ def main() -> None:
     args = parse_args()
     if args.self_test_runtime:
         _log_runtime_message("self_test_runtime", "starting")
+        from importlib.metadata import version
+
+        meikiocr_version = version("meikiocr")
+        if meikiocr_version != "0.3.4":
+            raise RuntimeError(
+                f"unexpected meikiocr version: {meikiocr_version} (expected 0.3.4)"
+            )
         engine = _get_ocr_engine()
         _log_runtime_message(
             "self_test_runtime",
-            f"active_provider: {getattr(engine, 'active_provider', 'unknown')}",
+            (
+                f"meikiocr_version: {meikiocr_version}\n"
+                f"active_provider: {getattr(engine, 'active_provider', 'unknown')}"
+            ),
         )
         return
     _prepare_tk_library_paths()

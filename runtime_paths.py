@@ -191,3 +191,57 @@ def sync_tk_runtime(
         marker.write_text(expected_signature, encoding="ascii")
 
     return target_tcl, target_tk
+
+
+def prepare_tk_environment(runtime_dirname: str = "MekiCopyRuntime") -> bool:
+    """Set ASCII-safe Tcl/Tk paths before tkinter imports _tkinter."""
+    if os.name != "nt":
+        return True
+
+    resource_root = Path(getattr(sys, "_MEIPASS", app_root()))
+    application_root = app_root()
+    base_root = Path(sys.base_prefix)
+    tcl_candidates = [
+        resource_root / "_tcl_data",
+        resource_root / "tcl" / "tcl8.6",
+        resource_root / runtime_dirname / "tcl8.6",
+        application_root / runtime_dirname / "tcl8.6",
+        base_root / "tcl" / "tcl8.6",
+    ]
+    tk_candidates = [
+        resource_root / "_tk_data",
+        resource_root / "tcl" / "tk8.6",
+        resource_root / runtime_dirname / "tk8.6",
+        application_root / runtime_dirname / "tk8.6",
+        base_root / "tcl" / "tk8.6",
+    ]
+    source_tcl = next((path for path in tcl_candidates if (path / "init.tcl").is_file()), None)
+    source_tk = next((path for path in tk_candidates if (path / "tk.tcl").is_file()), None)
+    if source_tcl is None or source_tk is None:
+        return False
+
+    def activate(tcl_path: str | Path, tk_path: str | Path) -> bool:
+        tcl_env = path_for_tcl(tcl_path)
+        tk_env = path_for_tcl(tk_path)
+        if not is_ascii_path(tcl_env) or not is_ascii_path(tk_env):
+            return False
+        if not (Path(tcl_env) / "init.tcl").is_file() or not (Path(tk_env) / "tk.tcl").is_file():
+            return False
+        os.environ["TCL_LIBRARY"] = tcl_env.replace("\\", "/")
+        os.environ["TK_LIBRARY"] = tk_env.replace("\\", "/")
+        return True
+
+    if activate(source_tcl, source_tk):
+        return True
+
+    for safe_root in tk_runtime_roots(runtime_dirname):
+        safe_root_text = path_for_tcl(safe_root)
+        if not is_ascii_path(safe_root_text):
+            continue
+        try:
+            safe_tcl, safe_tk = sync_tk_runtime(source_tcl, source_tk, safe_root_text)
+        except OSError:
+            continue
+        if activate(safe_tcl, safe_tk):
+            return True
+    return False

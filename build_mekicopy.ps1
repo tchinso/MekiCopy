@@ -8,6 +8,9 @@ $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
+$PipVersion = "26.1.2"
+$RequirementsFile = Join-Path $PSScriptRoot "requirements-build.txt"
+$OnnxRuntimeGpuVersion = "1.27.0"
 
 function Test-BuildPython {
     param([Parameter(Mandatory = $true)][string]$Candidate)
@@ -231,21 +234,22 @@ print(f"Tk {tkinter.TkVersion}")
 Invoke-CheckedPythonScript $versionProbe
 
 if (-not $SkipDependencyInstall) {
-    Invoke-CheckedPython @("-m", "pip", "install", "--upgrade", "pip")
+    Invoke-CheckedPython @("-m", "pip", "install", "--upgrade", "pip==$PipVersion")
     Invoke-CheckedPython @(
         "-m", "pip", "install", "--upgrade", "--upgrade-strategy", "eager",
-        "pyinstaller", "meikiocr", "mss", "pillow", "fastapi",
-        "uvicorn[standard]", "huggingface_hub"
+        "--requirement", $RequirementsFile
     )
-    # onnxruntime-gpu exposes the same Python package name as onnxruntime.
+    # meikiocr depends on the CPU distribution, while onnxruntime-gpu exposes
+    # the same import package. Reinstall the GPU wheel last so its binaries win.
     Invoke-CheckedPython @(
-        "-m", "pip", "install", "--upgrade", "--upgrade-strategy", "eager",
-        "onnxruntime-gpu"
+        "-m", "pip", "install", "--force-reinstall", "--no-deps",
+        "onnxruntime-gpu==$OnnxRuntimeGpuVersion"
     )
 }
 
 $dependencyProbe = @'
 import tkinter as tk
+from importlib.metadata import version
 import PyInstaller
 import fastapi
 import huggingface_hub
@@ -258,7 +262,22 @@ root = tk.Tk()
 root.withdraw()
 root.update_idletasks()
 root.destroy()
-print("Build dependencies and Tk are ready")
+expected = {
+    "meikiocr": "0.3.4",
+    "pyinstaller": "6.21.0",
+    "mss": "10.2.0",
+    "pillow": "12.2.0",
+    "fastapi": "0.138.0",
+    "uvicorn": "0.49.0",
+    "huggingface-hub": "1.20.1",
+    "onnxruntime-gpu": "1.27.0",
+}
+for package, wanted in expected.items():
+    actual = version(package)
+    if actual != wanted:
+        raise SystemExit(f"{package} {actual} is installed; expected {wanted}")
+    print(f"{package}=={actual}")
+print("Pinned build dependencies and Tk are ready")
 '@
 Invoke-CheckedPythonScript $dependencyProbe
 

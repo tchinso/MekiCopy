@@ -2,6 +2,7 @@
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import copy_metadata
 
 datas = [('runtime_models', 'runtime_models'), ('MekiCopy.ico', '.')]
 binaries = []
@@ -13,6 +14,7 @@ hiddenimports = [
     'tkinter.simpledialog',
 ]
 datas += collect_data_files('huggingface_hub')
+datas += copy_metadata('meikiocr')
 # Install onnxruntime-gpu last before building; its import package is onnxruntime.
 binaries += collect_dynamic_libs('onnxruntime')
 hiddenimports += collect_submodules('meikiocr')
