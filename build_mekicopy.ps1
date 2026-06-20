@@ -364,6 +364,9 @@ if (-not $SkipSmokeTests) {
     Write-Host "Running executable smoke tests..."
     Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-runtime")
     Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-ui")
+    Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-tray-stress")
+    Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-detached-button")
+    Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-detached-survival")
 
     $hyTransPort = Get-FreeTcpPort
     Invoke-HealthSmokeTest `
@@ -376,6 +379,18 @@ if (-not $SkipSmokeTests) {
         $overlayerExe `
         @("--port", "$overlayerPort") `
         $overlayerPort
+}
+
+# UI smoke tests intentionally publish a synthetic OCR region and window
+# geometry. Do not ship that test state to users.
+foreach ($runtimeStateName in @(
+    "detached_button_region.json",
+    "detached_button_geometry.json"
+)) {
+    $runtimeStatePath = Join-Path (Split-Path -Parent $mekiCopyExe) $runtimeStateName
+    if (Test-Path -LiteralPath $runtimeStatePath -PathType Leaf) {
+        Remove-Item -LiteralPath $runtimeStatePath -Force
+    }
 }
 
 Write-Host ""

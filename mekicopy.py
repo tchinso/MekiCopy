@@ -56,11 +56,15 @@ from mekicopy_capture import (
     run_capture_diagnostics,
 )
 EDGE_GRAB_PX = 8
-OCR_BUTTON_HEIGHT_PX = 200
+OCR_BUTTON_HEIGHT_PX = 300
 SELECTION_INSTRUCTION_FONT_SIZE = 36
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 ICON_FILENAME = "MekiCopy.ico"
 APP_USER_MODEL_ID = "MekiCopy.MekiCopy"
+DETACHED_WINDOW_TITLE = "MekiCopy - 분리 버튼"
+DETACHED_REGION_FILENAME = "detached_button_region.json"
+DETACHED_GEOMETRY_FILENAME = "detached_button_geometry.json"
+DETACHED_MUTEX_NAME = "Local\\MekiCopy.DetachedOcrButton"
 KOREAN_FONT_TEST_CHARACTER = "쿈"
 HYTRANS_DEFAULT_PORT = 6550
 OVERLAYER_DEFAULT_PORT = 6551
@@ -135,20 +139,30 @@ def _prepare_tk_library_paths() -> None:
 
     resource_dir = _get_resource_dir()
     app_dir = _get_app_dir()
-    tcl_candidates = [
-        os.path.join(resource_dir, "_tcl_data"),
-        os.path.join(resource_dir, "tcl", "tcl8.6"),
-        os.path.join(resource_dir, "MekiCopyRuntime", "tcl8.6"),
-        os.path.join(app_dir, "MekiCopyRuntime", "tcl8.6"),
-        os.path.join(sys.base_prefix, "tcl", "tcl8.6"),
-    ]
-    tk_candidates = [
-        os.path.join(resource_dir, "_tk_data"),
-        os.path.join(resource_dir, "tcl", "tk8.6"),
-        os.path.join(resource_dir, "MekiCopyRuntime", "tk8.6"),
-        os.path.join(app_dir, "MekiCopyRuntime", "tk8.6"),
-        os.path.join(sys.base_prefix, "tcl", "tk8.6"),
-    ]
+    if getattr(sys, "frozen", False):
+        tcl_candidates = [
+            os.path.join(resource_dir, "_tcl_data"),
+            os.path.join(resource_dir, "tcl", "tcl8.6"),
+            os.path.join(resource_dir, "MekiCopyRuntime", "tcl8.6"),
+            os.path.join(app_dir, "MekiCopyRuntime", "tcl8.6"),
+            os.path.join(sys.base_prefix, "tcl", "tcl8.6"),
+        ]
+        tk_candidates = [
+            os.path.join(resource_dir, "_tk_data"),
+            os.path.join(resource_dir, "tcl", "tk8.6"),
+            os.path.join(resource_dir, "MekiCopyRuntime", "tk8.6"),
+            os.path.join(app_dir, "MekiCopyRuntime", "tk8.6"),
+            os.path.join(sys.base_prefix, "tcl", "tk8.6"),
+        ]
+    else:
+        tcl_candidates = [
+            os.path.join(sys.base_prefix, "tcl", "tcl8.6"),
+            os.path.join(app_dir, "MekiCopyRuntime", "tcl8.6"),
+        ]
+        tk_candidates = [
+            os.path.join(sys.base_prefix, "tcl", "tk8.6"),
+            os.path.join(app_dir, "MekiCopyRuntime", "tk8.6"),
+        ]
     source_tcl = next(
         (
             path
@@ -245,6 +259,8 @@ def _prepare_windowed_streams() -> None:
 
 BOOKMARKS_FILE = os.path.join(_get_app_dir(), "bookmarks.txt")
 SETTINGS_FILE = os.path.join(_get_app_dir(), "settings.cfg")
+DETACHED_REGION_FILE = os.path.join(_get_app_dir(), DETACHED_REGION_FILENAME)
+DETACHED_GEOMETRY_FILE = os.path.join(_get_app_dir(), DETACHED_GEOMETRY_FILENAME)
 
 
 @dataclass
@@ -551,8 +567,93 @@ def save_settings(settings: AppSettings) -> None:
         ).lower(),
         "debug_logging": str(settings.debug_logging).lower(),
     }
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as handle:
-        parser.write(handle)
+    temp_path = f"{SETTINGS_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            parser.write(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, SETTINGS_FILE)
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+
+
+def _write_json_atomic(path: str, payload: dict) -> None:
+    temp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+
+
+def save_detached_region(region: Region) -> None:
+    _write_json_atomic(
+        DETACHED_REGION_FILE,
+        {
+            "version": 1,
+            "left": region.left,
+            "top": region.top,
+            "width": region.width,
+            "height": region.height,
+        },
+    )
+
+
+def load_detached_region() -> Region | None:
+    try:
+        with open(DETACHED_REGION_FILE, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        region = Region(
+            left=int(payload["left"]),
+            top=int(payload["top"]),
+            width=int(payload["width"]),
+            height=int(payload["height"]),
+        )
+        if region.width < MIN_SIZE_PX or region.height < MIN_SIZE_PX:
+            return None
+        return region
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def save_detached_geometry(geometry: str) -> None:
+    _write_json_atomic(
+        DETACHED_GEOMETRY_FILE,
+        {"version": 1, "geometry": str(geometry)},
+    )
+
+
+def load_detached_geometry(fallback: str = DETACHED_DEFAULT_GEOMETRY) -> str:
+    try:
+        with open(DETACHED_GEOMETRY_FILE, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        geometry = str(payload["geometry"]).strip()
+        if geometry:
+            return geometry
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        pass
+    return fallback
+
+
+def _geometry_size(geometry: str) -> tuple[int, int] | None:
+    try:
+        size = geometry.split("+", 1)[0]
+        width_text, height_text = size.split("x", 1)
+        return int(width_text), int(height_text)
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def load_bookmarks() -> dict[str, Bookmark]:
@@ -1197,6 +1298,28 @@ class RegionViewUI:
 
 _HICON = getattr(wintypes, "HICON", wintypes.HANDLE)
 _LRESULT = getattr(wintypes, "LRESULT", ctypes.c_ssize_t)
+_WNDPROC = ctypes.WINFUNCTYPE(
+    _LRESULT,
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+)
+
+
+class _WndClassW(ctypes.Structure):
+    _fields_ = [
+        ("style", wintypes.UINT),
+        ("lpfnWndProc", _WNDPROC),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", wintypes.HINSTANCE),
+        ("hIcon", _HICON),
+        ("hCursor", wintypes.HANDLE),
+        ("hbrBackground", wintypes.HANDLE),
+        ("lpszMenuName", wintypes.LPCWSTR),
+        ("lpszClassName", wintypes.LPCWSTR),
+    ]
 
 
 class _NotifyIconDataW(ctypes.Structure):
@@ -1225,7 +1348,7 @@ class WindowsTrayIcon:
     LR_LOADFROMFILE = 0x00000010
     LR_DEFAULTSIZE = 0x00000040
     IDI_APPLICATION = 32512
-    GWLP_WNDPROC = -4
+    RESTORE_POLL_MS = 25
 
     def __init__(
         self,
@@ -1238,27 +1361,24 @@ class WindowsTrayIcon:
         self.on_restore = on_restore
         self._hwnd: int | None = None
         self._hicon: int | None = None
-        self._old_wndproc: int | None = None
+        self._hinstance: int | None = None
+        self._window_class_name: str | None = None
+        self._window_class_atom: int | None = None
         self._wndproc = None
-        self._message_window: tk.Toplevel | None = None
         self._active = False
-        self._restore_pending = False
+        self._restore_requested = threading.Event()
+        self._closed = False
+        self._poll_after_id = self.root.after(
+            self.RESTORE_POLL_MS,
+            self._poll_restore_requests,
+        )
 
     def show(self) -> bool:
         if os.name != "nt" or self._active:
             return False
         try:
-            if not self._message_window or not self._message_window.winfo_exists():
-                self.root.update_idletasks()
-                self._message_window = tk.Toplevel(self.root)
-                self._message_window.withdraw()
-                self._message_window.title(self.tooltip)
-                self._message_window.update_idletasks()
-                self._hwnd = int(self._message_window.winfo_id())
-                if not self._hwnd:
-                    self.close()
-                    return False
-                self._subclass_window()
+            if not self._hwnd:
+                self._create_message_window()
             if not self._hicon:
                 self._hicon = self._load_icon()
             data = self._build_notify_data(self.NIF_MESSAGE | self.NIF_ICON | self.NIF_TIP)
@@ -1267,8 +1387,9 @@ class WindowsTrayIcon:
                 return False
             self._active = True
             return True
-        except Exception:
-            self.close()
+        except Exception as exc:
+            _log_runtime_error("tray_show", exc)
+            self._destroy_message_window()
             return False
 
     def hide(self) -> None:
@@ -1281,40 +1402,67 @@ class WindowsTrayIcon:
             except Exception:
                 pass
         self._active = False
-        self._restore_pending = False
+        self._restore_requested.clear()
 
     def close(self) -> None:
-        """Remove the icon and release the message window during application shutdown."""
+        """Remove the icon and native message window during application shutdown."""
+        if self._closed:
+            return
+        self._closed = True
         self.hide()
-        self._restore_window_proc()
+        if self._poll_after_id:
+            try:
+                self.root.after_cancel(self._poll_after_id)
+            except tk.TclError:
+                pass
+            self._poll_after_id = None
         self._destroy_message_window()
-        self._hwnd = None
 
     def _destroy_message_window(self) -> None:
-        if not self._message_window:
+        if os.name != "nt":
             return
+        user32 = ctypes.windll.user32
+        if self._hwnd:
+            try:
+                user32.DestroyWindow.argtypes = [wintypes.HWND]
+                user32.DestroyWindow.restype = wintypes.BOOL
+                user32.DestroyWindow(self._hwnd)
+            except Exception:
+                pass
+            self._hwnd = None
+        if self._window_class_name and self._hinstance:
+            try:
+                user32.UnregisterClassW.argtypes = [
+                    wintypes.LPCWSTR,
+                    wintypes.HINSTANCE,
+                ]
+                user32.UnregisterClassW.restype = wintypes.BOOL
+                user32.UnregisterClassW(self._window_class_name, self._hinstance)
+            except Exception:
+                pass
+        self._window_class_name = None
+        self._window_class_atom = None
+        self._hinstance = None
+        self._wndproc = None
+
+    def _poll_restore_requests(self) -> None:
+        self._poll_after_id = None
+        if self._closed:
+            return
+        if self._restore_requested.is_set():
+            self._restore_requested.clear()
+            if self._active:
+                try:
+                    self.on_restore()
+                except Exception as exc:
+                    _log_runtime_error("tray_restore", exc)
         try:
-            if self._message_window.winfo_exists():
-                self._message_window.destroy()
+            self._poll_after_id = self.root.after(
+                self.RESTORE_POLL_MS,
+                self._poll_restore_requests,
+            )
         except tk.TclError:
-            pass
-        self._message_window = None
-
-    def _queue_restore(self) -> None:
-        if self._restore_pending:
-            return
-        self._restore_pending = True
-        self.root.after(80, self._handle_restore_requested)
-
-    def _handle_restore_requested(self) -> None:
-        if not self._active:
-            self._restore_pending = False
-            return
-        try:
-            self.on_restore()
-        except Exception as exc:
-            _log_runtime_error("tray_restore", exc)
-            self._restore_pending = False
+            self._closed = True
 
     def _build_notify_data(self, flags: int) -> _NotifyIconDataW:
         data = _NotifyIconDataW()
@@ -1345,47 +1493,9 @@ class WindowsTrayIcon:
         user32.LoadIconW.restype = _HICON
         return int(user32.LoadIconW(None, self.IDI_APPLICATION))
 
-    def _subclass_window(self) -> None:
+    def _create_message_window(self) -> None:
         user32 = ctypes.windll.user32
-        wndproc_type = ctypes.WINFUNCTYPE(
-            _LRESULT,
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        )
-
-        def _window_proc(hwnd, msg, wparam, lparam):
-            if msg == self.WM_TRAY_CALLBACK and lparam in (
-                self.WM_LBUTTONDBLCLK,
-                self.WM_RBUTTONUP,
-            ):
-                self._queue_restore()
-                return 0
-            if self._old_wndproc:
-                return user32.CallWindowProcW(self._old_wndproc, hwnd, msg, wparam, lparam)
-            return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
-
-        self._wndproc = wndproc_type(_window_proc)
-        if ctypes.sizeof(ctypes.c_void_p) == 8:
-            set_window_long = user32.SetWindowLongPtrW
-        else:
-            set_window_long = user32.SetWindowLongW
-        set_window_long.restype = ctypes.c_void_p
-        set_window_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
-        self._old_wndproc = set_window_long(
-            self._hwnd,
-            self.GWLP_WNDPROC,
-            ctypes.cast(self._wndproc, ctypes.c_void_p),
-        )
-        user32.CallWindowProcW.restype = _LRESULT
-        user32.CallWindowProcW.argtypes = [
-            ctypes.c_void_p,
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
+        kernel32 = ctypes.windll.kernel32
         user32.DefWindowProcW.restype = _LRESULT
         user32.DefWindowProcW.argtypes = [
             wintypes.HWND,
@@ -1394,22 +1504,66 @@ class WindowsTrayIcon:
             wintypes.LPARAM,
         ]
 
-    def _restore_window_proc(self) -> None:
-        if os.name != "nt" or not self._hwnd or not self._old_wndproc:
-            return
-        try:
-            user32 = ctypes.windll.user32
-            if ctypes.sizeof(ctypes.c_void_p) == 8:
-                set_window_long = user32.SetWindowLongPtrW
-            else:
-                set_window_long = user32.SetWindowLongW
-            set_window_long.restype = ctypes.c_void_p
-            set_window_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
-            set_window_long(self._hwnd, self.GWLP_WNDPROC, self._old_wndproc)
-        except Exception:
-            pass
-        self._old_wndproc = None
-        self._wndproc = None
+        def _window_proc(hwnd, msg, wparam, lparam):
+            if msg == self.WM_TRAY_CALLBACK and lparam in (
+                self.WM_LBUTTONDBLCLK,
+                self.WM_RBUTTONUP,
+            ):
+                # A ctypes WndProc must remain tiny. Calling into Tk from here can
+                # re-enter Tcl while Windows is dispatching the native message and
+                # has caused hard process crashes. The Tk thread polls this event.
+                self._restore_requested.set()
+                return 0
+            return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+        self._wndproc = _WNDPROC(_window_proc)
+        kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        self._hinstance = kernel32.GetModuleHandleW(None)
+        self._window_class_name = (
+            f"MekiCopy.TrayMessageWindow.{os.getpid()}.{id(self):x}"
+        )
+        window_class = _WndClassW()
+        window_class.lpfnWndProc = self._wndproc
+        window_class.hInstance = self._hinstance
+        window_class.lpszClassName = self._window_class_name
+        user32.RegisterClassW.restype = wintypes.ATOM
+        user32.RegisterClassW.argtypes = [ctypes.POINTER(_WndClassW)]
+        self._window_class_atom = user32.RegisterClassW(ctypes.byref(window_class))
+        if not self._window_class_atom:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        user32.CreateWindowExW.restype = wintypes.HWND
+        user32.CreateWindowExW.argtypes = [
+            wintypes.DWORD,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.HWND,
+            wintypes.HMENU,
+            wintypes.HINSTANCE,
+            wintypes.LPVOID,
+        ]
+        self._hwnd = user32.CreateWindowExW(
+            0,
+            self._window_class_name,
+            self.tooltip,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            self._hinstance,
+            None,
+        )
+        if not self._hwnd:
+            raise ctypes.WinError(ctypes.get_last_error())
 
 
 class BookmarkPicker(tk.Toplevel):
@@ -1583,6 +1737,95 @@ def _json_request(
 
 def _is_process_alive(process: subprocess.Popen | None) -> bool:
     return bool(process and process.poll() is None)
+
+
+def _mekicopy_process_command(*arguments: str) -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *arguments]
+    return [sys.executable, os.path.abspath(__file__), *arguments]
+
+
+def _detached_process_creation_flags() -> int:
+    if os.name != "nt":
+        return 0
+    return (
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        | getattr(subprocess, "DETACHED_PROCESS", 0)
+    )
+
+
+def _launch_detached_button_process() -> subprocess.Popen:
+    return subprocess.Popen(
+        _mekicopy_process_command("--detached-button"),
+        cwd=_get_app_dir(),
+        close_fds=True,
+        creationflags=_detached_process_creation_flags(),
+    )
+
+
+class _WindowsNamedMutex:
+    ERROR_ALREADY_EXISTS = 183
+
+    def __init__(self, name: str) -> None:
+        self.handle: int | None = None
+        self.already_exists = False
+        if os.name != "nt":
+            return
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.SetLastError(0)
+        self.handle = kernel32.CreateMutexW(None, False, name)
+        if not self.handle:
+            raise ctypes.WinError(kernel32.GetLastError())
+        self.already_exists = kernel32.GetLastError() == self.ERROR_ALREADY_EXISTS
+
+    def close(self) -> None:
+        if self.handle and os.name == "nt":
+            kernel32 = ctypes.windll.kernel32
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.CloseHandle(self.handle)
+            self.handle = None
+
+
+def _find_detached_window() -> int | None:
+    if os.name != "nt":
+        return None
+    user32 = ctypes.windll.user32
+    user32.FindWindowW.restype = wintypes.HWND
+    user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    hwnd = user32.FindWindowW(None, DETACHED_WINDOW_TITLE)
+    return int(hwnd) if hwnd else None
+
+
+def _activate_detached_window() -> bool:
+    hwnd = _find_detached_window()
+    if not hwnd:
+        return False
+    user32 = ctypes.windll.user32
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    user32.SetForegroundWindow(hwnd)
+    return True
+
+
+def _close_detached_window() -> bool:
+    hwnd = _find_detached_window()
+    if not hwnd:
+        return False
+    user32 = ctypes.windll.user32
+    user32.PostMessageW.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    ]
+    user32.PostMessageW.restype = wintypes.BOOL
+    return bool(user32.PostMessageW(hwnd, 0x0010, 0, 0))  # WM_CLOSE
 
 
 def _find_companion_executable(app_name: str, script_name: str) -> list[str] | None:
@@ -1993,6 +2236,7 @@ class SettingsWindow(tk.Toplevel):
 
     def _collect_settings(self) -> AppSettings:
         current = self.owner.settings
+        detached_geometry = load_detached_geometry(current.detached_geometry)
         hytrans_port = self._read_port(self.hytrans_port_var, "HYTrans")
         overlayer_port = self._read_port(self.overlayer_port_var, "MekiOverlayer")
         if hytrans_port == overlayer_port:
@@ -2006,7 +2250,7 @@ class SettingsWindow(tk.Toplevel):
             detached_hide_titlebar=self.detached_hide_titlebar_var.get(),
             detached_fixed_size=self.detached_fixed_size_var.get(),
             simple_copy_complete=self.simple_copy_complete_var.get(),
-            detached_geometry=current.detached_geometry,
+            detached_geometry=detached_geometry,
             detached_fixed_width=current.detached_fixed_width,
             detached_fixed_height=current.detached_fixed_height,
             overlay_translation_mode=self.overlay_mode_var.get(),
@@ -2026,17 +2270,17 @@ class SettingsWindow(tk.Toplevel):
         )
 
     def _on_save(self) -> None:
-        if self.owner.detached_window:
-            self.owner.detached_window.capture_geometry()
         try:
             settings = self._collect_settings()
         except ValueError as exc:
             messagebox.showerror("MekiCopy", str(exc), parent=self)
             return
-        if settings.detached_fixed_size and self.owner.detached_window:
-            width, height = self.owner.detached_window.current_size()
-            settings.detached_fixed_width = width
-            settings.detached_fixed_height = height
+        if settings.detached_fixed_size:
+            detached_size = _geometry_size(settings.detached_geometry)
+            if detached_size:
+                width, height = detached_size
+                settings.detached_fixed_width = width
+                settings.detached_fixed_height = height
         self.owner.apply_settings(settings, persist=True)
         self._on_close()
 
@@ -2054,36 +2298,55 @@ class SettingsWindow(tk.Toplevel):
         self.destroy()
 
 
-class DetachedOcrButtonWindow:
+class DetachedOcrButtonApp:
     MIN_WIDTH = 120
     MIN_HEIGHT = 80
     RESIZE_MARGIN = 10
+    SETTINGS_POLL_MS = 500
 
-    def __init__(self, owner) -> None:
-        self.owner = owner
-        self.root = tk.Toplevel(owner)
-        self.root.title("인식 후 복사")
+    def __init__(self) -> None:
+        _enable_dpi_awareness()
+        _set_app_user_model_id()
+        _prepare_tk_library_paths()
+        self.root = tk.Tk()
+        self.settings = load_settings()
+        self.root.title(DETACHED_WINDOW_TITLE)
         _set_window_icon(self.root)
         self._drag_action: str | None = None
         self._drag_start: tuple[int, int] | None = None
         self._drag_geometry: tuple[int, int, int, int] | None = None
         self._suppress_next_click = False
+        self._settings_signature: tuple | None = None
+        self._settings_after_id: str | None = None
+        self._geometry_after_id: str | None = None
+        self._closing = False
 
         self.button = tk.Button(
             self.root,
-            text=owner.ocr_action_label(),
+            text=self.ocr_action_label(),
             command=self._on_button_command,
             font=("Segoe UI", 14, "bold"),
         )
         self.button.pack(fill=tk.BOTH, expand=True)
 
-        self.root.geometry(owner.settings.detached_geometry or DETACHED_DEFAULT_GEOMETRY)
+        self.root.geometry(
+            load_detached_geometry(
+                self.settings.detached_geometry or DETACHED_DEFAULT_GEOMETRY
+            )
+        )
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Configure>", self._on_configure)
         self.button.bind("<ButtonPress-1>", self._on_mouse_down, add="+")
         self.button.bind("<B1-Motion>", self._on_mouse_drag, add="+")
         self.button.bind("<ButtonRelease-1>", self._on_mouse_release, add="+")
         self.apply_settings()
+        self._schedule_settings_poll()
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+    def ocr_action_label(self) -> str:
+        return "번역 후 표시" if self.settings.overlay_translation_mode else "인식 후 복사"
 
     def current_size(self) -> tuple[int, int]:
         self.root.update_idletasks()
@@ -2092,23 +2355,23 @@ class DetachedOcrButtonWindow:
             max(self.MIN_HEIGHT, self.root.winfo_height()),
         )
 
-    def capture_geometry(self) -> None:
+    def capture_geometry(self, persist: bool = True) -> str:
         if not self.root.winfo_exists():
-            return
+            return ""
         self.root.update_idletasks()
-        self.owner.settings.detached_geometry = self.root.geometry()
+        geometry = self.root.geometry()
+        self.settings.detached_geometry = geometry
         width, height = self.current_size()
-        if self.owner.settings.detached_fixed_size:
-            self.owner.settings.detached_fixed_width = width
-            self.owner.settings.detached_fixed_height = height
+        if self.settings.detached_fixed_size:
+            self.settings.detached_fixed_width = width
+            self.settings.detached_fixed_height = height
+        if persist:
+            save_detached_geometry(geometry)
+        return geometry
 
     def apply_settings(self) -> None:
-        settings = self.owner.settings
-        if self.root.winfo_exists():
-            self.capture_geometry()
-
-        self.root.title(self.owner.ocr_action_label())
-        self.button.config(text=self.owner.ocr_action_label())
+        settings = self.settings
+        self.button.config(text=self.ocr_action_label())
         self.root.withdraw()
         self.root.overrideredirect(settings.detached_hide_titlebar)
         if settings.detached_fixed_size:
@@ -2129,23 +2392,215 @@ class DetachedOcrButtonWindow:
         self._set_maximize_button_enabled(not settings.detached_fixed_size)
 
     def close(self) -> None:
-        self.capture_geometry()
-        save_settings(self.owner.settings)
-        self.owner.detached_window = None
+        if self._closing:
+            return
+        self._closing = True
+        if self._settings_after_id:
+            try:
+                self.root.after_cancel(self._settings_after_id)
+            except tk.TclError:
+                pass
+        if self._geometry_after_id:
+            try:
+                self.root.after_cancel(self._geometry_after_id)
+            except tk.TclError:
+                pass
+        self.capture_geometry(persist=True)
         self.root.destroy()
 
     def _on_button_command(self) -> None:
         if self._suppress_next_click:
             self._suppress_next_click = False
             return
-        self.owner._on_ocr_copy(source_button=self.button)
+        self.settings = load_settings()
+        region = load_detached_region()
+        if not region:
+            messagebox.showerror(
+                "MekiCopy",
+                "설정된 영역이 없습니다. MekiCopy에서 영역을 확정해주세요.",
+                parent=self.root,
+            )
+            return
+        try:
+            region, _, _, _ = get_capture_manager().resolve_region(region)
+            save_detached_region(region)
+        except Exception as exc:
+            _log_runtime_error("detached_prepare_region", exc)
+            messagebox.showerror(
+                "MekiCopy",
+                f"캡처 영역 확인 실패:\n{exc}",
+                parent=self.root,
+            )
+            return
+
+        if self.settings.overlay_translation_mode:
+            self._translate_and_show(region)
+            return
+        simple_feedback = self.settings.simple_copy_complete
+        ocr_and_copy(
+            region.left,
+            region.top,
+            region.width,
+            region.height,
+            notify=not simple_feedback,
+            parent=self.root,
+            on_copy_complete=self._show_feedback if simple_feedback else None,
+        )
+
+    def _translate_and_show(self, region: Region) -> None:
+        text = ocr_region(
+            region.left,
+            region.top,
+            region.width,
+            region.height,
+            parent=self.root,
+        )
+        if text is None:
+            return
+        if not text.strip():
+            messagebox.showwarning(
+                "MekiCopy",
+                "인식된 텍스트가 없습니다.",
+                parent=self.root,
+            )
+            return
+        try:
+            self._send_overlayer_config()
+            _json_request(
+                f"http://127.0.0.1:{self.settings.hytrans_port}/translate-and-show",
+                {
+                    "text": text,
+                    "overlayUrl": (
+                        f"http://127.0.0.1:{self.settings.overlayer_port}/show"
+                    ),
+                },
+                timeout=130,
+                method="POST",
+            )
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            _log_runtime_error("detached_translate_http", exc)
+            messagebox.showerror(
+                "MekiCopy",
+                f"번역 후 표시 실패:\nHTTP {exc.code}\n{detail}",
+                parent=self.root,
+            )
+            return
+        except Exception as exc:
+            _log_runtime_error("detached_translate", exc)
+            messagebox.showerror(
+                "MekiCopy",
+                f"번역 후 표시 실패:\n{exc}",
+                parent=self.root,
+            )
+            return
+        if self.settings.simple_copy_complete:
+            self._show_feedback()
+        else:
+            messagebox.showinfo(
+                "MekiCopy",
+                "번역 결과를 MekiOverlayer에 표시했습니다.",
+                parent=self.root,
+            )
+
+    def _send_overlayer_config(self) -> None:
+        settings = self.settings
+        _json_request(
+            f"http://127.0.0.1:{settings.overlayer_port}/config",
+            {
+                "topmost": settings.overlayer_always_on_top,
+                "hide_titlebar": settings.overlayer_hide_titlebar,
+                "fixed_size": settings.overlayer_fixed_size,
+                "exclude_from_capture": settings.overlayer_exclude_from_capture,
+                "bg_color": settings.overlayer_bg_color,
+                "opacity": settings.overlayer_bg_opacity,
+                "text_color": settings.overlayer_text_color,
+                "text_size": settings.overlayer_text_size,
+                "text_font": settings.overlayer_text_font,
+            },
+            timeout=3,
+            method="POST",
+        )
+
+    def _show_feedback(self) -> None:
+        button = self.button
+        if not button.winfo_exists():
+            return
+        original = {
+            "text": self.ocr_action_label(),
+            "bg": button.cget("bg"),
+            "fg": button.cget("fg"),
+            "activebackground": button.cget("activebackground"),
+            "activeforeground": button.cget("activeforeground"),
+            "font": button.cget("font"),
+        }
+        button.update_idletasks()
+        font_size = 72 if button.winfo_height() >= 220 else 42
+        button.config(
+            text="완료",
+            bg="#16a34a",
+            fg="white",
+            activebackground="#16a34a",
+            activeforeground="white",
+            font=("Segoe UI", font_size, "bold"),
+        )
+
+        def restore() -> None:
+            if button.winfo_exists():
+                original["text"] = self.ocr_action_label()
+                button.config(**original)
+
+        button.after(1000, restore)
+
+    def _settings_key(self, settings: AppSettings) -> tuple:
+        return (
+            settings.detached_always_on_top,
+            settings.detached_hide_titlebar,
+            settings.detached_fixed_size,
+            settings.detached_fixed_width,
+            settings.detached_fixed_height,
+            settings.overlay_translation_mode,
+        )
+
+    def _schedule_settings_poll(self) -> None:
+        if not self._closing:
+            self._settings_after_id = self.root.after(
+                self.SETTINGS_POLL_MS,
+                self._poll_settings,
+            )
+
+    def _poll_settings(self) -> None:
+        self._settings_after_id = None
+        if self._closing:
+            return
+        latest = load_settings()
+        signature = self._settings_key(latest)
+        if signature != self._settings_signature:
+            self.capture_geometry(persist=True)
+            self.settings = latest
+            self.apply_settings()
+            self._settings_signature = signature
+        else:
+            self.settings = latest
+        self._schedule_settings_poll()
 
     def _on_configure(self, event: tk.Event) -> None:
         if event.widget == self.root and self.root.winfo_exists():
-            self.owner.settings.detached_geometry = self.root.geometry()
+            self.settings.detached_geometry = self.root.geometry()
+            if self._geometry_after_id:
+                try:
+                    self.root.after_cancel(self._geometry_after_id)
+                except tk.TclError:
+                    pass
+            self._geometry_after_id = self.root.after(250, self._persist_geometry)
+
+    def _persist_geometry(self) -> None:
+        self._geometry_after_id = None
+        if not self._closing and self.root.winfo_exists():
+            self.capture_geometry(persist=True)
 
     def _on_mouse_down(self, event: tk.Event) -> None:
-        if not self.owner.settings.detached_hide_titlebar:
+        if not self.settings.detached_hide_titlebar:
             return
         self.root.update_idletasks()
         self._drag_action = self._hit_test(event.x_root, event.y_root)
@@ -2168,7 +2623,7 @@ class DetachedOcrButtonWindow:
         if abs(dx) + abs(dy) > 3:
             self._suppress_next_click = True
 
-        if self.owner.settings.detached_fixed_size or self._drag_action == "move":
+        if self.settings.detached_fixed_size or self._drag_action == "move":
             self.root.geometry(f"{origin_width}x{origin_height}+{origin_x + dx}+{origin_y + dy}")
             return
 
@@ -2194,7 +2649,7 @@ class DetachedOcrButtonWindow:
         self._drag_geometry = None
 
     def _hit_test(self, x_root: int, y_root: int) -> str:
-        if self.owner.settings.detached_fixed_size:
+        if self.settings.detached_fixed_size:
             return "move"
         x = x_root - self.root.winfo_rootx()
         y = y_root - self.root.winfo_rooty()
@@ -2223,7 +2678,7 @@ class DetachedOcrButtonWindow:
         return "move"
 
     def _set_maximize_button_enabled(self, enabled: bool) -> None:
-        if os.name != "nt" or self.owner.settings.detached_hide_titlebar:
+        if os.name != "nt" or self.settings.detached_hide_titlebar:
             return
         try:
             hwnd = self.root.winfo_id()
@@ -2255,7 +2710,7 @@ class MainWindow(tk.Tk):
         _prepare_tk_library_paths()
         super().__init__()
         self.settings = load_settings()
-        self.detached_window: DetachedOcrButtonWindow | None = None
+        self.detached_process: subprocess.Popen | None = None
         self.settings_window: SettingsWindow | None = None
         self.hytrans_process: subprocess.Popen | None = None
         self.overlayer_process: subprocess.Popen | None = None
@@ -2265,7 +2720,7 @@ class MainWindow(tk.Tk):
         self.tray_icon = WindowsTrayIcon(self, "MekiCopy", self._restore_from_tray)
         self.title("MekiCopy")
         _set_window_icon(self)
-        self.geometry("460x500")
+        self.geometry("460x400")
         self.resizable(False, False)
         self.draft_region: Region | None = None
         self.active_region: Region | None = None
@@ -2281,10 +2736,10 @@ class MainWindow(tk.Tk):
 
     def _build_ui(self) -> None:
         header = tk.Label(self, text="MekiCopy", font=("Segoe UI", 12, "bold"))
-        header.pack(pady=(10, 6))
+        header.pack(pady=(2, 0))
 
         body = tk.Frame(self)
-        body.pack(padx=10, pady=(0, 10), fill=tk.BOTH, expand=True)
+        body.pack(padx=10, pady=(0, 7), fill=tk.BOTH, expand=True)
 
         self.tab_buttons: dict[str, tk.Button] = {}
         self.tab_frames: dict[str, tk.Frame] = {}
@@ -2465,6 +2920,10 @@ class MainWindow(tk.Tk):
             self.active_monitor = None
             return
         try:
+            save_detached_region(self.active_region)
+        except OSError as exc:
+            _log_runtime_error("save_detached_region", exc)
+        try:
             manager = get_capture_manager()
             manager.refresh_if_display_changed()
             monitors = manager.get_real_monitors()
@@ -2511,6 +2970,10 @@ class MainWindow(tk.Tk):
 
         changed = not _regions_equal(region, self.active_region)
         self.active_region = region
+        try:
+            save_detached_region(region)
+        except OSError as exc:
+            _log_runtime_error("save_detached_region", exc)
         self.active_monitor = monitor
         self.active_region_ratio = ratio
         if changed:
@@ -2557,6 +3020,10 @@ class MainWindow(tk.Tk):
         )
         self.active_monitor = monitor
         self.active_region_ratio = _ratio_for_region(region, monitor)
+        try:
+            save_detached_region(region)
+        except OSError as exc:
+            _log_runtime_error("save_detached_region", exc)
         self._update_status()
         self._set_capture_status("캡처 상태: 비율 좌표로 OCR 영역을 복구했습니다.")
 
@@ -2718,11 +3185,20 @@ class MainWindow(tk.Tk):
         messagebox.showinfo("MekiCopy", "인식 영역이 설정되었습니다!")
 
     def _on_detach_ocr_button(self) -> None:
-        if self.detached_window and self.detached_window.root.winfo_exists():
-            self.detached_window.root.deiconify()
-            self.detached_window.root.lift()
-            return
-        self.detached_window = DetachedOcrButtonWindow(self)
+        if self.active_region:
+            try:
+                save_detached_region(self.active_region)
+            except OSError as exc:
+                _log_runtime_error("save_detached_region", exc)
+        try:
+            self.detached_process = _launch_detached_button_process()
+        except Exception as exc:
+            _log_runtime_error("start_detached_button", exc)
+            messagebox.showerror(
+                "MekiCopy",
+                f"분리 버튼 실행 실패:\n{exc}",
+                parent=self,
+            )
 
     def _on_open_settings(self) -> None:
         if self.settings_window and self.settings_window.winfo_exists():
@@ -3038,13 +3514,9 @@ class MainWindow(tk.Tk):
         setattr(button, "_mekicopy_feedback_after_id", after_id)
 
     def apply_settings(self, settings: AppSettings, persist: bool) -> None:
-        if self.detached_window:
-            self.detached_window.capture_geometry()
         self.settings = settings
         self.attributes("-topmost", self.settings.main_always_on_top)
         self._apply_overlay_mode_ui()
-        if self.detached_window:
-            self.detached_window.apply_settings()
         if self.settings.overlay_translation_mode:
             self._send_overlayer_config(log_errors=False)
         if persist:
@@ -3077,8 +3549,7 @@ class MainWindow(tk.Tk):
     def _on_close(self) -> None:
         self._closing = True
         self.tray_icon.close()
-        if self.detached_window and self.detached_window.root.winfo_exists():
-            self.detached_window.capture_geometry()
+        _close_detached_window()
         save_settings(self.settings)
         for process in (self.hytrans_process, self.overlayer_process):
             if _is_process_alive(process):
@@ -3096,7 +3567,220 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adjust-bookmark", help="북마크 영역을 불러와 미세조정 후 저장")
     parser.add_argument("--self-test-runtime", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-ui", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--self-test-tray-stress",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--detached-button", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--self-test-detached-button",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--self-test-detached-survival",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--self-test-detached-launcher",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
+
+
+def run_detached_button() -> None:
+    mutex = _WindowsNamedMutex(DETACHED_MUTEX_NAME)
+    if mutex.already_exists:
+        _activate_detached_window()
+        mutex.close()
+        return
+    app: DetachedOcrButtonApp | None = None
+    try:
+        app = DetachedOcrButtonApp()
+        app.run()
+    except Exception as exc:
+        _log_runtime_error("detached_button", exc)
+        raise
+    finally:
+        try:
+            if app and app.root.winfo_exists():
+                app.close()
+        except tk.TclError:
+            pass
+        finally:
+            mutex.close()
+
+
+def run_detached_button_self_test() -> None:
+    _log_runtime_message("self_test_detached_button", "starting")
+    app: DetachedOcrButtonApp | None = None
+    try:
+        app = DetachedOcrButtonApp()
+        app.root.update_idletasks()
+        if not app.root.winfo_exists() or not app.button.winfo_exists():
+            raise RuntimeError("detached button UI was not created")
+        if app.root.title() != DETACHED_WINDOW_TITLE:
+            raise RuntimeError("detached button window title is not stable")
+        if app.button.cget("text") != app.ocr_action_label():
+            raise RuntimeError("detached button label does not match settings")
+        command = _mekicopy_process_command("--detached-button")
+        if "--detached-button" not in command:
+            raise RuntimeError("detached process command is invalid")
+        _log_runtime_message(
+            "self_test_detached_button",
+            f"command: {command}\nwindow: {app.root.geometry()}",
+        )
+    except Exception as exc:
+        _log_runtime_error("self_test_detached_button", exc)
+        raise SystemExit(1)
+    finally:
+        if app and app.root.winfo_exists():
+            app._closing = True
+            app.root.destroy()
+
+
+def run_detached_survival_self_test() -> None:
+    if os.name != "nt":
+        return
+    _log_runtime_message("self_test_detached_survival", "starting")
+    if _find_detached_window():
+        _close_detached_window()
+        deadline = time.monotonic() + 5.0
+        while _find_detached_window() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if _find_detached_window():
+            raise RuntimeError("an existing detached button window could not be closed")
+
+    launcher = subprocess.Popen(
+        _mekicopy_process_command("--self-test-detached-launcher"),
+        cwd=_get_app_dir(),
+        close_fds=True,
+    )
+    try:
+        exit_code = launcher.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        launcher.kill()
+        _close_detached_window()
+        raise RuntimeError("detached survival launcher did not exit")
+    if exit_code != 0:
+        _close_detached_window()
+        raise RuntimeError(f"detached survival launcher exited with {exit_code}")
+
+    hwnd = None
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        hwnd = _find_detached_window()
+        if hwnd:
+            break
+        time.sleep(0.05)
+    if not hwnd:
+        _close_detached_window()
+        raise RuntimeError("detached button did not survive its launcher process")
+
+    process_id = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+    if not process_id.value or process_id.value == launcher.pid:
+        _close_detached_window()
+        raise RuntimeError("detached button is not running in an independent process")
+    _log_runtime_message(
+        "self_test_detached_survival",
+        f"launcher_pid: {launcher.pid}\ndetached_pid: {process_id.value}",
+    )
+    # FindWindow can succeed while Tk is still finishing constructor work,
+    # before mainloop has started dispatching WM_CLOSE.
+    time.sleep(1.0)
+    _close_detached_window()
+    deadline = time.monotonic() + 30.0
+    while _find_detached_window() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if _find_detached_window():
+        raise RuntimeError("detached button did not close after survival test")
+
+
+def run_tray_stress_self_test(cycles: int = 100) -> None:
+    _log_runtime_message("self_test_tray_stress", f"starting cycles={cycles}")
+    app: MainWindow | None = None
+    try:
+        app = MainWindow()
+        app.settings.minimize_to_tray = True
+        app.update_idletasks()
+        if os.name != "nt":
+            return
+
+        user32 = ctypes.windll.user32
+        user32.PostMessageW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.PostMessageW.restype = wintypes.BOOL
+        tray_hwnd = None
+        for cycle in range(1, cycles + 1):
+            app.iconify()
+            minimize_deadline = time.monotonic() + 3.0
+            while time.monotonic() < minimize_deadline:
+                app.update()
+                if app.tray_icon._active and app.state() == "withdrawn":
+                    break
+                time.sleep(0.005)
+            if not app.tray_icon._active or app.state() != "withdrawn":
+                raise RuntimeError(
+                    f"cycle {cycle}: minimize-to-tray failed (state={app.state()})"
+                )
+
+            current_hwnd = app.tray_icon._hwnd
+            if not current_hwnd:
+                raise RuntimeError(f"cycle {cycle}: tray callback window is missing")
+            if tray_hwnd is None:
+                tray_hwnd = current_hwnd
+            elif current_hwnd != tray_hwnd:
+                raise RuntimeError(f"cycle {cycle}: tray callback HWND changed")
+
+            # Explorer emits the double-click notification asynchronously. Two
+            # queued notifications also verify duplicate clicks are coalesced.
+            for _ in range(2):
+                if not user32.PostMessageW(
+                    current_hwnd,
+                    app.tray_icon.WM_TRAY_CALLBACK,
+                    1,
+                    app.tray_icon.WM_LBUTTONDBLCLK,
+                ):
+                    raise ctypes.WinError(ctypes.get_last_error())
+
+            restore_deadline = time.monotonic() + 3.0
+            while time.monotonic() < restore_deadline:
+                app.update()
+                if (
+                    app.state() == "normal"
+                    and not app.tray_icon._active
+                    and not app._restoring_from_tray
+                ):
+                    break
+                time.sleep(0.005)
+            if app.state() != "normal" or app.tray_icon._active:
+                raise RuntimeError(
+                    f"cycle {cycle}: tray restore failed "
+                    f"(state={app.state()}, active={app.tray_icon._active})"
+                )
+
+        _log_runtime_message(
+            "self_test_tray_stress",
+            f"completed cycles={cycles}\ntray_hwnd={tray_hwnd}",
+        )
+    except Exception as exc:
+        _log_runtime_error("self_test_tray_stress", exc)
+        raise SystemExit(1)
+    finally:
+        if app:
+            try:
+                app.tray_icon.close()
+                app.destroy()
+            except tk.TclError:
+                pass
 
 
 def run_ui_self_test() -> None:
@@ -3105,6 +3789,10 @@ def run_ui_self_test() -> None:
     try:
         app = MainWindow()
         app.update_idletasks()
+        if app.winfo_height() != 400:
+            raise RuntimeError(
+                f"main window height is {app.winfo_height()}, expected 400"
+            )
         expected_tabs = {"영역", "캡쳐", "도구/설정", "행동"}
         if set(app.tab_frames) != expected_tabs:
             raise RuntimeError(f"unexpected main tabs: {set(app.tab_frames)}")
@@ -3156,6 +3844,12 @@ def run_ui_self_test() -> None:
                     1,
                     app.tray_icon.WM_LBUTTONDBLCLK,
                 )
+                ctypes.windll.user32.SendMessageW(
+                    current_hwnd,
+                    app.tray_icon.WM_TRAY_CALLBACK,
+                    1,
+                    app.tray_icon.WM_LBUTTONDBLCLK,
+                )
                 deadline = time.monotonic() + 2.0
                 while app.state() != "normal" and time.monotonic() < deadline:
                     app.update()
@@ -3164,17 +3858,16 @@ def run_ui_self_test() -> None:
                     raise RuntimeError(f"tray restore left app in state: {app.state()}")
             tray_message_window_reused = bool(
                 tray_roundtrip
-                and app.tray_icon._message_window
-                and app.tray_icon._message_window.winfo_exists()
+                and app.tray_icon._window_class_atom
                 and app.tray_icon._hwnd == tray_hwnd
             )
             if tray_roundtrip and not tray_message_window_reused:
                 raise RuntimeError("tray message window did not survive restore")
 
-        app._on_detach_ocr_button()
-        app.update_idletasks()
-        if not app.detached_window or not app.detached_window.root.winfo_exists():
-            raise RuntimeError("detached OCR button window was not created")
+        if load_detached_region() != expected_region:
+            raise RuntimeError("active region was not published for detached process")
+        if "--detached-button" not in _mekicopy_process_command("--detached-button"):
+            raise RuntimeError("detached OCR button process command was not created")
 
         app._on_open_settings()
         app.update_idletasks()
@@ -3192,12 +3885,12 @@ def run_ui_self_test() -> None:
         korean_font_count = len(app.settings_window.korean_font_names)
 
         app.settings_window._on_close()
-        app.detached_window.close()
         save_settings(app.settings)
         _log_runtime_message(
             "self_test_ui",
             (
                 f"main_ocr_button_height: {ocr_button_height}\n"
+                f"main_window_height: {app.winfo_height()}\n"
                 f"tray_roundtrip: {tray_roundtrip}\n"
                 f"tray_message_window_reused: {tray_message_window_reused}\n"
                 f"korean_font_count: {korean_font_count}\n"
@@ -3218,6 +3911,9 @@ def main() -> None:
     _enable_dpi_awareness()
     _set_app_user_model_id()
     args = parse_args()
+    if args.self_test_detached_launcher:
+        _launch_detached_button_process()
+        os._exit(0)
     if args.self_test_runtime:
         _log_runtime_message("self_test_runtime", "starting")
         from importlib.metadata import version
@@ -3237,6 +3933,18 @@ def main() -> None:
         )
         return
     _prepare_tk_library_paths()
+    if args.detached_button:
+        run_detached_button()
+        return
+    if args.self_test_detached_button:
+        run_detached_button_self_test()
+        return
+    if args.self_test_detached_survival:
+        run_detached_survival_self_test()
+        return
+    if args.self_test_tray_stress:
+        run_tray_stress_self_test()
+        return
     if args.self_test_ui:
         run_ui_self_test()
         return

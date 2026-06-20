@@ -201,20 +201,32 @@ def prepare_tk_environment(runtime_dirname: str = "MekiCopyRuntime") -> bool:
     resource_root = Path(getattr(sys, "_MEIPASS", app_root()))
     application_root = app_root()
     base_root = Path(sys.base_prefix)
-    tcl_candidates = [
-        resource_root / "_tcl_data",
-        resource_root / "tcl" / "tcl8.6",
-        resource_root / runtime_dirname / "tcl8.6",
-        application_root / runtime_dirname / "tcl8.6",
-        base_root / "tcl" / "tcl8.6",
-    ]
-    tk_candidates = [
-        resource_root / "_tk_data",
-        resource_root / "tcl" / "tk8.6",
-        resource_root / runtime_dirname / "tk8.6",
-        application_root / runtime_dirname / "tk8.6",
-        base_root / "tcl" / "tk8.6",
-    ]
+    if getattr(sys, "frozen", False):
+        tcl_candidates = [
+            resource_root / "_tcl_data",
+            resource_root / "tcl" / "tcl8.6",
+            resource_root / runtime_dirname / "tcl8.6",
+            application_root / runtime_dirname / "tcl8.6",
+            base_root / "tcl" / "tcl8.6",
+        ]
+        tk_candidates = [
+            resource_root / "_tk_data",
+            resource_root / "tcl" / "tk8.6",
+            resource_root / runtime_dirname / "tk8.6",
+            application_root / runtime_dirname / "tk8.6",
+            base_root / "tcl" / "tk8.6",
+        ]
+    else:
+        # Source runs must use the Tcl scripts matching the active Python DLL.
+        # A checked-in runtime may have been produced by a different Python/Tcl.
+        tcl_candidates = [
+            base_root / "tcl" / "tcl8.6",
+            application_root / runtime_dirname / "tcl8.6",
+        ]
+        tk_candidates = [
+            base_root / "tcl" / "tk8.6",
+            application_root / runtime_dirname / "tk8.6",
+        ]
     source_tcl = next((path for path in tcl_candidates if (path / "init.tcl").is_file()), None)
     source_tk = next((path for path in tk_candidates if (path / "tk.tcl").is_file()), None)
     if source_tcl is None or source_tk is None:
