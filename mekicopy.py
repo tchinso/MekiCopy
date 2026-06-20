@@ -58,6 +58,7 @@ SELECTION_INSTRUCTION_FONT_SIZE = 36
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 ICON_FILENAME = "MekiCopy.ico"
 APP_USER_MODEL_ID = "MekiCopy.MekiCopy"
+KOREAN_FONT_TEST_CHARACTER = "쿈"
 HYTRANS_DEFAULT_PORT = 6550
 OVERLAYER_DEFAULT_PORT = 6551
 MAGPIE_RELEASE_API_URL = "https://api.github.com/repos/Blinue/Magpie/releases/latest"
@@ -320,6 +321,93 @@ def _alternate_port(blocked_port: int) -> int:
 def _normalize_font_name(font_name: str) -> str:
     normalized = str(font_name).strip().lstrip("@").strip()
     return normalized or "Malgun Gothic"
+
+
+def _font_has_character(font_name: str, character: str = KOREAN_FONT_TEST_CHARACTER) -> bool:
+    """Return whether a Windows font contains the requested character glyph."""
+    if os.name != "nt" or not font_name or not character:
+        return False
+
+    gdi32 = ctypes.windll.gdi32
+    gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    gdi32.CreateFontW.argtypes = [
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPCWSTR,
+    ]
+    gdi32.CreateFontW.restype = wintypes.HANDLE
+    gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
+    gdi32.SelectObject.restype = wintypes.HANDLE
+    gdi32.GetGlyphIndicesW.argtypes = [
+        wintypes.HDC,
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+        ctypes.POINTER(wintypes.WORD),
+        wintypes.DWORD,
+    ]
+    gdi32.GetGlyphIndicesW.restype = wintypes.DWORD
+    gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+    gdi32.DeleteObject.restype = wintypes.BOOL
+    gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    gdi32.DeleteDC.restype = wintypes.BOOL
+    hdc = gdi32.CreateCompatibleDC(None)
+    if not hdc:
+        return False
+
+    font_handle = None
+    old_font = None
+    try:
+        font_handle = gdi32.CreateFontW(
+            -16,
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            1,  # DEFAULT_CHARSET
+            0,
+            0,
+            0,
+            0,
+            _normalize_font_name(font_name),
+        )
+        if not font_handle:
+            return False
+        old_font = gdi32.SelectObject(hdc, font_handle)
+        glyph_indices = (wintypes.WORD * len(character))()
+        result = gdi32.GetGlyphIndicesW(
+            hdc,
+            character,
+            len(character),
+            glyph_indices,
+            0x0001,  # GGI_MARK_NONEXISTING
+        )
+        return result != 0xFFFFFFFF and all(index != 0xFFFF for index in glyph_indices)
+    finally:
+        if old_font:
+            gdi32.SelectObject(hdc, old_font)
+        if font_handle:
+            gdi32.DeleteObject(font_handle)
+        gdi32.DeleteDC(hdc)
+
+
+def _korean_font_families(root: tk.Misc) -> list[str]:
+    font_names = sorted({_normalize_font_name(name) for name in tkfont.families(root) if name})
+    return [name for name in font_names if _font_has_character(name)]
 
 
 def load_settings() -> AppSettings:
@@ -1157,28 +1245,27 @@ class WindowsTrayIcon:
         if os.name != "nt" or self._active:
             return False
         try:
-            self.root.update_idletasks()
-            self._message_window = tk.Toplevel(self.root)
-            self._message_window.withdraw()
-            self._message_window.title(self.tooltip)
-            self._message_window.update_idletasks()
-            self._hwnd = int(self._message_window.winfo_id())
-            if not self._hwnd:
-                self._destroy_message_window()
-                return False
-            self._subclass_window()
-            self._hicon = self._load_icon()
+            if not self._message_window or not self._message_window.winfo_exists():
+                self.root.update_idletasks()
+                self._message_window = tk.Toplevel(self.root)
+                self._message_window.withdraw()
+                self._message_window.title(self.tooltip)
+                self._message_window.update_idletasks()
+                self._hwnd = int(self._message_window.winfo_id())
+                if not self._hwnd:
+                    self.close()
+                    return False
+                self._subclass_window()
+            if not self._hicon:
+                self._hicon = self._load_icon()
             data = self._build_notify_data(self.NIF_MESSAGE | self.NIF_ICON | self.NIF_TIP)
             shell32 = ctypes.windll.shell32
             if not shell32.Shell_NotifyIconW(self.NIM_ADD, ctypes.byref(data)):
-                self._restore_window_proc()
-                self._destroy_message_window()
                 return False
             self._active = True
             return True
         except Exception:
-            self._restore_window_proc()
-            self._destroy_message_window()
+            self.close()
             return False
 
     def hide(self) -> None:
@@ -1192,6 +1279,10 @@ class WindowsTrayIcon:
                 pass
         self._active = False
         self._restore_pending = False
+
+    def close(self) -> None:
+        """Remove the icon and release the message window during application shutdown."""
+        self.hide()
         self._restore_window_proc()
         self._destroy_message_window()
         self._hwnd = None
@@ -1824,17 +1915,26 @@ class SettingsWindow(tk.Toplevel):
         font_row = tk.Frame(overlayer_style)
         font_row.pack(fill=tk.X, pady=2)
         tk.Label(font_row, text="글씨 폰트").pack(side=tk.LEFT)
-        font_names = sorted(
-            {_normalize_font_name(name) for name in tkfont.families(self) if name}
-        )
-        if self.overlayer_text_font_var.get() not in font_names:
-            font_names.insert(0, self.overlayer_text_font_var.get())
+        font_names = _korean_font_families(self)
+        current_font = _normalize_font_name(self.overlayer_text_font_var.get())
+        if font_names:
+            selected_font = current_font if current_font in font_names else (
+                "Malgun Gothic" if "Malgun Gothic" in font_names else font_names[0]
+            )
+            self.overlayer_text_font_var.set(selected_font)
+            menu_values = font_names
+        else:
+            self.overlayer_text_font_var.set("")
+            menu_values = [""]
+        self.korean_font_names = font_names
         font_menu = tk.OptionMenu(
             font_row,
             self.overlayer_text_font_var,
-            *font_names[:200],
+            *menu_values,
         )
         font_menu.config(width=20)
+        if not font_names:
+            font_menu.config(state=tk.DISABLED)
         font_menu.pack(side=tk.RIGHT)
         self.overlay_only_widgets.extend([font_row, font_menu])
 
@@ -2973,7 +3073,7 @@ class MainWindow(tk.Tk):
 
     def _on_close(self) -> None:
         self._closing = True
-        self.tray_icon.hide()
+        self.tray_icon.close()
         if self.detached_window and self.detached_window.root.winfo_exists():
             self.detached_window.capture_geometry()
         save_settings(self.settings)
@@ -3033,14 +3133,40 @@ def run_ui_self_test() -> None:
             raise RuntimeError("bookmark status still reports no active region")
 
         tray_roundtrip = False
-        if os.name == "nt" and app.tray_icon.show():
-            tray_roundtrip = True
-            app.withdraw()
-            app.update_idletasks()
-            app._restore_from_tray()
-            app.update_idletasks()
-            if app.state() != "normal":
-                raise RuntimeError(f"tray restore left app in state: {app.state()}")
+        tray_message_window_reused = False
+        if os.name == "nt":
+            tray_hwnd = None
+            for _ in range(3):
+                if not app.tray_icon.show():
+                    break
+                tray_roundtrip = True
+                current_hwnd = app.tray_icon._hwnd
+                if tray_hwnd is None:
+                    tray_hwnd = current_hwnd
+                elif current_hwnd != tray_hwnd:
+                    raise RuntimeError("tray message window was recreated during restore")
+                app.withdraw()
+                app.update_idletasks()
+                ctypes.windll.user32.SendMessageW(
+                    current_hwnd,
+                    app.tray_icon.WM_TRAY_CALLBACK,
+                    1,
+                    app.tray_icon.WM_LBUTTONDBLCLK,
+                )
+                deadline = time.monotonic() + 2.0
+                while app.state() != "normal" and time.monotonic() < deadline:
+                    app.update()
+                    time.sleep(0.01)
+                if app.state() != "normal":
+                    raise RuntimeError(f"tray restore left app in state: {app.state()}")
+            tray_message_window_reused = bool(
+                tray_roundtrip
+                and app.tray_icon._message_window
+                and app.tray_icon._message_window.winfo_exists()
+                and app.tray_icon._hwnd == tray_hwnd
+            )
+            if tray_roundtrip and not tray_message_window_reused:
+                raise RuntimeError("tray message window did not survive restore")
 
         app._on_detach_ocr_button()
         app.update_idletasks()
@@ -3051,6 +3177,16 @@ def run_ui_self_test() -> None:
         app.update_idletasks()
         if not app.settings_window or not app.settings_window.winfo_exists():
             raise RuntimeError("settings window was not created")
+        if not app.settings_window.korean_font_names:
+            raise RuntimeError("font menu contains no Korean-capable fonts")
+        unsupported_fonts = [
+            name
+            for name in app.settings_window.korean_font_names
+            if not _font_has_character(name)
+        ]
+        if unsupported_fonts:
+            raise RuntimeError(f"font menu contains unsupported fonts: {unsupported_fonts}")
+        korean_font_count = len(app.settings_window.korean_font_names)
 
         app.settings_window._on_close()
         app.detached_window.close()
@@ -3060,6 +3196,8 @@ def run_ui_self_test() -> None:
             (
                 f"main_ocr_button_height: {ocr_button_height}\n"
                 f"tray_roundtrip: {tray_roundtrip}\n"
+                f"tray_message_window_reused: {tray_message_window_reused}\n"
+                f"korean_font_count: {korean_font_count}\n"
                 f"settings_file: {SETTINGS_FILE}\n"
                 f"icon_path: {_get_icon_path()}"
             ),
@@ -3069,6 +3207,7 @@ def run_ui_self_test() -> None:
         raise SystemExit(1)
     finally:
         if app and app.winfo_exists():
+            app.tray_icon.close()
             app.destroy()
 
 
