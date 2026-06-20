@@ -78,6 +78,9 @@ function Resolve-BuildPython {
         $candidates.Add($RequestedPython)
     }
     else {
+        $localBuildPython = Join-Path $PSScriptRoot ".build-python\python.exe"
+        $candidates.Add($localBuildPython)
+
         foreach ($commandName in @("python", "python3")) {
             $command = Get-Command $commandName -ErrorAction SilentlyContinue
             if ($command -and $command.Source) {
