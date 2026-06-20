@@ -4,12 +4,17 @@ import ctypes
 import datetime as _dt
 import json
 import os
+import platform
+import queue
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 import time
+import zipfile
 
 import tkinter as tk
 from dataclasses import dataclass
@@ -55,6 +60,11 @@ ICON_FILENAME = "MekiCopy.ico"
 APP_USER_MODEL_ID = "MekiCopy.MekiCopy"
 HYTRANS_DEFAULT_PORT = 6550
 OVERLAYER_DEFAULT_PORT = 6551
+MAGPIE_RELEASE_API_URL = "https://api.github.com/repos/Blinue/Magpie/releases/latest"
+MAGPIE_LAUNCH_NOTICE = (
+    "데스크톱 캡쳐 모드는 Graphics Capture(1순위 권장) 또는 "
+    "GDI(2순위 권장)을 사용해주세요"
+)
 _OCR_ENGINE = None
 _DLL_DIR_HANDLES = []
 _RUNTIME_PATH_READY = False
@@ -267,26 +277,28 @@ class Bookmark:
 
 @dataclass
 class AppSettings:
-    minimize_to_tray: bool = False
+    minimize_to_tray: bool = True
     main_always_on_top: bool = False
-    detached_always_on_top: bool = False
+    detached_always_on_top: bool = True
     detached_hide_titlebar: bool = False
     detached_fixed_size: bool = False
-    simple_copy_complete: bool = False
+    simple_copy_complete: bool = True
     detached_geometry: str = DETACHED_DEFAULT_GEOMETRY
     detached_fixed_width: int = 260
     detached_fixed_height: int = 160
-    overlay_translation_mode: bool = False
+    overlay_translation_mode: bool = True
     hytrans_port: int = HYTRANS_DEFAULT_PORT
     overlayer_port: int = OVERLAYER_DEFAULT_PORT
     overlayer_always_on_top: bool = True
     overlayer_hide_titlebar: bool = False
     overlayer_fixed_size: bool = False
+    overlayer_exclude_from_capture: bool = True
     overlayer_bg_color: str = "#111111"
     overlayer_bg_opacity: float = 0.78
     overlayer_text_color: str = "#ffffff"
     overlayer_text_size: int = 28
     overlayer_text_font: str = "Malgun Gothic"
+    suppress_magpie_launch_notice: bool = False
     debug_logging: bool = False
 
 
@@ -303,6 +315,11 @@ def _alternate_port(blocked_port: int) -> int:
         if candidate != blocked_port:
             return candidate
     return 65535 if blocked_port != 65535 else 65534
+
+
+def _normalize_font_name(font_name: str) -> str:
+    normalized = str(font_name).strip().lstrip("@").strip()
+    return normalized or "Malgun Gothic"
 
 
 def load_settings() -> AppSettings:
@@ -370,6 +387,11 @@ def load_settings() -> AppSettings:
         "overlayer_fixed_size",
         fallback=settings.overlayer_fixed_size,
     )
+    settings.overlayer_exclude_from_capture = parser.getboolean(
+        section,
+        "overlayer_exclude_from_capture",
+        fallback=settings.overlayer_exclude_from_capture,
+    )
     settings.overlayer_bg_color = parser.get(
         section, "overlayer_bg_color", fallback=settings.overlayer_bg_color
     )
@@ -387,6 +409,11 @@ def load_settings() -> AppSettings:
     settings.overlayer_text_font = parser.get(
         section, "overlayer_text_font", fallback=settings.overlayer_text_font
     )
+    settings.suppress_magpie_launch_notice = parser.getboolean(
+        section,
+        "suppress_magpie_launch_notice",
+        fallback=settings.suppress_magpie_launch_notice,
+    )
     settings.debug_logging = parser.getboolean(
         section, "debug_logging", fallback=settings.debug_logging
     )
@@ -398,6 +425,7 @@ def load_settings() -> AppSettings:
         settings.overlayer_port = _alternate_port(settings.hytrans_port)
     settings.overlayer_bg_opacity = max(0.1, min(1.0, settings.overlayer_bg_opacity))
     settings.overlayer_text_size = max(8, min(96, settings.overlayer_text_size))
+    settings.overlayer_text_font = _normalize_font_name(settings.overlayer_text_font)
     return settings
 
 
@@ -419,11 +447,17 @@ def save_settings(settings: AppSettings) -> None:
         "overlayer_always_on_top": str(settings.overlayer_always_on_top).lower(),
         "overlayer_hide_titlebar": str(settings.overlayer_hide_titlebar).lower(),
         "overlayer_fixed_size": str(settings.overlayer_fixed_size).lower(),
+        "overlayer_exclude_from_capture": str(
+            settings.overlayer_exclude_from_capture
+        ).lower(),
         "overlayer_bg_color": settings.overlayer_bg_color,
         "overlayer_bg_opacity": str(settings.overlayer_bg_opacity),
         "overlayer_text_color": settings.overlayer_text_color,
         "overlayer_text_size": str(settings.overlayer_text_size),
-        "overlayer_text_font": settings.overlayer_text_font,
+        "overlayer_text_font": _normalize_font_name(settings.overlayer_text_font),
+        "suppress_magpie_launch_notice": str(
+            settings.suppress_magpie_launch_notice
+        ).lower(),
         "debug_logging": str(settings.debug_logging).lower(),
     }
     with open(SETTINGS_FILE, "w", encoding="utf-8") as handle:
@@ -1484,6 +1518,99 @@ def _startupinfo_for_background() -> subprocess.STARTUPINFO | None:
     return startupinfo
 
 
+def _magpie_install_dir() -> str:
+    return os.path.join(os.path.dirname(_get_app_dir()), "MagPie")
+
+
+def _find_magpie_executable(directory: str | None = None) -> str | None:
+    install_dir = directory or _magpie_install_dir()
+    direct_path = os.path.join(install_dir, "MagPie.exe")
+    if os.path.isfile(direct_path):
+        return direct_path
+    if not os.path.isdir(install_dir):
+        return None
+    for root, _dirs, files in os.walk(install_dir):
+        for filename in files:
+            if filename.casefold() == "magpie.exe":
+                return os.path.join(root, filename)
+    return None
+
+
+def _select_magpie_release_asset(release: dict) -> dict:
+    assets = [
+        asset
+        for asset in release.get("assets", [])
+        if str(asset.get("name", "")).lower().endswith(".zip")
+        and asset.get("browser_download_url")
+    ]
+    machine = platform.machine().lower()
+    architecture = "arm64" if machine in {"arm64", "aarch64"} else "x64"
+    for asset in assets:
+        if architecture in str(asset.get("name", "")).lower():
+            return asset
+    raise RuntimeError(f"{architecture}용 MagPie 최신 릴리스 ZIP 파일이 없습니다.")
+
+
+def _safe_extract_zip(archive_path: str, destination: str) -> None:
+    destination_real = os.path.realpath(destination)
+    with zipfile.ZipFile(archive_path) as archive:
+        for info in archive.infolist():
+            member_path = os.path.realpath(os.path.join(destination, info.filename))
+            if os.path.commonpath([destination_real, member_path]) != destination_real:
+                raise RuntimeError("MagPie 압축 파일에 안전하지 않은 경로가 포함되어 있습니다.")
+        archive.extractall(destination)
+
+
+def _install_latest_magpie() -> str:
+    request = urllib.request.Request(
+        MAGPIE_RELEASE_API_URL,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "MekiCopy-MagPie-Installer",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        release = json.loads(response.read().decode("utf-8"))
+    asset = _select_magpie_release_asset(release)
+    install_dir = _magpie_install_dir()
+    suite_root = os.path.dirname(install_dir)
+    os.makedirs(suite_root, exist_ok=True)
+    staging_dir = tempfile.mkdtemp(prefix=".magpie-install-", dir=suite_root)
+    try:
+        archive_path = os.path.join(staging_dir, "MagPie.zip")
+        download_request = urllib.request.Request(
+            str(asset["browser_download_url"]),
+            headers={"User-Agent": "MekiCopy-MagPie-Installer"},
+        )
+        with urllib.request.urlopen(download_request, timeout=120) as response:
+            with open(archive_path, "wb") as archive_file:
+                shutil.copyfileobj(response, archive_file)
+
+        extracted_dir = os.path.join(staging_dir, "extracted")
+        os.makedirs(extracted_dir, exist_ok=True)
+        _safe_extract_zip(archive_path, extracted_dir)
+        staged_executable = _find_magpie_executable(extracted_dir)
+        if not staged_executable:
+            raise RuntimeError("다운로드한 MagPie 압축 파일에서 MagPie.exe를 찾지 못했습니다.")
+
+        source_root = os.path.dirname(staged_executable)
+        os.makedirs(install_dir, exist_ok=True)
+        for entry in os.scandir(source_root):
+            destination = os.path.join(install_dir, entry.name)
+            if entry.is_dir():
+                shutil.copytree(entry.path, destination, dirs_exist_ok=True)
+            else:
+                shutil.copy2(entry.path, destination)
+
+        installed_executable = _find_magpie_executable(install_dir)
+        if not installed_executable:
+            raise RuntimeError("MagPie 설치 후 실행 파일을 찾지 못했습니다.")
+        return installed_executable
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
 class SettingsWindow(tk.Toplevel):
     def __init__(self, owner) -> None:
         super().__init__(owner)
@@ -1511,6 +1638,9 @@ class SettingsWindow(tk.Toplevel):
             value=settings.overlayer_hide_titlebar
         )
         self.overlayer_fixed_size_var = tk.BooleanVar(value=settings.overlayer_fixed_size)
+        self.overlayer_exclude_capture_var = tk.BooleanVar(
+            value=settings.overlayer_exclude_from_capture
+        )
         self.overlayer_bg_color_var = tk.StringVar(value=settings.overlayer_bg_color)
         self.overlayer_opacity_var = tk.IntVar(
             value=max(10, min(100, int(settings.overlayer_bg_opacity * 100)))
@@ -1518,6 +1648,9 @@ class SettingsWindow(tk.Toplevel):
         self.overlayer_text_color_var = tk.StringVar(value=settings.overlayer_text_color)
         self.overlayer_text_size_var = tk.IntVar(value=settings.overlayer_text_size)
         self.overlayer_text_font_var = tk.StringVar(value=settings.overlayer_text_font)
+        self.suppress_magpie_notice_var = tk.BooleanVar(
+            value=settings.suppress_magpie_launch_notice
+        )
         self.debug_logging_var = tk.BooleanVar(value=settings.debug_logging)
         self.overlay_only_widgets: list[tk.Widget] = []
         self.detached_label_controls: list[tuple[tk.Widget, str]] = []
@@ -1556,6 +1689,14 @@ class SettingsWindow(tk.Toplevel):
             checkbox = tk.Checkbutton(body, variable=variable, anchor="w")
             checkbox.pack(fill=tk.X, pady=4)
             self.detached_label_controls.append((checkbox, suffix))
+
+        suppress_magpie_notice_checkbox = tk.Checkbutton(
+            body,
+            text="MagPie 실행 시 안내 띄우지 않기",
+            variable=self.suppress_magpie_notice_var,
+            anchor="w",
+        )
+        suppress_magpie_notice_checkbox.pack(fill=tk.X, pady=4)
 
         debug_checkbox = tk.Checkbutton(
             body,
@@ -1608,6 +1749,10 @@ class SettingsWindow(tk.Toplevel):
             ("MekiOverlayer를 항상 위로", self.overlayer_topmost_var),
             ("MekiOverlayer의 제목표시줄 숨김", self.overlayer_hide_titlebar_var),
             ("MekiOverlayer 크기 고정", self.overlayer_fixed_size_var),
+            (
+                "MekiOverlayer가 캡쳐되지 않도록 방지",
+                self.overlayer_exclude_capture_var,
+            ),
         ]
         for text, variable in overlayer_options:
             checkbox = tk.Checkbutton(
@@ -1679,7 +1824,9 @@ class SettingsWindow(tk.Toplevel):
         font_row = tk.Frame(overlayer_style)
         font_row.pack(fill=tk.X, pady=2)
         tk.Label(font_row, text="글씨 폰트").pack(side=tk.LEFT)
-        font_names = sorted(set(tkfont.families(self)))
+        font_names = sorted(
+            {_normalize_font_name(name) for name in tkfont.families(self) if name}
+        )
         if self.overlayer_text_font_var.get() not in font_names:
             font_names.insert(0, self.overlayer_text_font_var.get())
         font_menu = tk.OptionMenu(
@@ -1765,11 +1912,13 @@ class SettingsWindow(tk.Toplevel):
             overlayer_always_on_top=self.overlayer_topmost_var.get(),
             overlayer_hide_titlebar=self.overlayer_hide_titlebar_var.get(),
             overlayer_fixed_size=self.overlayer_fixed_size_var.get(),
+            overlayer_exclude_from_capture=self.overlayer_exclude_capture_var.get(),
             overlayer_bg_color=self.overlayer_bg_color_var.get(),
             overlayer_bg_opacity=opacity,
             overlayer_text_color=self.overlayer_text_color_var.get(),
             overlayer_text_size=text_size,
-            overlayer_text_font=self.overlayer_text_font_var.get(),
+            overlayer_text_font=_normalize_font_name(self.overlayer_text_font_var.get()),
+            suppress_magpie_launch_notice=self.suppress_magpie_notice_var.get(),
             debug_logging=self.debug_logging_var.get(),
         )
 
@@ -2007,6 +2156,9 @@ class MainWindow(tk.Tk):
         self.settings_window: SettingsWindow | None = None
         self.hytrans_process: subprocess.Popen | None = None
         self.overlayer_process: subprocess.Popen | None = None
+        self.magpie_process: subprocess.Popen | None = None
+        self._magpie_install_results: queue.Queue[tuple[bool, str]] = queue.Queue()
+        self._magpie_installing = False
         self.tray_icon = WindowsTrayIcon(self, "MekiCopy", self._restore_from_tray)
         self.title("MekiCopy")
         _set_window_icon(self)
@@ -2097,6 +2249,11 @@ class MainWindow(tk.Tk):
         ]
         for text, command in buttons:
             self._pack_tab_button(frame, text, command)
+        self.magpie_button = self._pack_tab_button(
+            frame,
+            "Magpie 실행",
+            self._on_start_magpie,
+        )
 
     def _build_tools_tab(self, frame: tk.Frame) -> None:
         self.hytrans_button = self._pack_tab_button(
@@ -2313,6 +2470,69 @@ class MainWindow(tk.Tk):
             _log_runtime_error("capture_diagnostics", exc)
             messagebox.showerror("MekiCopy", f"캡처 진단 실패:\n{exc}", parent=self)
 
+    def _launch_magpie(self, executable: str) -> None:
+        if not self.settings.suppress_magpie_launch_notice:
+            messagebox.showinfo("MagPie 실행 안내", MAGPIE_LAUNCH_NOTICE, parent=self)
+        try:
+            self.magpie_process = subprocess.Popen(
+                [executable],
+                cwd=os.path.dirname(executable),
+            )
+            self._set_capture_status(f"MagPie 실행됨: {executable}")
+            _log_runtime_message("start_magpie", executable)
+        except Exception as exc:
+            _log_runtime_error("start_magpie", exc)
+            messagebox.showerror("MekiCopy", f"MagPie 실행 실패:\n{exc}", parent=self)
+
+    def _on_start_magpie(self) -> None:
+        executable = _find_magpie_executable()
+        if executable:
+            self._launch_magpie(executable)
+            return
+        if self._magpie_installing:
+            messagebox.showinfo(
+                "MekiCopy",
+                "MagPie 최신 버전을 다운로드하고 있습니다.",
+                parent=self,
+            )
+            return
+
+        self._magpie_installing = True
+        self.magpie_button.config(state=tk.DISABLED, text="MagPie 다운로드 중...")
+        self._set_capture_status("MagPie 최신 버전을 다운로드하고 압축을 푸는 중입니다...")
+
+        def install_worker() -> None:
+            try:
+                installed_executable = _install_latest_magpie()
+                self._magpie_install_results.put((True, installed_executable))
+            except Exception as exc:
+                _log_runtime_error("install_magpie", exc)
+                self._magpie_install_results.put((False, str(exc)))
+
+        threading.Thread(target=install_worker, daemon=True).start()
+        self.after(100, self._poll_magpie_install_result)
+
+    def _poll_magpie_install_result(self) -> None:
+        try:
+            succeeded, result = self._magpie_install_results.get_nowait()
+        except queue.Empty:
+            if self._magpie_installing and not self._closing:
+                self.after(100, self._poll_magpie_install_result)
+            return
+
+        self._magpie_installing = False
+        self.magpie_button.config(state=tk.NORMAL, text="Magpie 실행")
+        if succeeded:
+            self._set_capture_status(f"MagPie 설치 완료: {result}")
+            self._launch_magpie(result)
+        else:
+            self._set_capture_status("MagPie 다운로드 또는 설치 실패")
+            messagebox.showerror(
+                "MekiCopy",
+                f"MagPie 다운로드 또는 설치 실패:\n{result}",
+                parent=self,
+            )
+
     def _on_select_region(self) -> None:
         initial = self.draft_region or self.active_region
         selection = run_selection(
@@ -2421,6 +2641,7 @@ class MainWindow(tk.Tk):
             "topmost": self.settings.overlayer_always_on_top,
             "hide_titlebar": self.settings.overlayer_hide_titlebar,
             "fixed_size": self.settings.overlayer_fixed_size,
+            "exclude_from_capture": self.settings.overlayer_exclude_from_capture,
             "bg_color": self.settings.overlayer_bg_color,
             "opacity": self.settings.overlayer_bg_opacity,
             "text_color": self.settings.overlayer_text_color,
@@ -2529,6 +2750,8 @@ class MainWindow(tk.Tk):
             "1" if cfg["hide_titlebar"] else "0",
             "--fixed-size",
             "1" if cfg["fixed_size"] else "0",
+            "--exclude-from-capture",
+            "1" if cfg["exclude_from_capture"] else "0",
             "--bg-color",
             str(cfg["bg_color"]),
             "--opacity",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import datetime as _dt
 import json
 import os
@@ -9,6 +10,7 @@ import sys
 import threading
 import traceback
 from dataclasses import dataclass
+from ctypes import wintypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -36,12 +38,19 @@ import tkinter as tk
 DEFAULT_PORT = 6551
 DEFAULT_GEOMETRY = "780x180+120+120"
 _WINDOW_STREAM = None
+WDA_NONE = 0x00000000
+WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 
 def _get_app_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def normalize_font_name(font_name: str) -> str:
+    normalized = str(font_name).strip().lstrip("@").strip()
+    return normalized or "Malgun Gothic"
 
 
 def _get_resource_dir() -> str:
@@ -172,6 +181,7 @@ class OverlayConfig:
     topmost: bool = True
     hide_titlebar: bool = False
     fixed_size: bool = False
+    exclude_from_capture: bool = False
     bg_color: str = "#111111"
     opacity: float = 0.78
     text_color: str = "#ffffff"
@@ -179,11 +189,15 @@ class OverlayConfig:
     text_font: str = "Malgun Gothic"
     debug_log: bool = False
 
+    def __post_init__(self) -> None:
+        self.text_font = normalize_font_name(self.text_font)
+
     def update_from_dict(self, data: dict[str, Any]) -> None:
         for key in (
             "topmost",
             "hide_titlebar",
             "fixed_size",
+            "exclude_from_capture",
             "bg_color",
             "opacity",
             "text_color",
@@ -194,12 +208,20 @@ class OverlayConfig:
             if key not in data:
                 continue
             value = data[key]
-            if key in {"topmost", "hide_titlebar", "fixed_size", "debug_log"}:
+            if key in {
+                "topmost",
+                "hide_titlebar",
+                "fixed_size",
+                "exclude_from_capture",
+                "debug_log",
+            }:
                 setattr(self, key, bool(value))
             elif key == "opacity":
                 setattr(self, key, max(0.1, min(1.0, float(value))))
             elif key == "text_size":
                 setattr(self, key, max(8, min(96, int(value))))
+            elif key == "text_font":
+                self.text_font = normalize_font_name(str(value))
             else:
                 setattr(self, key, str(value))
 
@@ -259,10 +281,38 @@ class OverlayerApp:
         self.label.configure(
             bg=cfg.bg_color,
             fg=cfg.text_color,
-            font=(cfg.text_font, cfg.text_size, "bold"),
+            font=(normalize_font_name(cfg.text_font), cfg.text_size, "bold"),
         )
         self._update_wraplength()
         self.root.deiconify()
+        self.root.update_idletasks()
+        self._apply_capture_exclusion()
+
+    def _apply_capture_exclusion(self) -> bool:
+        if os.name != "nt":
+            return False
+        affinity = WDA_EXCLUDEFROMCAPTURE if self.config.exclude_from_capture else WDA_NONE
+        try:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetParent.restype = wintypes.HWND
+            set_window_display_affinity = user32.SetWindowDisplayAffinity
+            set_window_display_affinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+            set_window_display_affinity.restype = wintypes.BOOL
+            widget_hwnd = self.root.winfo_id()
+            top_level_hwnd = user32.GetParent(widget_hwnd) or widget_hwnd
+            if set_window_display_affinity(top_level_hwnd, affinity):
+                log_debug(
+                    self.config.debug_log,
+                    "capture_exclusion",
+                    f"SetWindowDisplayAffinity=0x{affinity:08X}",
+                )
+                return True
+            error_code = ctypes.get_last_error()
+            raise ctypes.WinError(error_code)
+        except Exception as exc:
+            log_error("set_window_display_affinity", exc)
+            return False
 
     def _on_configure(self, event: tk.Event) -> None:
         if event.widget == self.root:
@@ -369,6 +419,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--topmost", type=int, default=1)
     parser.add_argument("--hide-titlebar", type=int, default=0)
     parser.add_argument("--fixed-size", type=int, default=0)
+    parser.add_argument("--exclude-from-capture", type=int, default=0)
     parser.add_argument("--bg-color", default="#111111")
     parser.add_argument("--opacity", type=float, default=0.78)
     parser.add_argument("--text-color", default="#ffffff")
@@ -386,6 +437,7 @@ def main() -> int:
         topmost=bool(args.topmost),
         hide_titlebar=bool(args.hide_titlebar),
         fixed_size=bool(args.fixed_size),
+        exclude_from_capture=bool(args.exclude_from_capture),
         bg_color=args.bg_color,
         opacity=args.opacity,
         text_color=args.text_color,
