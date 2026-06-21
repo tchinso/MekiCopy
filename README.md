@@ -42,7 +42,7 @@ MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일�
 
 ### 배포판(exe)을 사용하는 경우
 
-[Releases](https://github.com/tchinso/MekiCopy/releases)`에서 최신 버전을 다운 받아 MekiCopy.exe`를 직접 실행합니다. 별도 설치 없이 동작합니다.
+[Releases](https://github.com/tchinso/MekiCopy/releases)에서 최신 버전을 다운 받아`MekiCopy.exe`를 직접 실행합니다. 별도 설치 없이 동작합니다.
 
 ---
 
