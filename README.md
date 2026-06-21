@@ -1,4 +1,5 @@
-# MekiCopy 사용설명서
+![preview](preview.png)
+# MekiCopy
 
 MekiCopy는 화면의 특정 영역을 지정한 뒤 OCR로 글자를 인식하고, 결과를 클립보드에 복사하는 도구입니다.  
 선택적으로 HYTrans + MekiOverlayer와 연동하면 인식한 텍스트를 자동으로 번역해 화면에 바로 표시할 수 있습니다.
