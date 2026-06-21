@@ -260,6 +260,8 @@ import meikiocr
 import mss
 import onnxruntime
 import PIL
+import sherpa_onnx
+import soundcard
 import uvicorn
 root = tk.Tk()
 root.withdraw()
@@ -274,6 +276,8 @@ expected = {
     "uvicorn": "0.49.0",
     "huggingface-hub": "1.20.1",
     "onnxruntime-gpu": "1.27.0",
+    "sherpa-onnx": "1.13.3",
+    "SoundCard": "0.4.6",
 }
 for package, wanted in expected.items():
     actual = version(package)
@@ -329,22 +333,101 @@ for repo_id, filename in missing_models:
 '@
 Invoke-CheckedPythonScript $prepareModels
 
+$prepareAudioModels = @'
+from pathlib import Path
+import shutil
+import tarfile
+import tempfile
+import urllib.request
+
+root = Path("models")
+speech = root / "reazonspeech-ja"
+vad = root / "vad"
+speech.mkdir(parents=True, exist_ok=True)
+vad.mkdir(parents=True, exist_ok=True)
+
+required = [
+    "tokens.txt",
+    "encoder-epoch-99-avg-1.onnx",
+    "decoder-epoch-99-avg-1.onnx",
+    "joiner-epoch-99-avg-1.onnx",
+    "encoder-epoch-99-avg-1.int8.onnx",
+    "joiner-epoch-99-avg-1.int8.onnx",
+]
+missing = [name for name in required if not (speech / name).is_file()]
+archive = Path(tempfile.gettempdir()) / "mekicopy-reazonspeech.tar.bz2"
+url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2"
+
+def ensure_archive():
+    if not archive.is_file():
+        print("Downloading ReazonSpeech model...")
+        urllib.request.urlretrieve(url, archive)
+
+if missing:
+    ensure_archive()
+    with tempfile.TemporaryDirectory(prefix="mekicopy-audio-model-") as temp:
+        with tarfile.open(archive, "r:bz2") as bundle:
+            bundle.extractall(temp, filter="data")
+        extracted = Path(temp)
+        for name in required:
+            matches = list(extracted.rglob(name))
+            if not matches:
+                raise SystemExit(f"Model archive does not contain {name}")
+            shutil.copy2(matches[0], speech / name)
+            print(f"Prepared audio model: {speech / name}")
+
+test_wav = speech / "test.wav"
+if not test_wav.is_file():
+    ensure_archive()
+    with tarfile.open(archive, "r:bz2") as bundle:
+        member = next(item for item in bundle.getmembers() if item.name.endswith("test_wavs/1.wav"))
+        with bundle.extractfile(member) as source, test_wav.open("wb") as target:
+            shutil.copyfileobj(source, target)
+    print(f"Prepared audio smoke-test file: {test_wav}")
+
+silero = vad / "silero_vad.onnx"
+if not silero.is_file():
+    url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+    print("Downloading Silero VAD model...")
+    urllib.request.urlretrieve(url, silero)
+    print(f"Prepared VAD model: {silero}")
+'@
+Invoke-CheckedPythonScript $prepareAudioModels
+
 Remove-WorkspaceDirectory "build"
-Remove-WorkspaceDirectory "dist"
+$distRelativePath = "dist"
+try {
+    Remove-WorkspaceDirectory $distRelativePath
+}
+catch {
+    # A running copy of an older build can keep a DLL locked on Windows.
+    # Preserve that process and publish the new verified build separately.
+    Write-Warning "The existing dist folder is in use; publishing to dist-new instead."
+    $distRelativePath = "dist-new"
+    Remove-WorkspaceDirectory $distRelativePath
+}
+$distRoot = Join-Path $PSScriptRoot $distRelativePath
 
 $specs = @(
     ".\MekiCopy.spec",
     ".\HYTrans.spec",
-    ".\MekiOverlayer.spec"
+    ".\MekiDisplay.spec",
+    ".\MekiAudioCapture.spec"
 )
 foreach ($spec in $specs) {
-    Invoke-CheckedPython @("-m", "PyInstaller", "--noconfirm", "--clean", $spec)
+    Invoke-CheckedPython @(
+        "-m", "PyInstaller", "--noconfirm", "--clean",
+        "--distpath", $distRoot,
+        $spec
+    )
 }
 
-$mekiCopyExe = Join-Path $PSScriptRoot "dist\MekiCopy\MekiCopy.exe"
-$hyTransExe = Join-Path $PSScriptRoot "dist\HYTrans\HYTrans.exe"
-$overlayerExe = Join-Path $PSScriptRoot "dist\MekiOverlayer\MekiOverlayer.exe"
-$expectedExecutables = @($mekiCopyExe, $hyTransExe, $overlayerExe)
+$mekiCopyExe = Join-Path $distRoot "MekiCopy\MekiCopy.exe"
+$hyTransExe = Join-Path $distRoot "HYTrans\HYTrans.exe"
+$overlayerExe = Join-Path $distRoot "MekiDisplay\MekiOverlayer.exe"
+$scriptExe = Join-Path $distRoot "MekiDisplay\MekiScript.exe"
+$audioCaptureExe = Join-Path $distRoot "MekiAudioCapture\MekiAudioCapture.exe"
+$expectedExecutables = @($mekiCopyExe, $hyTransExe, $overlayerExe, $scriptExe, $audioCaptureExe)
 foreach ($exe in $expectedExecutables) {
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
         throw "Expected executable was not created: $exe"
@@ -359,6 +442,9 @@ foreach ($exe in $expectedExecutables) {
         throw "Bundled Python DLL was not found beside: $exe"
     }
 }
+
+$distModels = Join-Path $distRoot "models"
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "models") -Destination $distModels -Recurse -Force
 
 if (-not $SkipSmokeTests) {
     Write-Host "Running executable smoke tests..."
@@ -379,6 +465,21 @@ if (-not $SkipSmokeTests) {
         $overlayerExe `
         @("--port", "$overlayerPort") `
         $overlayerPort
+
+    Invoke-ExeSmokeTest $audioCaptureExe @("--self-test")
+    Invoke-ExeSmokeTest $scriptExe @("--self-test")
+
+    $scriptPort = Get-FreeTcpPort
+    Invoke-HealthSmokeTest `
+        $scriptExe `
+        @("--port", "$scriptPort") `
+        $scriptPort
+
+    $audioPort = Get-FreeTcpPort
+    Invoke-HealthSmokeTest `
+        $audioCaptureExe `
+        @("--port", "$audioPort") `
+        $audioPort
 }
 
 # UI smoke tests intentionally publish a synthetic OCR region and window
@@ -398,3 +499,5 @@ Write-Host "Build complete and verified:"
 Write-Host $mekiCopyExe
 Write-Host $hyTransExe
 Write-Host $overlayerExe
+Write-Host $scriptExe
+Write-Host $audioCaptureExe

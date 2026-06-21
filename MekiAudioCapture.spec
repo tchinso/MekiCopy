@@ -1,0 +1,42 @@
+# -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
+
+datas = []
+if Path("MekiCopy.ico").exists():
+    datas.append(("MekiCopy.ico", "."))
+
+binaries = collect_dynamic_libs("sherpa_onnx")
+hiddenimports = [
+    "tkinter",
+    "tkinter.constants",
+    "numpy",
+    "soundcard",
+]
+hiddenimports += collect_submodules("sherpa_onnx")
+
+a = Analysis(
+    ["meki_audio_capture.py"],
+    pathex=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=["PyQt5", "PyQt6", "PySide2", "PySide6"],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+exe = EXE(
+    pyz, a.scripts, [], exclude_binaries=True, name="MekiAudioCapture",
+    debug=False, bootloader_ignore_signals=False, strip=False, upx=True,
+    console=False, disable_windowed_traceback=False, argv_emulation=False,
+    target_arch=None, codesign_identity=None, entitlements_file=None,
+    icon="MekiCopy.ico",
+)
+coll = COLLECT(
+    exe, a.binaries, a.datas, strip=False, upx=True, upx_exclude=[],
+    name="MekiAudioCapture",
+)

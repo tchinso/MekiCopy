@@ -6,8 +6,6 @@ from PyInstaller.utils.hooks import collect_submodules
 datas = []
 if Path("assets").exists():
     datas.append(("assets", "assets"))
-if Path("models").exists():
-    datas.append(("models", "models"))
 if Path("MekiCopy.ico").exists():
     datas.append(("MekiCopy.ico", "."))
 
@@ -59,4 +57,3 @@ coll = COLLECT(
     upx_exclude=[],
     name="HYTrans",
 )
-

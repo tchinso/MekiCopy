@@ -28,7 +28,7 @@ prepare_tk_environment("MekiCopyRuntime")
 
 import tkinter as tk
 from dataclasses import dataclass
-from tkinter import colorchooser, font as tkfont, messagebox, simpledialog
+from tkinter import colorchooser, font as tkfont, messagebox, simpledialog, ttk
 from ctypes import wintypes
 from typing import Callable
 import traceback
@@ -68,6 +68,8 @@ DETACHED_MUTEX_NAME = "Local\\MekiCopy.DetachedOcrButton"
 KOREAN_FONT_TEST_CHARACTER = "쿈"
 HYTRANS_DEFAULT_PORT = 6550
 OVERLAYER_DEFAULT_PORT = 6551
+SCRIPT_DEFAULT_PORT = 6552
+AUDIO_CAPTURE_DEFAULT_PORT = 6553
 MAGPIE_RELEASE_API_URL = "https://api.github.com/repos/Blinue/Magpie/releases/latest"
 MAGPIE_LAUNCH_NOTICE = (
     "데스크톱 캡쳐 모드는 Graphics Capture(1순위 권장) 또는 "
@@ -318,6 +320,17 @@ class AppSettings:
     overlayer_text_color: str = "#ffffff"
     overlayer_text_size: int = 28
     overlayer_text_font: str = "Malgun Gothic"
+    audio_stt_precision: str = "fp32"
+    audio_chunk_preset: str = "BALANCED"
+    script_always_on_top: bool = True
+    script_bg_color: str = "#111111"
+    script_bg_opacity: float = 0.90
+    script_original_text_color: str = "#f4f4f5"
+    script_original_text_size: int = 20
+    script_original_text_font: str = "Yu Gothic UI"
+    script_translated_text_color: str = "#7dd3fc"
+    script_translated_text_size: int = 20
+    script_translated_text_font: str = "Malgun Gothic"
     suppress_magpie_launch_notice: bool = False
     debug_logging: bool = False
 
@@ -377,6 +390,10 @@ def _font_has_character(font_name: str, character: str = KOREAN_FONT_TEST_CHARAC
         wintypes.DWORD,
     ]
     gdi32.GetGlyphIndicesW.restype = wintypes.DWORD
+    gdi32.GetFontUnicodeRanges.argtypes = [wintypes.HDC, ctypes.c_void_p]
+    gdi32.GetFontUnicodeRanges.restype = wintypes.DWORD
+    gdi32.GetTextFaceW.argtypes = [wintypes.HDC, ctypes.c_int, wintypes.LPWSTR]
+    gdi32.GetTextFaceW.restype = ctypes.c_int
     gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
     gdi32.DeleteObject.restype = wintypes.BOOL
     gdi32.DeleteDC.argtypes = [wintypes.HDC]
@@ -397,7 +414,7 @@ def _font_has_character(font_name: str, character: str = KOREAN_FONT_TEST_CHARAC
             0,
             0,
             0,
-            1,  # DEFAULT_CHARSET
+            128 if character == "ー" else 129,  # SHIFTJIS_CHARSET / HANGUL_CHARSET
             0,
             0,
             0,
@@ -407,15 +424,38 @@ def _font_has_character(font_name: str, character: str = KOREAN_FONT_TEST_CHARAC
         if not font_handle:
             return False
         old_font = gdi32.SelectObject(hdc, font_handle)
-        glyph_indices = (wintypes.WORD * len(character))()
-        result = gdi32.GetGlyphIndicesW(
-            hdc,
-            character,
-            len(character),
-            glyph_indices,
-            0x0001,  # GGI_MARK_NONEXISTING
+        face_length = gdi32.GetTextFaceW(hdc, 0, None)
+        if face_length <= 0:
+            return False
+        face_buffer = ctypes.create_unicode_buffer(face_length + 1)
+        if not gdi32.GetTextFaceW(hdc, len(face_buffer), face_buffer):
+            return False
+        if _normalize_font_name(face_buffer.value).casefold() != _normalize_font_name(font_name).casefold():
+            return False
+        class _GlyphSetHeader(ctypes.Structure):
+            _fields_ = [
+                ("cbThis", wintypes.DWORD),
+                ("flAccel", wintypes.DWORD),
+                ("cGlyphsSupported", wintypes.DWORD),
+                ("cRanges", wintypes.DWORD),
+            ]
+
+        class _Wcrange(ctypes.Structure):
+            _fields_ = [("wcLow", wintypes.WORD), ("cGlyphs", wintypes.WORD)]
+
+        buffer_size = gdi32.GetFontUnicodeRanges(hdc, None)
+        if not buffer_size:
+            return False
+        buffer = ctypes.create_string_buffer(buffer_size)
+        if not gdi32.GetFontUnicodeRanges(hdc, ctypes.byref(buffer)):
+            return False
+        header = _GlyphSetHeader.from_buffer(buffer)
+        ranges_type = _Wcrange * header.cRanges
+        ranges = ranges_type.from_buffer(buffer, ctypes.sizeof(_GlyphSetHeader))
+        return all(
+            any(item.wcLow <= ord(char) < item.wcLow + item.cGlyphs for item in ranges)
+            for char in character
         )
-        return result != 0xFFFFFFFF and all(index != 0xFFFF for index in glyph_indices)
     finally:
         if old_font:
             gdi32.SelectObject(hdc, old_font)
@@ -427,6 +467,11 @@ def _font_has_character(font_name: str, character: str = KOREAN_FONT_TEST_CHARAC
 def _korean_font_families(root: tk.Misc) -> list[str]:
     font_names = sorted({_normalize_font_name(name) for name in tkfont.families(root) if name})
     return [name for name in font_names if _font_has_character(name)]
+
+
+def _japanese_font_families(root: tk.Misc) -> list[str]:
+    font_names = sorted({_normalize_font_name(name) for name in tkfont.families(root) if name})
+    return [name for name in font_names if _font_has_character(name, "ー")]
 
 
 def load_settings() -> AppSettings:
@@ -516,6 +561,39 @@ def load_settings() -> AppSettings:
     settings.overlayer_text_font = parser.get(
         section, "overlayer_text_font", fallback=settings.overlayer_text_font
     )
+    settings.audio_stt_precision = parser.get(
+        section, "audio_stt_precision", fallback=settings.audio_stt_precision
+    ).lower()
+    settings.audio_chunk_preset = parser.get(
+        section, "audio_chunk_preset", fallback=settings.audio_chunk_preset
+    ).upper()
+    settings.script_always_on_top = parser.getboolean(
+        section, "script_always_on_top", fallback=settings.script_always_on_top
+    )
+    settings.script_bg_color = parser.get(
+        section, "script_bg_color", fallback=settings.script_bg_color
+    )
+    settings.script_bg_opacity = parser.getfloat(
+        section, "script_bg_opacity", fallback=settings.script_bg_opacity
+    )
+    settings.script_original_text_color = parser.get(
+        section, "script_original_text_color", fallback=settings.script_original_text_color
+    )
+    settings.script_original_text_size = parser.getint(
+        section, "script_original_text_size", fallback=settings.script_original_text_size
+    )
+    settings.script_original_text_font = parser.get(
+        section, "script_original_text_font", fallback=settings.script_original_text_font
+    )
+    settings.script_translated_text_color = parser.get(
+        section, "script_translated_text_color", fallback=settings.script_translated_text_color
+    )
+    settings.script_translated_text_size = parser.getint(
+        section, "script_translated_text_size", fallback=settings.script_translated_text_size
+    )
+    settings.script_translated_text_font = parser.get(
+        section, "script_translated_text_font", fallback=settings.script_translated_text_font
+    )
     settings.suppress_magpie_launch_notice = parser.getboolean(
         section,
         "suppress_magpie_launch_notice",
@@ -533,6 +611,15 @@ def load_settings() -> AppSettings:
     settings.overlayer_bg_opacity = max(0.1, min(1.0, settings.overlayer_bg_opacity))
     settings.overlayer_text_size = max(8, min(96, settings.overlayer_text_size))
     settings.overlayer_text_font = _normalize_font_name(settings.overlayer_text_font)
+    if settings.audio_stt_precision not in {"fp32", "int8"}:
+        settings.audio_stt_precision = "fp32"
+    if settings.audio_chunk_preset not in {"FAST", "BALANCED", "LONG"}:
+        settings.audio_chunk_preset = "BALANCED"
+    settings.script_bg_opacity = max(0.1, min(1.0, settings.script_bg_opacity))
+    settings.script_original_text_size = max(8, min(96, settings.script_original_text_size))
+    settings.script_translated_text_size = max(8, min(96, settings.script_translated_text_size))
+    settings.script_original_text_font = _normalize_font_name(settings.script_original_text_font)
+    settings.script_translated_text_font = _normalize_font_name(settings.script_translated_text_font)
     return settings
 
 
@@ -562,6 +649,17 @@ def save_settings(settings: AppSettings) -> None:
         "overlayer_text_color": settings.overlayer_text_color,
         "overlayer_text_size": str(settings.overlayer_text_size),
         "overlayer_text_font": _normalize_font_name(settings.overlayer_text_font),
+        "audio_stt_precision": settings.audio_stt_precision,
+        "audio_chunk_preset": settings.audio_chunk_preset,
+        "script_always_on_top": str(settings.script_always_on_top).lower(),
+        "script_bg_color": settings.script_bg_color,
+        "script_bg_opacity": str(settings.script_bg_opacity),
+        "script_original_text_color": settings.script_original_text_color,
+        "script_original_text_size": str(settings.script_original_text_size),
+        "script_original_text_font": _normalize_font_name(settings.script_original_text_font),
+        "script_translated_text_color": settings.script_translated_text_color,
+        "script_translated_text_size": str(settings.script_translated_text_size),
+        "script_translated_text_font": _normalize_font_name(settings.script_translated_text_font),
         "suppress_magpie_launch_notice": str(
             settings.suppress_magpie_launch_notice
         ).lower(),
@@ -1833,6 +1931,7 @@ def _find_companion_executable(app_name: str, script_name: str) -> list[str] | N
     app_dir = _get_app_dir()
     candidates = [
         os.path.join(app_dir, exe_name),
+        os.path.join(os.path.dirname(app_dir), "MekiDisplay", exe_name),
         os.path.join(os.path.dirname(app_dir), app_name, exe_name),
         os.path.join(os.path.dirname(os.path.dirname(app_dir)), app_name, exe_name),
     ]
@@ -1954,6 +2053,8 @@ class SettingsWindow(tk.Toplevel):
         self.owner = owner
         self.title("MekiCopy 설정")
         self.resizable(False, True)
+        self.geometry("540x690")
+        self.minsize(540, 560)
         _set_window_icon(self)
 
         settings = owner.settings
@@ -1985,6 +2086,19 @@ class SettingsWindow(tk.Toplevel):
         self.overlayer_text_color_var = tk.StringVar(value=settings.overlayer_text_color)
         self.overlayer_text_size_var = tk.IntVar(value=settings.overlayer_text_size)
         self.overlayer_text_font_var = tk.StringVar(value=settings.overlayer_text_font)
+        self.audio_stt_precision_var = tk.StringVar(value=settings.audio_stt_precision)
+        self.audio_chunk_preset_var = tk.StringVar(value=settings.audio_chunk_preset)
+        self.script_topmost_var = tk.BooleanVar(value=settings.script_always_on_top)
+        self.script_bg_color_var = tk.StringVar(value=settings.script_bg_color)
+        self.script_opacity_var = tk.IntVar(
+            value=max(10, min(100, int(settings.script_bg_opacity * 100)))
+        )
+        self.script_original_color_var = tk.StringVar(value=settings.script_original_text_color)
+        self.script_original_size_var = tk.IntVar(value=settings.script_original_text_size)
+        self.script_original_font_var = tk.StringVar(value=settings.script_original_text_font)
+        self.script_translated_color_var = tk.StringVar(value=settings.script_translated_text_color)
+        self.script_translated_size_var = tk.IntVar(value=settings.script_translated_text_size)
+        self.script_translated_font_var = tk.StringVar(value=settings.script_translated_text_font)
         self.suppress_magpie_notice_var = tk.BooleanVar(
             value=settings.suppress_magpie_launch_notice
         )
@@ -2005,6 +2119,15 @@ class SettingsWindow(tk.Toplevel):
         body = tk.Frame(self, padx=14, pady=14)
         body.pack(fill=tk.BOTH, expand=True)
 
+        notebook = ttk.Notebook(body)
+        notebook.pack(fill=tk.BOTH, expand=True)
+        general_tab = tk.Frame(notebook, padx=12, pady=12)
+        overlay_tab = tk.Frame(notebook, padx=12, pady=12)
+        audio_tab = tk.Frame(notebook, padx=12, pady=12)
+        notebook.add(general_tab, text="일반")
+        notebook.add(overlay_tab, text="번역 오버레이")
+        notebook.add(audio_tab, text="음성인식")
+
         options = [
             (
                 "MekiCopy가 최소화되면 시스템 트레이로 이동",
@@ -2014,7 +2137,7 @@ class SettingsWindow(tk.Toplevel):
             ("복사 완료를 간단하게 표시하기", self.simple_copy_complete_var),
         ]
         for text, variable in options:
-            checkbox = tk.Checkbutton(body, text=text, variable=variable, anchor="w")
+            checkbox = tk.Checkbutton(general_tab, text=text, variable=variable, anchor="w")
             checkbox.pack(fill=tk.X, pady=4)
 
         detached_options = [
@@ -2023,12 +2146,12 @@ class SettingsWindow(tk.Toplevel):
             ("버튼의 크기를 고정", self.detached_fixed_size_var),
         ]
         for suffix, variable in detached_options:
-            checkbox = tk.Checkbutton(body, variable=variable, anchor="w")
+            checkbox = tk.Checkbutton(general_tab, variable=variable, anchor="w")
             checkbox.pack(fill=tk.X, pady=4)
             self.detached_label_controls.append((checkbox, suffix))
 
         suppress_magpie_notice_checkbox = tk.Checkbutton(
-            body,
+            general_tab,
             text="MagPie 실행 시 안내 띄우지 않기",
             variable=self.suppress_magpie_notice_var,
             anchor="w",
@@ -2036,15 +2159,15 @@ class SettingsWindow(tk.Toplevel):
         suppress_magpie_notice_checkbox.pack(fill=tk.X, pady=4)
 
         debug_checkbox = tk.Checkbutton(
-            body,
+            general_tab,
             text="오류 분석을 위한 디버그 로그 켜기",
             variable=self.debug_logging_var,
             anchor="w",
         )
         debug_checkbox.pack(fill=tk.X, pady=(4, 8))
 
-        overlay_frame = tk.LabelFrame(body, text="번역 오버레이 모드", padx=10, pady=8)
-        overlay_frame.pack(fill=tk.X, pady=(6, 0))
+        overlay_frame = tk.LabelFrame(overlay_tab, text="번역 오버레이 모드", padx=10, pady=8)
+        overlay_frame.pack(fill=tk.BOTH, expand=True)
 
         overlay_checkbox = tk.Checkbutton(
             overlay_frame,
@@ -2165,7 +2288,9 @@ class SettingsWindow(tk.Toplevel):
         current_font = _normalize_font_name(self.overlayer_text_font_var.get())
         if font_names:
             selected_font = current_font if current_font in font_names else (
-                "Malgun Gothic" if "Malgun Gothic" in font_names else font_names[0]
+                "Malgun Gothic" if "Malgun Gothic" in font_names else (
+                    "맑은 고딕" if "맑은 고딕" in font_names else font_names[0]
+                )
             )
             self.overlayer_text_font_var.set(selected_font)
             menu_values = font_names
@@ -2183,6 +2308,82 @@ class SettingsWindow(tk.Toplevel):
             font_menu.config(state=tk.DISABLED)
         font_menu.pack(side=tk.RIGHT)
         self.overlay_only_widgets.extend([font_row, font_menu])
+
+        audio_model_frame = tk.LabelFrame(audio_tab, text="음성인식", padx=10, pady=8)
+        audio_model_frame.pack(fill=tk.X)
+        precision_row = tk.Frame(audio_model_frame)
+        precision_row.pack(fill=tk.X, pady=3)
+        tk.Label(precision_row, text="음성인식 모델").pack(side=tk.LEFT)
+        tk.OptionMenu(precision_row, self.audio_stt_precision_var, "fp32", "int8").pack(side=tk.RIGHT)
+        preset_row = tk.Frame(audio_model_frame)
+        preset_row.pack(fill=tk.X, pady=3)
+        tk.Label(preset_row, text="음성 CHUNK 기준").pack(side=tk.LEFT)
+        tk.OptionMenu(preset_row, self.audio_chunk_preset_var, "FAST", "BALANCED", "LONG").pack(side=tk.RIGHT)
+
+        script_frame = tk.LabelFrame(audio_tab, text="MekiScript", padx=10, pady=8)
+        script_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        tk.Checkbutton(
+            script_frame,
+            text="MekiScript를 항상 위로",
+            variable=self.script_topmost_var,
+            anchor="w",
+        ).pack(fill=tk.X, pady=2)
+
+        def color_button(text: str, variable: tk.StringVar) -> None:
+            button = tk.Button(script_frame, text=text)
+            button.configure(command=lambda: self._choose_color(variable, button))
+            button.pack(fill=tk.X, pady=2)
+            self._color_buttons.append((button, variable))
+
+        color_button("배경색", self.script_bg_color_var)
+        script_opacity_row = tk.Frame(script_frame)
+        script_opacity_row.pack(fill=tk.X, pady=2)
+        tk.Label(script_opacity_row, text="배경 투명도").pack(side=tk.LEFT)
+        tk.Scale(
+            script_opacity_row, from_=10, to=100, orient=tk.HORIZONTAL,
+            variable=self.script_opacity_var, length=180,
+        ).pack(side=tk.RIGHT)
+        color_button("미번역 글씨 색깔", self.script_original_color_var)
+
+        original_size_row = tk.Frame(script_frame)
+        original_size_row.pack(fill=tk.X, pady=2)
+        tk.Label(original_size_row, text="미번역 글씨 크기").pack(side=tk.LEFT)
+        tk.Spinbox(original_size_row, from_=8, to=96, width=6, textvariable=self.script_original_size_var).pack(side=tk.RIGHT)
+
+        japanese_fonts = _japanese_font_families(self)
+        current_japanese = _normalize_font_name(self.script_original_font_var.get())
+        if japanese_fonts:
+            if current_japanese not in japanese_fonts:
+                self.script_original_font_var.set("Yu Gothic UI" if "Yu Gothic UI" in japanese_fonts else japanese_fonts[0])
+        else:
+            japanese_fonts = [current_japanese]
+        original_font_row = tk.Frame(script_frame)
+        original_font_row.pack(fill=tk.X, pady=2)
+        tk.Label(original_font_row, text="미번역 글씨 폰트").pack(side=tk.LEFT)
+        original_font_menu = tk.OptionMenu(original_font_row, self.script_original_font_var, *japanese_fonts)
+        original_font_menu.config(width=20)
+        original_font_menu.pack(side=tk.RIGHT)
+
+        color_button("번역 글씨 색깔", self.script_translated_color_var)
+        translated_size_row = tk.Frame(script_frame)
+        translated_size_row.pack(fill=tk.X, pady=2)
+        tk.Label(translated_size_row, text="번역 글씨 크기").pack(side=tk.LEFT)
+        tk.Spinbox(translated_size_row, from_=8, to=96, width=6, textvariable=self.script_translated_size_var).pack(side=tk.RIGHT)
+
+        korean_fonts = _korean_font_families(self) or [_normalize_font_name(self.script_translated_font_var.get())]
+        current_korean = _normalize_font_name(self.script_translated_font_var.get())
+        if current_korean not in korean_fonts:
+            self.script_translated_font_var.set(
+                "Malgun Gothic" if "Malgun Gothic" in korean_fonts else (
+                    "맑은 고딕" if "맑은 고딕" in korean_fonts else korean_fonts[0]
+                )
+            )
+        translated_font_row = tk.Frame(script_frame)
+        translated_font_row.pack(fill=tk.X, pady=2)
+        tk.Label(translated_font_row, text="번역 글씨 폰트").pack(side=tk.LEFT)
+        translated_font_menu = tk.OptionMenu(translated_font_row, self.script_translated_font_var, *korean_fonts)
+        translated_font_menu.config(width=20)
+        translated_font_menu.pack(side=tk.RIGHT)
 
         button_row = tk.Frame(body)
         button_row.pack(fill=tk.X, pady=(14, 0))
@@ -2265,6 +2466,25 @@ class SettingsWindow(tk.Toplevel):
             overlayer_text_color=self.overlayer_text_color_var.get(),
             overlayer_text_size=text_size,
             overlayer_text_font=_normalize_font_name(self.overlayer_text_font_var.get()),
+            audio_stt_precision=(
+                self.audio_stt_precision_var.get()
+                if self.audio_stt_precision_var.get() in {"fp32", "int8"}
+                else "fp32"
+            ),
+            audio_chunk_preset=(
+                self.audio_chunk_preset_var.get()
+                if self.audio_chunk_preset_var.get() in {"FAST", "BALANCED", "LONG"}
+                else "BALANCED"
+            ),
+            script_always_on_top=self.script_topmost_var.get(),
+            script_bg_color=self.script_bg_color_var.get(),
+            script_bg_opacity=max(0.1, min(1.0, self.script_opacity_var.get() / 100.0)),
+            script_original_text_color=self.script_original_color_var.get(),
+            script_original_text_size=max(8, min(96, int(self.script_original_size_var.get()))),
+            script_original_text_font=_normalize_font_name(self.script_original_font_var.get()),
+            script_translated_text_color=self.script_translated_color_var.get(),
+            script_translated_text_size=max(8, min(96, int(self.script_translated_size_var.get()))),
+            script_translated_text_font=_normalize_font_name(self.script_translated_font_var.get()),
             suppress_magpie_launch_notice=self.suppress_magpie_notice_var.get(),
             debug_logging=self.debug_logging_var.get(),
         )
@@ -2714,6 +2934,8 @@ class MainWindow(tk.Tk):
         self.settings_window: SettingsWindow | None = None
         self.hytrans_process: subprocess.Popen | None = None
         self.overlayer_process: subprocess.Popen | None = None
+        self.audio_capture_process: subprocess.Popen | None = None
+        self.script_process: subprocess.Popen | None = None
         self.magpie_process: subprocess.Popen | None = None
         self._magpie_install_results: queue.Queue[tuple[bool, str]] = queue.Queue()
         self._magpie_installing = False
@@ -2752,7 +2974,7 @@ class MainWindow(tk.Tk):
         content = tk.Frame(body)
         content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        for tab_name in ("영역", "캡쳐", "도구/설정", "행동"):
+        for tab_name in ("영역", "캡쳐", "음성인식", "도구/설정", "행동"):
             button = tk.Button(
                 tab_bar,
                 text=tab_name,
@@ -2770,6 +2992,7 @@ class MainWindow(tk.Tk):
 
         self._build_region_tab(self.tab_frames["영역"])
         self._build_capture_tab(self.tab_frames["캡쳐"])
+        self._build_audio_tab(self.tab_frames["음성인식"])
         self._build_tools_tab(self.tab_frames["도구/설정"])
         self._build_action_tab(self.tab_frames["행동"])
 
@@ -2830,6 +3053,16 @@ class MainWindow(tk.Tk):
             self._on_test_overlay_connection,
         )
         self._pack_tab_button(frame, "설정", self._on_open_settings)
+
+    def _build_audio_tab(self, frame: tk.Frame) -> None:
+        self._pack_tab_button(frame, "MekiAudioCapture 실행", self._on_start_audio_capture)
+        self._pack_tab_button(frame, "HYTrans 실행", self._on_start_hytrans)
+        self._pack_tab_button(frame, "MekiScript 실행", self._on_start_script)
+        self._pack_tab_button(
+            frame,
+            "모든 도구 연결 상태 확인",
+            self._on_test_audio_connection,
+        )
 
     def _build_action_tab(self, frame: tk.Frame) -> None:
         self.detach_button = self._pack_tab_button(
@@ -3215,6 +3448,160 @@ class MainWindow(tk.Tk):
     def _overlayer_show_url(self) -> str:
         return f"{self._overlayer_base_url()}/show"
 
+    def _script_base_url(self) -> str:
+        return f"http://127.0.0.1:{SCRIPT_DEFAULT_PORT}"
+
+    def _audio_capture_base_url(self) -> str:
+        return f"http://127.0.0.1:{AUDIO_CAPTURE_DEFAULT_PORT}"
+
+    def _script_config_payload(self) -> dict:
+        return {
+            "topmost": self.settings.script_always_on_top,
+            "bg_color": self.settings.script_bg_color,
+            "opacity": self.settings.script_bg_opacity,
+            "original_color": self.settings.script_original_text_color,
+            "original_size": self.settings.script_original_text_size,
+            "original_font": self.settings.script_original_text_font,
+            "translated_color": self.settings.script_translated_text_color,
+            "translated_size": self.settings.script_translated_text_size,
+            "translated_font": self.settings.script_translated_text_font,
+        }
+
+    def _audio_capture_config_payload(self) -> dict:
+        return {
+            "precision": self.settings.audio_stt_precision,
+            "preset": self.settings.audio_chunk_preset,
+            "scriptUrl": self._script_base_url(),
+            "hytransUrl": self._hytrans_base_url(),
+        }
+
+    def _send_script_config(self, log_errors: bool = True) -> bool:
+        try:
+            _json_request(
+                f"{self._script_base_url()}/config",
+                self._script_config_payload(),
+                timeout=2,
+                method="POST",
+            )
+            return True
+        except Exception as exc:
+            if log_errors:
+                _log_runtime_error("send_script_config", exc)
+            return False
+
+    def _send_audio_capture_config(self, log_errors: bool = True) -> bool:
+        try:
+            _json_request(
+                f"{self._audio_capture_base_url()}/config",
+                self._audio_capture_config_payload(),
+                timeout=2,
+                method="POST",
+            )
+            return True
+        except Exception as exc:
+            if log_errors:
+                _log_runtime_error("send_audio_capture_config", exc)
+            return False
+
+    def _on_start_script(self) -> None:
+        try:
+            _json_request(f"{self._script_base_url()}/health", timeout=1)
+            self._send_script_config()
+            messagebox.showinfo(
+                "MekiCopy",
+                "MekiScript가 이미 실행 중입니다. 현재 설정을 적용했습니다.",
+                parent=self,
+            )
+            return
+        except Exception:
+            pass
+        command = _find_companion_executable("MekiScript", "meki_script.py")
+        if not command:
+            messagebox.showerror("MekiCopy", "MekiScript 실행 파일을 찾을 수 없습니다.", parent=self)
+            return
+        cfg = self._script_config_payload()
+        command += [
+            "--port", str(SCRIPT_DEFAULT_PORT),
+            "--topmost", "1" if cfg["topmost"] else "0",
+            "--bg-color", str(cfg["bg_color"]),
+            "--opacity", str(cfg["opacity"]),
+            "--original-color", str(cfg["original_color"]),
+            "--original-size", str(cfg["original_size"]),
+            "--original-font", str(cfg["original_font"]),
+            "--translated-color", str(cfg["translated_color"]),
+            "--translated-size", str(cfg["translated_size"]),
+            "--translated-font", str(cfg["translated_font"]),
+        ]
+        try:
+            self.script_process = subprocess.Popen(command, cwd=_get_app_dir())
+            _log_runtime_message("start_script", " ".join(command))
+            messagebox.showinfo("MekiCopy", "MekiScript를 실행했습니다.", parent=self)
+        except Exception as exc:
+            _log_runtime_error("start_script", exc)
+            messagebox.showerror("MekiCopy", f"MekiScript 실행 실패:\n{exc}", parent=self)
+
+    def _on_start_audio_capture(self) -> None:
+        try:
+            _json_request(f"{self._audio_capture_base_url()}/health", timeout=1)
+            self._send_audio_capture_config()
+            messagebox.showinfo(
+                "MekiCopy",
+                "MekiAudioCapture가 이미 실행 중입니다. 현재 설정을 적용했습니다.",
+                parent=self,
+            )
+            return
+        except Exception:
+            pass
+        command = _find_companion_executable("MekiAudioCapture", "meki_audio_capture.py")
+        if not command:
+            messagebox.showerror("MekiCopy", "MekiAudioCapture 실행 파일을 찾을 수 없습니다.", parent=self)
+            return
+        cfg = self._audio_capture_config_payload()
+        command += [
+            "--port", str(AUDIO_CAPTURE_DEFAULT_PORT),
+            "--precision", str(cfg["precision"]),
+            "--preset", str(cfg["preset"]),
+            "--script-url", str(cfg["scriptUrl"]),
+            "--hytrans-url", str(cfg["hytransUrl"]),
+        ]
+        try:
+            self.audio_capture_process = subprocess.Popen(command, cwd=_get_app_dir())
+            _log_runtime_message("start_audio_capture", " ".join(command))
+            messagebox.showinfo("MekiCopy", "MekiAudioCapture를 실행했습니다.", parent=self)
+        except Exception as exc:
+            _log_runtime_error("start_audio_capture", exc)
+            messagebox.showerror("MekiCopy", f"MekiAudioCapture 실행 실패:\n{exc}", parent=self)
+
+    def _on_test_audio_connection(self) -> None:
+        services = (
+            ("MekiAudioCapture", self._audio_capture_base_url()),
+            ("HYTrans", self._hytrans_base_url()),
+            ("MekiScript", self._script_base_url()),
+        )
+        successes: list[str] = []
+        failures: list[str] = []
+        for name, base_url in services:
+            try:
+                payload = _json_request(f"{base_url}/health", timeout=2)
+                state = payload.get("state") or payload.get("server") or "연결됨"
+                successes.append(f"{name}: {state}")
+            except Exception as exc:
+                failures.append(f"{name}: 연결 실패 ({exc})")
+        if failures:
+            messagebox.showerror(
+                "MekiCopy",
+                "\n".join([*successes, *failures]),
+                parent=self,
+            )
+        else:
+            self._send_script_config(log_errors=False)
+            self._send_audio_capture_config(log_errors=False)
+            messagebox.showinfo(
+                "MekiCopy",
+                "세 도구의 연결 상태가 정상입니다.\n" + "\n".join(successes),
+                parent=self,
+            )
+
     def _overlayer_config_payload(self) -> dict:
         return {
             "topmost": self.settings.overlayer_always_on_top,
@@ -3519,6 +3906,8 @@ class MainWindow(tk.Tk):
         self._apply_overlay_mode_ui()
         if self.settings.overlay_translation_mode:
             self._send_overlayer_config(log_errors=False)
+        self._send_script_config(log_errors=False)
+        self._send_audio_capture_config(log_errors=False)
         if persist:
             save_settings(self.settings)
 
@@ -3551,7 +3940,12 @@ class MainWindow(tk.Tk):
         self.tray_icon.close()
         _close_detached_window()
         save_settings(self.settings)
-        for process in (self.hytrans_process, self.overlayer_process):
+        for process in (
+            self.hytrans_process,
+            self.overlayer_process,
+            self.audio_capture_process,
+            self.script_process,
+        ):
             if _is_process_alive(process):
                 try:
                     process.terminate()
@@ -3793,7 +4187,7 @@ def run_ui_self_test() -> None:
             raise RuntimeError(
                 f"main window height is {app.winfo_height()}, expected 400"
             )
-        expected_tabs = {"영역", "캡쳐", "도구/설정", "행동"}
+        expected_tabs = {"영역", "캡쳐", "음성인식", "도구/설정", "행동"}
         if set(app.tab_frames) != expected_tabs:
             raise RuntimeError(f"unexpected main tabs: {set(app.tab_frames)}")
         app._select_tab("행동")

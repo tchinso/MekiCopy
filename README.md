@@ -2,6 +2,7 @@
 
 MekiCopy는 화면의 특정 영역을 지정한 뒤 OCR로 글자를 인식하고, 결과를 클립보드에 복사하는 도구입니다.  
 선택적으로 HYTrans + MekiOverlayer와 연동하면 인식한 텍스트를 자동으로 번역해 화면에 바로 표시할 수 있습니다.
+MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일본어 음성을 녹음한 뒤 일괄 인식·번역할 수 있습니다.
 
 ---
 
@@ -14,8 +15,9 @@ MekiCopy는 화면의 특정 영역을 지정한 뒤 OCR로 글자를 인식하�
 6. [분리된 버튼 창](#분리된-버튼-창)
 7. [번역 오버레이 모드 (HYTrans + MekiOverlayer)](#번역-오버레이-모드)
 8. [설정](#설정)
-9. [커맨드라인 사용법](#커맨드라인-사용법)
-10. [주의사항](#주의사항)
+9. [음성인식 (MekiAudioCapture + MekiScript)](#음성인식)
+10. [커맨드라인 사용법](#커맨드라인-사용법)
+11. [주의사항](#주의사항)
 
 ---
 
@@ -175,6 +177,28 @@ HYTrans는 내부적으로 Chrome 또는 Edge 브라우저를 사용해 `transfo
 
 ---
 
+## 음성인식
+
+`음성인식` 탭에서 다음 순서로 실행합니다.
+
+1. `HYTrans 실행`을 누르고 번역 모델 로딩이 끝날 때까지 기다립니다.
+2. `MekiScript 실행`을 누릅니다.
+3. `MekiAudioCapture 실행`을 누릅니다.
+4. MekiAudioCapture에서 `녹음 시작`을 누르고 일본어 음성을 재생합니다.
+5. `녹음 종료`를 누릅니다.
+
+녹음 중에는 WASAPI loopback 음성을 `%ProgramData%\MekiCopy\MekiAudioCapture`의 WAV 파일에 저장하기만 합니다. 종료 후에 VAD와 일본어 STT를 실행해 모든 일본어 원문을 MekiScript에 먼저 쌓고, 그 다음 원문 단위별로 HYTrans 번역을 순서대로 채웁니다. 처리가 끝나면 임시 WAV와 변환 파일은 삭제됩니다.
+
+| 구성 요소 | 역할 | 기본 포트 |
+|---|---|---|
+| MekiAudioCapture | 시스템 음성 녹음, VAD, ReazonSpeech 일본어 STT | 6553 |
+| HYTrans | 일본어 원문 단위별 한국어 번역 | 6550 |
+| MekiScript | 원문·번역 누적 표시 및 스크롤 | 6552 |
+
+`모든 도구 연결 상태 확인`으로 세 앱의 HTTP 연결 상태를 한 번에 확인할 수 있습니다. 음성 모델은 EXE 내부가 아닌 배포 루트의 `models/reazonspeech-ja`, `models/vad` 폴더에 둡니다.
+
+---
+
 ## 설정
 
 `도구/설정` 탭의 `설정` 버튼을 눌러 설정 창을 엽니다. 설정은 `settings.cfg` 파일에 저장됩니다.
@@ -210,6 +234,17 @@ HYTrans는 내부적으로 Chrome 또는 Edge 브라우저를 사용해 `transfo
 | 글씨 색깔 | 번역 텍스트 색상 (기본값: `#ffffff`) |
 | 글씨 크기 | 번역 텍스트 크기 (8~96pt, 기본값: 28) |
 | 글씨 폰트 | 번역 텍스트 폰트 (기본값: Malgun Gothic) |
+
+### 음성인식 설정
+
+| 옵션 | 설명 |
+|---|---|
+| 음성인식 모델 | `fp32`(기본) 또는 `int8` 모델을 선택합니다. |
+| 음성 CHUNK 기준 | `FAST`, `BALANCED`(기본), `LONG` VAD 프리셋을 선택합니다. |
+| MekiScript를 항상 위로 | 누적 대본 창을 다른 창 위에 표시합니다. |
+| 배경색 / 배경 투명도 | MekiScript 창의 배경 스타일을 설정합니다. |
+| 미번역 글씨 색깔·크기·폰트 | 일본어 원문 스타일을 설정합니다. 폰트 목록에는 `ー` 글리프가 있는 폰트만 표시됩니다. |
+| 번역 글씨 색깔·크기·폰트 | 한국어 번역 스타일을 설정합니다. |
 
 ---
 
@@ -249,4 +284,4 @@ MekiCopy.exe --pick-bookmark
 - **HYTrans 모델 캐시:** 번역 모델은 처음 실행 시 브라우저를 통해 다운로드되며, 이후에는 캐시에서 로드됩니다. 캐시 위치: `%LOCALAPPDATA%\HYTrans\`
 - **MekiOverlayer 로그:** MekiOverlayer의 오류 로그는 `%LOCALAPPDATA%\MekiOverlayer\error_log\`에 저장됩니다.
 - **번역 입력 제한:** 한 번에 번역할 수 있는 텍스트는 최대 8,000자입니다.
-```
+- **음성인식 모델 경로:** 배포판의 다섯 EXE와 함께 상위 `models` 폴더도 유지해야 합니다.
