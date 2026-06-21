@@ -104,7 +104,10 @@ class ScriptWindow:
         self.text.mark_gravity(start_mark, tk.LEFT)
         self.text.insert(tk.END, "번역 대기 중…\n", ("pending",))
         self.text.mark_set(end_mark, tk.END + "-1c")
-        self.text.mark_gravity(end_mark, tk.RIGHT)
+        # Keep this boundary attached to its own entry. RIGHT gravity made the
+        # mark follow every later append at tk.END, so translating an earlier
+        # entry deleted all transcript blocks that followed it.
+        self.text.mark_gravity(end_mark, tk.LEFT)
         self.text.see(tk.END)
         self.text.configure(state=tk.DISABLED)
 
@@ -117,7 +120,12 @@ class ScriptWindow:
         translated = str(payload.get("text", "")).strip() or "(번역 결과 없음)"
         self.text.configure(state=tk.NORMAL)
         self.text.delete(start_mark, end_mark)
+        # Let the end mark follow only the replacement text, then pin it again
+        # so later transcript appends can never expand this entry's range.
+        self.text.mark_set(end_mark, start_mark)
+        self.text.mark_gravity(end_mark, tk.RIGHT)
         self.text.insert(start_mark, translated + "\n", ("translated",))
+        self.text.mark_gravity(end_mark, tk.LEFT)
         self.text.see(tk.END)
         self.text.configure(state=tk.DISABLED)
 
@@ -199,6 +207,28 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def run_transcript_self_test() -> None:
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        window = ScriptWindow(root, ScriptConfig(topmost=False))
+        originals = [f"원문 {index}" for index in range(1, 9)]
+        translations = [f"번역 {index}" for index in range(1, 9)]
+        for index, original in enumerate(originals, 1):
+            window._append({"id": f"chunk-{index}", "text": original})
+        for index in range(8, 0, -1):
+            window._translation({"id": f"chunk-{index}", "text": translations[index - 1]})
+
+        transcript = window.text.get("1.0", "end-1c")
+        for original, translated in zip(originals, translations):
+            if transcript.count(original) != 1 or transcript.count(translated) != 1:
+                raise RuntimeError("MekiScript 누적 대본 자체 검증에 실패했습니다.")
+            if transcript.index(original) > transcript.index(translated):
+                raise RuntimeError("원문보다 번역문이 먼저 표시되었습니다.")
+    finally:
+        root.destroy()
+
+
 def main() -> int:
     global _WINDOW_STREAM
     if sys.stderr is None:
@@ -207,6 +237,7 @@ def main() -> int:
     args = parse_args()
     if args.self_test:
         ScriptConfig(opacity=args.opacity)
+        run_transcript_self_test()
         return 0
     config = ScriptConfig(
         topmost=bool(args.topmost), bg_color=args.bg_color, opacity=args.opacity,

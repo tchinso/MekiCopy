@@ -10,6 +10,14 @@ from .paths import assets_dir, models_dir
 
 MODEL_ID = "onnx-community/HY-MT1.5-1.8B-ONNX"
 DTYPE = "q4"
+REQUIRED_Q4_MODEL_FILES = (
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "onnx/model_q4.onnx",
+    "onnx/model_q4.onnx_data",
+)
 SOURCE_LANG = "Japanese"
 TARGET_LANG = "Korean"
 MAX_NEW_TOKENS = 2048
@@ -56,15 +64,8 @@ def configure_server(
 
 def detect_model_mode() -> str:
     model_path = models_dir().joinpath(*MODEL_ID.split("/"))
-    onnx_dir = model_path / "onnx"
-    required = [
-        model_path / "config.json",
-        model_path / "tokenizer.json",
-    ]
-    has_onnx_file = onnx_dir.exists() and any(
-        path.suffix == ".onnx" for path in onnx_dir.rglob("*")
-    )
-    if all(path.exists() for path in required) and has_onnx_file:
+    required = [model_path.joinpath(*relative.split("/")) for relative in REQUIRED_Q4_MODEL_FILES]
+    if all(path.is_file() and path.stat().st_size > 0 for path in required):
         return "local"
     return "remote"
 

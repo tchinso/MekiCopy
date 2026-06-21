@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -64,7 +65,7 @@ def cached_model_file(raw_url: str) -> Path:
 
 def model_cache_status(raw_url: str) -> dict[str, object]:
     target = cached_model_file(raw_url)
-    if not target.exists() or not target.is_file():
+    if not target.is_file() or target.stat().st_size <= 0:
         return {"ok": True, "exists": False}
     return {
         "ok": True,
@@ -75,7 +76,7 @@ def model_cache_status(raw_url: str) -> dict[str, object]:
 
 def model_cache_file_response(raw_url: str) -> FileResponse:
     target = cached_model_file(raw_url)
-    if not target.exists() or not target.is_file():
+    if not target.is_file() or target.stat().st_size <= 0:
         raise HTTPException(status_code=404, detail="model file is not cached")
     return FileResponse(target)
 
@@ -83,7 +84,14 @@ def model_cache_file_response(raw_url: str) -> FileResponse:
 async def save_model_cache_file(raw_url: str, request: Request) -> dict[str, object]:
     target = cached_model_file(raw_url)
     target.parent.mkdir(parents=True, exist_ok=True)
-    temp_target = target.with_name(f"{target.name}.tmp")
+    expected_size = int(request.headers.get("content-length", "0") or 0)
+    if target.is_file() and target.stat().st_size > 0:
+        current_size = target.stat().st_size
+        if expected_size > 0 and current_size == expected_size:
+            relative = target.relative_to(model_dir()).as_posix()
+            return {"ok": True, "path": relative, "bytes": current_size, "reused": True}
+
+    temp_target = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
 
     total = 0
     try:
@@ -93,6 +101,8 @@ async def save_model_cache_file(raw_url: str, request: Request) -> dict[str, obj
                     continue
                 total += len(chunk)
                 handle.write(chunk)
+        if total <= 0:
+            raise ValueError("refusing to cache an empty model file")
         os.replace(temp_target, target)
         relative = target.relative_to(model_dir()).as_posix()
         debug("model_cache_save", f"{relative}\nbytes: {total}")

@@ -418,7 +418,7 @@ if (-not $SkipSmokeTests) {
     $audioPort = Get-FreeTcpPort
     Invoke-HealthSmokeTest `
         $audioCaptureExe `
-        @("--port", "$audioPort") `
+        @("--port", "$audioPort", "--self-test-server") `
         $audioPort
 }
 

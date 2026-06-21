@@ -191,8 +191,13 @@ async function uploadModelResponseToServer(url, response) {
 
   const status = await getServerModelCacheStatus(url);
   const contentLength = Number(response.headers.get("content-length") || 0);
-  if (status.exists && contentLength > 0 && Number(status.size || 0) === contentLength) {
-    return;
+  if (status.exists && Number(status.size || 0) > 0) {
+    // A server-cache file is published only after an atomic, complete upload.
+    // Some browser cache responses omit Content-Length; treating that as a
+    // mismatch rewrote every already-cached model file on each worker launch.
+    if (contentLength <= 0 || Number(status.size) === contentLength) {
+      return;
+    }
   }
 
   const fileLabel = shortFileName(new URL(url, location.href).pathname);
@@ -361,8 +366,25 @@ async function createPipeline(device) {
   });
 }
 
+async function preferredDevice() {
+  if (!navigator.gpu) {
+    return "wasm";
+  }
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    return adapter ? "webgpu" : "wasm";
+  } catch (err) {
+    console.warn("WebGPU adapter probe failed, using wasm:", err);
+    return "wasm";
+  }
+}
+
 async function createGeneratorWithFallback() {
-  const preferredDevice = navigator.gpu ? "webgpu" : "wasm";
+  // navigator.gpu can exist even when no adapter is available (notably in
+  // headless/remote sessions). Starting a failed WebGPU pipeline first can
+  // leave the model session cached with that provider, preventing a clean
+  // WASM retry, so probe the adapter before constructing the pipeline.
+  const device = await preferredDevice();
   const loadMessage =
     config.modelMode === "local"
       ? `${config.modelId} 로컬 모델을 불러오는 중...`
@@ -370,12 +392,12 @@ async function createGeneratorWithFallback() {
   resetProgress(loadMessage);
 
   try {
-    setStatus(`모델을 ${preferredDevice}로 불러오는 중...`);
-    const pipe = await createPipeline(preferredDevice);
-    activeDevice = preferredDevice;
+    setStatus(`모델을 ${device}로 불러오는 중...`);
+    const pipe = await createPipeline(device);
+    activeDevice = device;
     return pipe;
   } catch (err) {
-    if (preferredDevice !== "webgpu") {
+    if (device !== "webgpu") {
       throw err;
     }
     console.warn("WebGPU failed, fallback to wasm:", err);

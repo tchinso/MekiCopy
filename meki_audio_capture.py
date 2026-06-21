@@ -78,7 +78,15 @@ def prepare_streams() -> None:
 
 
 class CaptureController:
-    def __init__(self, precision: str, preset: str, script_url: str, hytrans_url: str) -> None:
+    def __init__(
+        self,
+        precision: str,
+        preset: str,
+        script_url: str,
+        hytrans_url: str,
+        *,
+        prepare_models_on_start: bool = True,
+    ) -> None:
         self.precision = normalize_precision(precision)
         self.preset = normalize_preset(preset)
         self.script_url = script_url.rstrip("/")
@@ -87,12 +95,17 @@ class CaptureController:
         self.stop_event = threading.Event()
         self.record_thread: threading.Thread | None = None
         self.process_thread: threading.Thread | None = None
+        self.model_thread: threading.Thread | None = None
+        self.prepared_models: dict[str, Path] | None = None
+        self.prepared_models_precision = ""
         self.wav_path: Path | None = None
         self.session_id = ""
         self.state = "READY"
         self.status = "녹음 준비"
         self.error = ""
         self._lock = threading.Lock()
+        if prepare_models_on_start:
+            self.prepare_models()
 
     def health(self) -> dict[str, Any]:
         with self._lock:
@@ -109,10 +122,15 @@ class CaptureController:
     def configure(self, payload: dict[str, Any]) -> None:
         if self.state not in {"READY", "ERROR"}:
             raise RuntimeError("녹음 또는 처리 중에는 설정을 바꿀 수 없습니다.")
+        previous_precision = self.precision
         self.precision = normalize_precision(str(payload.get("precision", self.precision)))
         self.preset = normalize_preset(str(payload.get("preset", self.preset)))
         self.script_url = str(payload.get("scriptUrl", self.script_url)).rstrip("/")
         self.hytrans_url = str(payload.get("hytransUrl", self.hytrans_url)).rstrip("/")
+        if self.precision != previous_precision:
+            self.prepared_models = None
+            self.prepared_models_precision = ""
+            self.prepare_models()
 
     def _set_state(self, state: str, status: str, error: str = "") -> None:
         with self._lock:
@@ -121,8 +139,52 @@ class CaptureController:
             self.error = error
         self.events.put(("status", status))
 
+    def prepare_models(self) -> None:
+        """Prepare models immediately without blocking the Tk event loop."""
+        if self.model_thread and self.model_thread.is_alive():
+            return
+        self._set_state("DOWNLOADING", "음성인식 모델을 확인하고 있습니다...")
+        self.model_thread = threading.Thread(target=self._prepare_models, daemon=True)
+        self.model_thread.start()
+
+    def _prepare_models(self) -> None:
+        precision = self.precision
+        try:
+            models = ensure_models(
+                app_dir(),
+                resource_dir(),
+                precision,
+                progress=lambda text: self._set_state("DOWNLOADING", text),
+            )
+            with self._lock:
+                self.prepared_models = models
+                self.prepared_models_precision = precision
+            self._set_state("READY", "녹음 준비")
+        except Exception as exc:
+            self._set_state(
+                "ERROR",
+                f"음성인식 모델 준비 실패: {exc}",
+                traceback.format_exc(),
+            )
+
+    def _models_for_processing(self) -> dict[str, Path]:
+        with self._lock:
+            if self.prepared_models_precision == self.precision and self.prepared_models:
+                if all(path.is_file() and path.stat().st_size > 0 for path in self.prepared_models.values()):
+                    return dict(self.prepared_models)
+        models = ensure_models(
+            app_dir(),
+            resource_dir(),
+            self.precision,
+            progress=lambda text: self._set_state("DOWNLOADING", text),
+        )
+        with self._lock:
+            self.prepared_models = models
+            self.prepared_models_precision = self.precision
+        return models
+
     def start(self) -> None:
-        if self.state not in {"READY", "ERROR"}:
+        if self.state != "READY":
             return
         cleanup_work_files(work_dir())
         now = dt.datetime.now()
@@ -184,12 +246,7 @@ class CaptureController:
             raw_path = work_dir() / "capture-16k.f32"
             self._set_state("PROCESSING", "음성을 16 kHz mono로 변환하고 있습니다…")
             audio = wav_to_mono_16k(self.wav_path, raw_path)
-            models = ensure_models(
-                app_dir(),
-                resource_dir(),
-                self.precision,
-                progress=lambda text: self._set_state("DOWNLOADING", text),
-            )
+            models = self._models_for_processing()
             models = ensure_ascii_model_paths(
                 models,
                 work_dir() / "models" / self.precision,
@@ -328,6 +385,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hytrans-url", default=DEFAULT_HYTRANS_URL)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--self-test-models", action="store_true")
+    parser.add_argument("--self-test-server", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -362,7 +420,13 @@ def main() -> int:
             if not str(stream.result.text).strip():
                 raise RuntimeError("ReazonSpeech 테스트 결과가 비어 있습니다.")
         return 0
-    controller = CaptureController(args.precision, args.preset, args.script_url, args.hytrans_url)
+    controller = CaptureController(
+        args.precision,
+        args.preset,
+        args.script_url,
+        args.hytrans_url,
+        prepare_models_on_start=not args.self_test_server,
+    )
     try:
         set_windows_app_id("MekiAudioCapture")
         root = tk.Tk()
