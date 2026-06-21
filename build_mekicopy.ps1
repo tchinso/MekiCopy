@@ -333,66 +333,9 @@ for repo_id, filename in missing_models:
 '@
 Invoke-CheckedPythonScript $prepareModels
 
-$prepareAudioModels = @'
-from pathlib import Path
-import shutil
-import tarfile
-import tempfile
-import urllib.request
-
-root = Path("models")
-speech = root / "reazonspeech-ja"
-vad = root / "vad"
-speech.mkdir(parents=True, exist_ok=True)
-vad.mkdir(parents=True, exist_ok=True)
-
-required = [
-    "tokens.txt",
-    "encoder-epoch-99-avg-1.onnx",
-    "decoder-epoch-99-avg-1.onnx",
-    "joiner-epoch-99-avg-1.onnx",
-    "encoder-epoch-99-avg-1.int8.onnx",
-    "joiner-epoch-99-avg-1.int8.onnx",
-]
-missing = [name for name in required if not (speech / name).is_file()]
-archive = Path(tempfile.gettempdir()) / "mekicopy-reazonspeech.tar.bz2"
-url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2"
-
-def ensure_archive():
-    if not archive.is_file():
-        print("Downloading ReazonSpeech model...")
-        urllib.request.urlretrieve(url, archive)
-
-if missing:
-    ensure_archive()
-    with tempfile.TemporaryDirectory(prefix="mekicopy-audio-model-") as temp:
-        with tarfile.open(archive, "r:bz2") as bundle:
-            bundle.extractall(temp, filter="data")
-        extracted = Path(temp)
-        for name in required:
-            matches = list(extracted.rglob(name))
-            if not matches:
-                raise SystemExit(f"Model archive does not contain {name}")
-            shutil.copy2(matches[0], speech / name)
-            print(f"Prepared audio model: {speech / name}")
-
-test_wav = speech / "test.wav"
-if not test_wav.is_file():
-    ensure_archive()
-    with tarfile.open(archive, "r:bz2") as bundle:
-        member = next(item for item in bundle.getmembers() if item.name.endswith("test_wavs/1.wav"))
-        with bundle.extractfile(member) as source, test_wav.open("wb") as target:
-            shutil.copyfileobj(source, target)
-    print(f"Prepared audio smoke-test file: {test_wav}")
-
-silero = vad / "silero_vad.onnx"
-if not silero.is_file():
-    url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
-    print("Downloading Silero VAD model...")
-    urllib.request.urlretrieve(url, silero)
-    print(f"Prepared VAD model: {silero}")
-'@
-Invoke-CheckedPythonScript $prepareAudioModels
+# VAD/STT models are intentionally not prepared during packaging. The
+# MekiAudioCapture executable downloads them into MekiAudioCapture/models on
+# first use and reuses existing files on subsequent runs.
 
 Remove-WorkspaceDirectory "build"
 $distRelativePath = "dist"
@@ -442,9 +385,6 @@ foreach ($exe in $expectedExecutables) {
         throw "Bundled Python DLL was not found beside: $exe"
     }
 }
-
-$distModels = Join-Path $distRoot "models"
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot "models") -Destination $distModels -Recurse -Force
 
 if (-not $SkipSmokeTests) {
     Write-Host "Running executable smoke tests..."

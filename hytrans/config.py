@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
+from service_ports import HYTRANS_DEFAULT_PORT, OVERLAYER_DEFAULT_PORT
+
 from .paths import assets_dir, models_dir
 
 MODEL_ID = "onnx-community/HY-MT1.5-1.8B-ONNX"
@@ -12,8 +14,8 @@ SOURCE_LANG = "Japanese"
 TARGET_LANG = "Korean"
 MAX_NEW_TOKENS = 2048
 HOST = "127.0.0.1"
-DEFAULT_PORT = 6550
-DEFAULT_OVERLAY_URL = "http://127.0.0.1:6551/show"
+DEFAULT_PORT = HYTRANS_DEFAULT_PORT
+DEFAULT_OVERLAY_URL = f"http://127.0.0.1:{OVERLAYER_DEFAULT_PORT}/show"
 TRANSLATE_TIMEOUT_SECONDS = 120
 MAX_INPUT_CHARS = 8000
 

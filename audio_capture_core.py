@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tarfile
+import tempfile
 import time
 import urllib.request
 import wave
@@ -15,6 +17,22 @@ import numpy as np
 
 INTERNAL_SAMPLE_RATE = 16_000
 CAPTURE_SAMPLE_RATE = 48_000
+REAZONSPEECH_ARCHIVE_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    "sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2"
+)
+SILERO_VAD_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    "silero_vad.onnx"
+)
+REAZONSPEECH_FILES = (
+    "tokens.txt",
+    "encoder-epoch-99-avg-1.onnx",
+    "decoder-epoch-99-avg-1.onnx",
+    "joiner-epoch-99-avg-1.onnx",
+    "encoder-epoch-99-avg-1.int8.onnx",
+    "joiner-epoch-99-avg-1.int8.onnx",
+)
 
 VAD_PRESETS: dict[str, dict[str, float]] = {
     "FAST": {
@@ -133,18 +151,28 @@ def translate_text(hytrans_url: str, text: str, timeout: float = 130.0) -> str:
 
 
 def model_root_candidates(application_dir: Path, resource_dir: Path) -> list[Path]:
-    roots = [
-        application_dir / "models",
-        application_dir.parent / "models",
-        resource_dir / "models",
-        resource_dir.parent / "models",
-        Path(__file__).resolve().parent / "models",
-    ]
-    unique: list[Path] = []
-    for root in roots:
-        if root not in unique:
-            unique.append(root)
-    return unique
+    del resource_dir
+    # In a frozen build application_dir is the MekiAudioCapture executable
+    # folder, so this is always MekiAudioCapture/models. Models deliberately
+    # live outside PyInstaller's _internal resource directory.
+    return [application_dir / "models"]
+
+
+def _model_paths(root: Path, precision: str) -> dict[str, Path]:
+    speech = root / "reazonspeech-ja"
+    if normalize_precision(precision) == "int8":
+        encoder = speech / "encoder-epoch-99-avg-1.int8.onnx"
+        joiner = speech / "joiner-epoch-99-avg-1.int8.onnx"
+    else:
+        encoder = speech / "encoder-epoch-99-avg-1.onnx"
+        joiner = speech / "joiner-epoch-99-avg-1.onnx"
+    return {
+        "tokens": speech / "tokens.txt",
+        "encoder": encoder,
+        "decoder": speech / "decoder-epoch-99-avg-1.onnx",
+        "joiner": joiner,
+        "vad": root / "vad" / "silero_vad.onnx",
+    }
 
 
 def resolve_models(
@@ -154,28 +182,126 @@ def resolve_models(
 ) -> dict[str, Path]:
     precision = normalize_precision(precision)
     for root in model_root_candidates(application_dir, resource_dir):
-        speech = root / "reazonspeech-ja"
-        vad = root / "vad" / "silero_vad.onnx"
-        if precision == "int8":
-            encoder = speech / "encoder-epoch-99-avg-1.int8.onnx"
-            joiner = speech / "joiner-epoch-99-avg-1.int8.onnx"
-        else:
-            encoder = speech / "encoder-epoch-99-avg-1.onnx"
-            joiner = speech / "joiner-epoch-99-avg-1.onnx"
-        paths = {
-            "tokens": speech / "tokens.txt",
-            "encoder": encoder,
-            "decoder": speech / "decoder-epoch-99-avg-1.onnx",
-            "joiner": joiner,
-            "vad": vad,
-        }
-        if all(path.is_file() for path in paths.values()):
+        paths = _model_paths(root, precision)
+        if all(path.is_file() and path.stat().st_size > 0 for path in paths.values()):
             return paths
     expected = model_root_candidates(application_dir, resource_dir)[0]
     raise FileNotFoundError(
         "음성인식 모델을 찾을 수 없습니다. "
-        f"{expected / 'reazonspeech-ja'} 및 {expected / 'vad'} 폴더를 확인하세요."
+        f"{expected} 폴더를 확인하세요."
     )
+
+
+def _download_file(
+    url: str,
+    destination: Path,
+    progress: Callable[[str], None] | None = None,
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_name(destination.name + ".part")
+    try:
+        if partial.exists():
+            partial.unlink()
+        request = urllib.request.Request(url, headers={"User-Agent": "MekiAudioCapture/1.0"})
+        with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
+            total = int(response.headers.get("Content-Length", "0") or 0)
+            copied = 0
+            last_report = -1
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                copied += len(chunk)
+                if progress and total:
+                    percent = int(copied * 100 / total)
+                    if percent >= last_report + 5:
+                        progress(f"모델 다운로드 중... {percent}%")
+                        last_report = percent
+            output.flush()
+            os.fsync(output.fileno())
+        if partial.stat().st_size <= 0:
+            raise RuntimeError(f"빈 모델 파일이 다운로드되었습니다: {url}")
+        os.replace(partial, destination)
+    except Exception:
+        try:
+            partial.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _extract_reazonspeech_archive(archive: Path, speech_dir: Path) -> None:
+    wanted = set(REAZONSPEECH_FILES) | {"test.wav"}
+    extracted: set[str] = set()
+    speech_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, "r:bz2") as bundle:
+        for member in bundle.getmembers():
+            source_name = Path(member.name).name
+            if source_name not in wanted or not member.isfile():
+                continue
+            if source_name == "test.wav" and not member.name.replace("\\", "/").endswith(
+                "test_wavs/1.wav"
+            ):
+                continue
+            source = bundle.extractfile(member)
+            if source is None:
+                continue
+            target = speech_dir / source_name
+            temporary = target.with_name(target.name + ".part")
+            with source, temporary.open("wb") as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+                output.flush()
+                os.fsync(output.fileno())
+            if temporary.stat().st_size <= 0:
+                temporary.unlink(missing_ok=True)
+                raise RuntimeError(f"모델 압축 파일의 {member.name} 항목이 비어 있습니다.")
+            os.replace(temporary, target)
+            extracted.add(source_name)
+    missing = set(REAZONSPEECH_FILES) - extracted - {
+        path.name for path in speech_dir.iterdir() if path.is_file() and path.stat().st_size > 0
+    }
+    if missing:
+        raise RuntimeError(f"모델 압축 파일에 필요한 파일이 없습니다: {', '.join(sorted(missing))}")
+
+
+def ensure_models(
+    application_dir: Path,
+    resource_dir: Path,
+    precision: str,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, Path]:
+    """Use MekiAudioCapture/models first and download missing models only."""
+    try:
+        return resolve_models(application_dir, resource_dir, precision)
+    except FileNotFoundError:
+        pass
+
+    root = model_root_candidates(application_dir, resource_dir)[0]
+    speech_dir = root / "reazonspeech-ja"
+    vad_file = root / "vad" / "silero_vad.onnx"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise PermissionError(
+            f"모델 폴더를 만들 수 없습니다: {root}\n쓰기 가능한 위치에서 실행해 주세요."
+        ) from exc
+
+    required_speech = [speech_dir / name for name in REAZONSPEECH_FILES]
+    if not all(path.is_file() and path.stat().st_size > 0 for path in required_speech):
+        if progress:
+            progress("ReazonSpeech 모델을 다운로드합니다. 최초 실행에는 시간이 걸릴 수 있습니다.")
+        with tempfile.TemporaryDirectory(prefix="mekiaudio-model-") as temporary_dir:
+            archive = Path(temporary_dir) / "reazonspeech.tar.bz2"
+            _download_file(REAZONSPEECH_ARCHIVE_URL, archive, progress)
+            _extract_reazonspeech_archive(archive, speech_dir)
+
+    if not vad_file.is_file() or vad_file.stat().st_size <= 0:
+        if progress:
+            progress("Silero VAD 모델을 다운로드합니다...")
+        _download_file(SILERO_VAD_URL, vad_file, progress)
+
+    return resolve_models(application_dir, resource_dir, precision)
 
 
 def ensure_ascii_model_paths(models: dict[str, Path], cache_dir: Path) -> dict[str, Path]:

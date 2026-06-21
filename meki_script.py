@@ -10,13 +10,15 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from app_identity import apply_tk_icon, set_windows_app_id
 from runtime_paths import prepare_tk_environment
+from service_ports import SCRIPT_DEFAULT_PORT
 
 prepare_tk_environment("MekiCopyRuntime")
 import tkinter as tk
 
 
-DEFAULT_PORT = 6552
+DEFAULT_PORT = SCRIPT_DEFAULT_PORT
 DEFAULT_GEOMETRY = "780x560+120+120"
 _WINDOW_STREAM = None
 
@@ -211,7 +213,9 @@ def main() -> int:
         original_color=args.original_color, original_size=args.original_size, original_font=args.original_font,
         translated_color=args.translated_color, translated_size=args.translated_size, translated_font=args.translated_font,
     )
+    set_windows_app_id("MekiScript")
     root = tk.Tk()
+    apply_tk_icon(root)
     window = ScriptWindow(root, config)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(window))
     threading.Thread(target=server.serve_forever, daemon=True).start()

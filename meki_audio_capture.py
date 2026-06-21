@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import soundcard as sc
 
+from app_identity import apply_tk_icon, set_windows_app_id
 from audio_capture_core import (
     CAPTURE_SAMPLE_RATE,
     append_script_text,
@@ -24,6 +25,7 @@ from audio_capture_core import (
     cleanup_work_files,
     collect_vad_intervals,
     create_recognizer,
+    ensure_models,
     ensure_ascii_model_paths,
     normalize_precision,
     normalize_preset,
@@ -34,15 +36,20 @@ from audio_capture_core import (
     wav_to_mono_16k,
 )
 from runtime_paths import prepare_tk_environment
+from service_ports import (
+    AUDIO_CAPTURE_DEFAULT_PORT,
+    HYTRANS_DEFAULT_PORT,
+    SCRIPT_DEFAULT_PORT,
+)
 
 prepare_tk_environment("MekiCopyRuntime")
 import tkinter as tk
 from tkinter import messagebox
 
 
-DEFAULT_PORT = 6553
-DEFAULT_SCRIPT_URL = "http://127.0.0.1:6552"
-DEFAULT_HYTRANS_URL = "http://127.0.0.1:6550"
+DEFAULT_PORT = AUDIO_CAPTURE_DEFAULT_PORT
+DEFAULT_SCRIPT_URL = f"http://127.0.0.1:{SCRIPT_DEFAULT_PORT}"
+DEFAULT_HYTRANS_URL = f"http://127.0.0.1:{HYTRANS_DEFAULT_PORT}"
 _WINDOW_STREAM = None
 
 
@@ -177,7 +184,12 @@ class CaptureController:
             raw_path = work_dir() / "capture-16k.f32"
             self._set_state("PROCESSING", "음성을 16 kHz mono로 변환하고 있습니다…")
             audio = wav_to_mono_16k(self.wav_path, raw_path)
-            models = resolve_models(app_dir(), resource_dir(), self.precision)
+            models = ensure_models(
+                app_dir(),
+                resource_dir(),
+                self.precision,
+                progress=lambda text: self._set_state("DOWNLOADING", text),
+            )
             models = ensure_ascii_model_paths(
                 models,
                 work_dir() / "models" / self.precision,
@@ -315,6 +327,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--script-url", default=DEFAULT_SCRIPT_URL)
     parser.add_argument("--hytrans-url", default=DEFAULT_HYTRANS_URL)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--self-test-models", action="store_true")
     return parser.parse_args()
 
 
@@ -325,6 +338,11 @@ def main() -> int:
         assert normalize_precision(args.precision) in {"fp32", "int8"}
         assert normalize_preset(args.preset) in {"FAST", "BALANCED", "LONG"}
         work_dir()
+        expected_model_root = app_dir() / "models"
+        if expected_model_root.parent != app_dir():
+            raise RuntimeError("모델 경로가 MekiAudioCapture/models가 아닙니다.")
+        return 0
+    if args.self_test_models:
         models = resolve_models(app_dir(), resource_dir(), args.precision)
         source_test_wav = models["tokens"].parent / "test.wav"
         models = ensure_ascii_model_paths(
@@ -346,7 +364,9 @@ def main() -> int:
         return 0
     controller = CaptureController(args.precision, args.preset, args.script_url, args.hytrans_url)
     try:
+        set_windows_app_id("MekiAudioCapture")
         root = tk.Tk()
+        apply_tk_icon(root)
         CaptureWindow(root, controller)
         server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(controller))
         threading.Thread(target=server.serve_forever, daemon=True).start()

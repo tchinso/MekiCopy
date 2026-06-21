@@ -37,7 +37,10 @@ if getattr(sys, "frozen", False):
 prepare_tk_environment(TK_RUNTIME_DIRNAME)
 import tkinter as tk
 
-DEFAULT_PORT = 6551
+from app_identity import apply_tk_icon, set_windows_app_id
+from service_ports import OVERLAYER_DEFAULT_PORT
+
+DEFAULT_PORT = OVERLAYER_DEFAULT_PORT
 DEFAULT_GEOMETRY = "780x180+120+120"
 _WINDOW_STREAM = None
 WDA_NONE = 0x00000000
@@ -434,6 +437,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     _prepare_windowed_streams()
     _prepare_tk_library_paths()
+    set_windows_app_id("MekiOverlayer")
     args = parse_args()
     config = OverlayConfig(
         topmost=bool(args.topmost),
@@ -449,6 +453,7 @@ def main() -> int:
     )
     try:
         root = tk.Tk()
+        apply_tk_icon(root)
         app_ref = OverlayerApp(root, config)
         thread = threading.Thread(target=run_server, args=(app_ref, args.port), daemon=True)
         thread.start()

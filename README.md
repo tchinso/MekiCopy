@@ -145,8 +145,8 @@ OCR로 인식한 텍스트를 자동으로 번역해 화면에 바로 표시하�
 | 구성 요소 | 역할 |
 |---|---|
 | **MekiCopy** | OCR 인식 및 전체 흐름 제어 |
-| **HYTrans** | 번역 서버 (일본어 → 한국어, 포트 6550) |
-| **MekiOverlayer** | 번역 결과를 화면에 표시하는 투명 오버레이 창 (포트 6551) |
+| **HYTrans** | 번역 서버 (일본어 → 한국어, 기본 포트 6996) |
+| **MekiOverlayer** | 번역 결과를 화면에 표시하는 투명 오버레이 창 (기본 포트 6997) |
 
 번역 모델: `onnx-community/HY-MT1.5-1.8B-ONNX` (q4)  
 HYTrans는 내부적으로 Chrome 또는 Edge 브라우저를 사용해 `transformers.js` 기반 번역을 수행합니다.
@@ -172,7 +172,7 @@ HYTrans는 내부적으로 Chrome 또는 Edge 브라우저를 사용해 `transfo
 
 - HYTrans 서버가 준비되기 전에 `번역 후 표시`를 누르면 오류가 발생합니다. 브라우저에서 모델 로딩이 완료될 때까지 기다리세요.
 - MekiCopy를 종료하면 HYTrans와 MekiOverlayer 프로세스도 함께 종료됩니다.
-- HYTrans 포트(기본값: 6550)가 다른 프로그램과 충돌하면 설정에서 변경할 수 있습니다.
+- HYTrans와 MekiOverlayer 포트가 다른 프로그램과 충돌하면 설정에서 변경할 수 있습니다.
 - 번역 타임아웃은 120초입니다. 긴 텍스트나 모델 로딩 중에는 시간이 걸릴 수 있습니다.
 
 ---
@@ -191,11 +191,11 @@ HYTrans는 내부적으로 Chrome 또는 Edge 브라우저를 사용해 `transfo
 
 | 구성 요소 | 역할 | 기본 포트 |
 |---|---|---|
-| MekiAudioCapture | 시스템 음성 녹음, VAD, ReazonSpeech 일본어 STT | 6553 |
-| HYTrans | 일본어 원문 단위별 한국어 번역 | 6550 |
-| MekiScript | 원문·번역 누적 표시 및 스크롤 | 6552 |
+| MekiAudioCapture | 시스템 음성 녹음, VAD, ReazonSpeech 일본어 STT | 6998 |
+| HYTrans | 일본어 원문 단위별 한국어 번역 | 6996 |
+| MekiScript | 원문·번역 누적 표시 및 스크롤 | 6999 |
 
-`모든 도구 연결 상태 확인`으로 세 앱의 HTTP 연결 상태를 한 번에 확인할 수 있습니다. 음성 모델은 EXE 내부가 아닌 배포 루트의 `models/reazonspeech-ja`, `models/vad` 폴더에 둡니다.
+`모든 도구 연결 상태 확인`으로 세 앱의 HTTP 연결 상태를 한 번에 확인할 수 있습니다. 음성 모델은 EXE에 포함되지 않습니다. MekiAudioCapture가 처음 필요할 때 공식 sherpa-onnx 릴리스에서 `MekiAudioCapture/models`로 내려받으며, 이미 존재하는 모델은 다운로드 없이 우선 사용합니다.
 
 ---
 
@@ -225,7 +225,8 @@ HYTrans는 내부적으로 Chrome 또는 Edge 브라우저를 사용해 `transfo
 | 옵션 | 설명 |
 |---|---|
 | 오버레이어 번역 모드 사용 | 번역 오버레이 모드를 활성화합니다. |
-| HYTrans 포트 | HYTrans 서버 포트 (기본값: 6550) |
+| HYTrans 포트 | HYTrans 서버 포트 (기본값: 6996) |
+| MekiOverlayer 포트 | 오버레이 서버 포트 (기본값: 6997) |
 | MekiOverlayer를 항상 위로 | 오버레이 창을 항상 위에 표시합니다. |
 | MekiOverlayer의 제목표시줄 숨김 | 오버레이 창의 제목표시줄을 숨깁니다. |
 | MekiOverlayer 크기 고정 | 오버레이 창 크기를 고정합니다. |
@@ -241,6 +242,8 @@ HYTrans는 내부적으로 Chrome 또는 Edge 브라우저를 사용해 `transfo
 |---|---|
 | 음성인식 모델 | `fp32`(기본) 또는 `int8` 모델을 선택합니다. |
 | 음성 CHUNK 기준 | `FAST`, `BALANCED`(기본), `LONG` VAD 프리셋을 선택합니다. |
+| MekiAudioCapture 포트 | 음성 캡처 서버 포트 (기본값: 6998) |
+| MekiScript 포트 | 누적 대본 서버 포트 (기본값: 6999) |
 | MekiScript를 항상 위로 | 누적 대본 창을 다른 창 위에 표시합니다. |
 | 배경색 / 배경 투명도 | MekiScript 창의 배경 스타일을 설정합니다. |
 | 미번역 글씨 색깔·크기·폰트 | 일본어 원문 스타일을 설정합니다. 폰트 목록에는 `ー` 글리프가 있는 폰트만 표시됩니다. |
@@ -284,4 +287,4 @@ MekiCopy.exe --pick-bookmark
 - **HYTrans 모델 캐시:** 번역 모델은 처음 실행 시 브라우저를 통해 다운로드되며, 이후에는 캐시에서 로드됩니다. 캐시 위치: `%LOCALAPPDATA%\HYTrans\`
 - **MekiOverlayer 로그:** MekiOverlayer의 오류 로그는 `%LOCALAPPDATA%\MekiOverlayer\error_log\`에 저장됩니다.
 - **번역 입력 제한:** 한 번에 번역할 수 있는 텍스트는 최대 8,000자입니다.
-- **음성인식 모델 경로:** 배포판의 다섯 EXE와 함께 상위 `models` 폴더도 유지해야 합니다.
+- **음성인식 모델 경로:** `MekiAudioCapture.exe` 옆의 `models` 폴더를 사용합니다. 없으면 최초 음성 처리 시 자동 다운로드합니다.
