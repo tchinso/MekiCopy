@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 import urllib.error
 import urllib.request
 from typing import Callable
@@ -17,15 +18,18 @@ from .config import (
     options,
     runtime_config,
 )
-from .logging_setup import debug, error
+from .logging_setup import configure_logging, debug, error
 from .model_cache import (
     model_cache_file_response,
     model_cache_status,
     save_model_cache_file,
 )
+from .model_download import model_download_manager
 from .paths import assets_dir, models_dir
 from .queue import TranslationQueue
 from .state import AppState
+from system_logging import log_debug as system_debug
+from system_logging import log_error as system_error
 
 app = FastAPI(title="HYTrans")
 state = AppState()
@@ -34,9 +38,33 @@ queue_task: asyncio.Task | None = None
 worker_opener: Callable[[], None] | None = None
 
 
+class ModelFileResponse(FileResponse):
+    """Stream multi-gigabyte ONNX data in browser-friendly chunks.
+
+    Starlette's 64 KiB default creates more than twenty thousand JavaScript
+    progress chunks for this model's 1.3 GiB external-data file.  Transformers
+    must combine those chunks before constructing the ONNX session, which can
+    degrade into extreme garbage-collection stalls.  Eight MiB keeps progress
+    responsive while avoiding that pathological allocation pattern.  Range
+    requests remain supported by FileResponse.
+    """
+
+    chunk_size = 8 * 1024 * 1024
+
+
 class TranslateBody(BaseModel):
     text: str
     overlayUrl: str | None = None
+
+
+class ClientLogBody(BaseModel):
+    level: str = "debug"
+    stage: str = "worker"
+    message: str = ""
+
+
+class LoggingConfigBody(BaseModel):
+    debugLog: bool
 
 
 def _validate_text(text: str) -> str:
@@ -84,6 +112,13 @@ async def _send_to_overlay(text: str, overlay_url: str | None = None) -> None:
 
 async def _translate_text(text: str) -> str:
     if not state.worker_ready:
+        error(
+            "translate_not_ready",
+            (
+                f"model is not ready; state={state.state}; "
+                f"workerConnected={state.worker_connected}; error={state.error or ''}"
+            ),
+        )
         raise HTTPException(status_code=503, detail="model is not ready")
     try:
         state.state = "BUSY"
@@ -168,6 +203,31 @@ async def get_config() -> dict[str, object]:
     return runtime_config().model_dump()
 
 
+@app.post("/logging/config")
+async def configure_runtime_logging(body: LoggingConfigBody) -> dict[str, object]:
+    options.debug_log = bool(body.debugLog)
+    configure_logging(options.debug_log)
+    return {"ok": True, "debugLog": options.debug_log}
+
+
+@app.post("/client-log")
+async def client_log(body: ClientLogBody) -> dict[str, object]:
+    message = body.message.strip()
+    if not message:
+        return {"ok": True}
+    stage = f"HyTransWorker.{body.stage.strip() or 'worker'}"
+    if body.level.lower() in {"error", "fatal"}:
+        system_error(stage, message, component="HyTransWorker")
+    else:
+        system_debug(
+            stage,
+            message,
+            component="HyTransWorker",
+            enabled=options.debug_log,
+        )
+    return {"ok": True}
+
+
 @app.get("/model-cache-status")
 async def get_model_cache_status(url: str) -> dict[str, object]:
     return model_cache_status(url)
@@ -183,9 +243,32 @@ async def post_model_cache_file(url: str, request: Request) -> dict[str, object]
     return await save_model_cache_file(url, request)
 
 
+@app.post("/model/prepare")
+async def prepare_model() -> dict[str, object]:
+    return model_download_manager.start()
+
+
+@app.get("/model/status")
+async def model_status() -> dict[str, object]:
+    return model_download_manager.status()
+
+
 @app.get("/worker.html")
 async def worker_html() -> FileResponse:
     return FileResponse(assets_dir() / "worker.html")
+
+
+@app.api_route("/models/{relative_path:path}", methods=["GET", "HEAD"])
+async def local_model_file(relative_path: str) -> FileResponse:
+    root = models_dir().resolve()
+    target = (root / Path(relative_path)).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="model file not found") from exc
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="model file not found")
+    return ModelFileResponse(target)
 
 
 @app.get("/translate", response_model=None)
@@ -293,10 +376,15 @@ async def worker_ws(websocket: WebSocket) -> None:
         state.error = "worker disconnected"
         translation_queue.clear_worker()
         debug("worker_disconnected", "websocket disconnected")
+    except Exception as exc:
+        state.worker_connected = False
+        state.worker_ready = False
+        state.state = "ERROR"
+        state.error = str(exc)
+        translation_queue.clear_worker()
+        error("worker_websocket", exc)
+        raise
 
 
 if assets_dir().exists():
     app.mount("/assets", StaticFiles(directory=assets_dir()), name="assets")
-
-if models_dir().exists():
-    app.mount("/models", StaticFiles(directory=models_dir()), name="models")

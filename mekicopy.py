@@ -78,6 +78,7 @@ from mekicopy_companions import (
     _mekicopy_process_command,
     _probe_service,
     _startupinfo_for_background,
+    _terminate_process_tree,
     _validated_translation_text,
 )
 from mekicopy_ocr import (
@@ -86,6 +87,7 @@ from mekicopy_ocr import (
     _log_runtime_message,
     capture_region,
     ocr_and_copy,
+    ocr_region,
 )
 from mekicopy_region_ui import (
     build_initial_rect,
@@ -122,6 +124,12 @@ from mekicopy_settings import (
 )
 from mekicopy_settings_window import SettingsWindow
 from mekicopy_tray import WindowsTrayIcon
+from system_logging import (
+    configure_system_logging,
+    install_exception_hooks,
+    install_tk_exception_hook,
+    set_debug_enabled,
+)
 EDGE_GRAB_PX = 8
 OCR_BUTTON_HEIGHT_PX = 300
 SELECTION_INSTRUCTION_FONT_SIZE = 36
@@ -169,6 +177,7 @@ class DetachedOcrButtonApp:
         _set_app_user_model_id()
         _prepare_tk_library_paths()
         self.root = tk.Tk()
+        install_tk_exception_hook(self.root)
         self.settings = load_settings()
         self.root.title(DETACHED_WINDOW_TITLE)
         _set_window_icon(self.root)
@@ -572,6 +581,7 @@ class MainWindow(tk.Tk):
         _set_app_user_model_id()
         _prepare_tk_library_paths()
         super().__init__()
+        install_tk_exception_hook(self)
         self.settings = load_settings()
         self.detached_process: subprocess.Popen | None = None
         self.settings_window: SettingsWindow | None = None
@@ -1108,6 +1118,7 @@ class MainWindow(tk.Tk):
             "translated_color": self.settings.script_translated_text_color,
             "translated_size": self.settings.script_translated_text_size,
             "translated_font": self.settings.script_translated_text_font,
+            "debug_log": self.settings.debug_logging,
         }
 
     def _audio_capture_config_payload(self) -> dict:
@@ -1116,14 +1127,29 @@ class MainWindow(tk.Tk):
             "preset": self.settings.audio_chunk_preset,
             "scriptUrl": self._script_base_url(),
             "hytransUrl": self._hytrans_base_url(),
+            "debugLog": self.settings.debug_logging,
         }
+
+    def _send_hytrans_logging_config(self, log_errors: bool = True) -> bool:
+        try:
+            _json_request(
+                f"{self._hytrans_base_url()}/logging/config",
+                {"debugLog": self.settings.debug_logging},
+                timeout=2 if log_errors else 0.25,
+                method="POST",
+            )
+            return True
+        except Exception as exc:
+            if log_errors:
+                _log_runtime_error("send_hytrans_logging_config", exc)
+            return False
 
     def _send_script_config(self, log_errors: bool = True) -> bool:
         try:
             _json_request(
                 f"{self._script_base_url()}/config",
                 self._script_config_payload(),
-                timeout=2,
+                timeout=2 if log_errors else 0.25,
                 method="POST",
             )
             return True
@@ -1137,7 +1163,7 @@ class MainWindow(tk.Tk):
             _json_request(
                 f"{self._audio_capture_base_url()}/config",
                 self._audio_capture_config_payload(),
-                timeout=2,
+                timeout=2 if log_errors else 0.25,
                 method="POST",
             )
             return True
@@ -1175,6 +1201,8 @@ class MainWindow(tk.Tk):
             "--translated-size", str(cfg["translated_size"]),
             "--translated-font", str(cfg["translated_font"]),
         ]
+        if self.settings.debug_logging:
+            command.append("--debug-log")
         try:
             self.script_process = subprocess.Popen(command, cwd=_get_app_dir())
             _log_runtime_message("start_script", " ".join(command))
@@ -1207,6 +1235,8 @@ class MainWindow(tk.Tk):
             "--script-url", str(cfg["scriptUrl"]),
             "--hytrans-url", str(cfg["hytransUrl"]),
         ]
+        if self.settings.debug_logging:
+            command.append("--debug-log")
         try:
             self.audio_capture_process = subprocess.Popen(command, cwd=_get_app_dir())
             _log_runtime_message("start_audio_capture", " ".join(command))
@@ -1263,7 +1293,7 @@ class MainWindow(tk.Tk):
             _json_request(
                 f"{self._overlayer_base_url()}/config",
                 self._overlayer_config_payload(),
-                timeout=2,
+                timeout=2 if log_errors else 0.25,
                 method="POST",
             )
             return True
@@ -1275,6 +1305,7 @@ class MainWindow(tk.Tk):
     def _on_start_hytrans(self) -> None:
         try:
             _json_request(f"{self._hytrans_base_url()}/health", timeout=1)
+            self._send_hytrans_logging_config(log_errors=False)
             try:
                 ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=1)
                 if not (ready.get("workerConnected") or ready.get("ready")):
@@ -1546,12 +1577,14 @@ class MainWindow(tk.Tk):
 
     def apply_settings(self, settings: AppSettings, persist: bool) -> None:
         self.settings = settings
+        set_debug_enabled(self.settings.debug_logging)
         self.attributes("-topmost", self.settings.main_always_on_top)
         self._apply_overlay_mode_ui()
         if self.settings.overlay_translation_mode:
             self._send_overlayer_config(log_errors=False)
         self._send_script_config(log_errors=False)
         self._send_audio_capture_config(log_errors=False)
+        self._send_hytrans_logging_config(log_errors=False)
         if persist:
             save_settings(self.settings)
 
@@ -1592,7 +1625,7 @@ class MainWindow(tk.Tk):
         ):
             if _is_process_alive(process):
                 try:
-                    process.terminate()
+                    _terminate_process_tree(process)
                 except Exception:
                     pass
         self.destroy()
@@ -1949,6 +1982,9 @@ def main() -> None:
     _enable_dpi_awareness()
     _set_app_user_model_id()
     args = parse_args()
+    startup_settings = load_settings()
+    configure_system_logging("MekiCopy", startup_settings.debug_logging)
+    install_exception_hooks()
     if args.self_test_detached_launcher:
         _launch_detached_button_process()
         os._exit(0)

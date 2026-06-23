@@ -7,6 +7,7 @@ from typing import Callable
 
 import mss
 from tkinter import messagebox
+from system_logging import install_tk_exception_hook
 from mekicopy_capture import MIN_SIZE_PX, Region, enable_dpi_awareness as _enable_dpi_awareness
 from mekicopy_ocr import ocr_and_copy
 from mekicopy_runtime import _prepare_tk_library_paths, _set_window_icon
@@ -381,6 +382,7 @@ def _show_bookmark_picker(
     owner = parent
     if owner is None:
         temporary_root = tk.Tk()
+        install_tk_exception_hook(temporary_root)
         temporary_root.withdraw()
         owner = temporary_root
 
@@ -453,6 +455,7 @@ def run_selection(
         root = tk.Toplevel(parent)
     else:
         root = tk.Tk()
+        install_tk_exception_hook(root)
     SelectionUI(
         root,
         initial_rect=initial_rect,
@@ -476,6 +479,7 @@ def run_region_view(
         root = tk.Toplevel(parent)
     else:
         root = tk.Tk()
+        install_tk_exception_hook(root)
     RegionViewUI(root, draft_region=draft_region, active_region=active_region)
     if parent:
         parent.wait_window(root)

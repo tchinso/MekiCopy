@@ -13,6 +13,15 @@ from typing import Any
 from app_identity import apply_tk_icon, set_windows_app_id
 from runtime_paths import prepare_tk_environment
 from service_ports import SCRIPT_DEFAULT_PORT
+from system_logging import (
+    capture_windowed_streams,
+    configure_system_logging,
+    install_exception_hooks,
+    install_tk_exception_hook,
+    log_debug,
+    log_error,
+    set_debug_enabled,
+)
 
 prepare_tk_environment("MekiCopyRuntime")
 import tkinter as tk
@@ -38,6 +47,7 @@ class ScriptConfig:
     translated_color: str = "#7dd3fc"
     translated_size: int = 20
     translated_font: str = "Malgun Gothic"
+    debug_log: bool = False
 
     def update(self, data: dict[str, Any]) -> None:
         for key in self.__dataclass_fields__:
@@ -45,6 +55,8 @@ class ScriptConfig:
                 continue
             value = data[key]
             if key == "topmost":
+                value = bool(value)
+            elif key == "debug_log":
                 value = bool(value)
             elif key == "opacity":
                 value = max(0.1, min(1.0, float(value)))
@@ -55,6 +67,7 @@ class ScriptConfig:
             else:
                 value = str(value)
             setattr(self, key, value)
+        set_debug_enabled(self.debug_log)
 
 
 class ScriptWindow:
@@ -63,6 +76,9 @@ class ScriptWindow:
         self.config = config
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.entry_ids: set[str] = set()
+        self.last_original = ""
+        self.last_translation = ""
+        self.translation_count = 0
         root.title("MekiScript")
         root.geometry(DEFAULT_GEOMETRY)
         frame = tk.Frame(root)
@@ -86,6 +102,7 @@ class ScriptWindow:
         self.text.tag_configure("pending", foreground=cfg.translated_color, font=(normalize_font_name(cfg.translated_font), max(8, cfg.translated_size - 2), "italic"))
 
     def enqueue(self, kind: str, payload: Any) -> None:
+        log_debug("enqueue", f"kind: {kind}\npayload_keys: {sorted(payload) if isinstance(payload, dict) else type(payload).__name__}")
         self.events.put((kind, payload))
 
     def _append(self, payload: dict[str, Any]) -> None:
@@ -94,6 +111,7 @@ class ScriptWindow:
         if not entry_id or not original or entry_id in self.entry_ids:
             return
         self.entry_ids.add(entry_id)
+        self.last_original = original
         self.text.configure(state=tk.NORMAL)
         if self.text.index("end-1c") != "1.0":
             self.text.insert(tk.END, "\n")
@@ -118,6 +136,8 @@ class ScriptWindow:
         if start_mark not in self.text.mark_names() or end_mark not in self.text.mark_names():
             return
         translated = str(payload.get("text", "")).strip() or "(번역 결과 없음)"
+        self.last_translation = translated
+        self.translation_count += 1
         self.text.configure(state=tk.NORMAL)
         self.text.delete(start_mark, end_mark)
         # Let the end mark follow only the replacement text, then pin it again
@@ -168,7 +188,18 @@ def make_handler(window: ScriptWindow):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             if self.path.split("?", 1)[0] == "/health":
-                _write_json(self, 200, {"ok": True, "app": "MekiScript", "entries": len(window.entry_ids)})
+                _write_json(
+                    self,
+                    200,
+                    {
+                        "ok": True,
+                        "app": "MekiScript",
+                        "entries": len(window.entry_ids),
+                        "translationCount": window.translation_count,
+                        "lastOriginal": window.last_original,
+                        "lastTranslation": window.last_translation,
+                    },
+                )
             else:
                 _write_json(self, 404, {"ok": False, "error": "not found"})
 
@@ -183,6 +214,7 @@ def make_handler(window: ScriptWindow):
                 window.enqueue(kind, payload)
                 _write_json(self, 200, {"ok": True})
             except Exception as exc:
+                log_error("http_request", exc)
                 _write_json(self, 500, {"ok": False, "error": str(exc)})
 
         def log_message(self, format: str, *args: Any) -> None:
@@ -204,6 +236,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--translated-size", type=int, default=20)
     parser.add_argument("--translated-font", default="Malgun Gothic")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--debug-log", action="store_true")
     return parser.parse_args()
 
 
@@ -225,16 +258,19 @@ def run_transcript_self_test() -> None:
                 raise RuntimeError("MekiScript 누적 대본 자체 검증에 실패했습니다.")
             if transcript.index(original) > transcript.index(translated):
                 raise RuntimeError("원문보다 번역문이 먼저 표시되었습니다.")
+        if window.translation_count != len(translations):
+            raise RuntimeError("번역 완료 개수가 누적되지 않았습니다.")
+        if window.last_translation != translations[0]:
+            raise RuntimeError("마지막 번역 상태가 올바르지 않습니다.")
     finally:
         root.destroy()
 
 
 def main() -> int:
-    global _WINDOW_STREAM
-    if sys.stderr is None:
-        _WINDOW_STREAM = open(os.devnull, "w", encoding="utf-8")
-        sys.stderr = _WINDOW_STREAM
     args = parse_args()
+    configure_system_logging("MekiScript", args.debug_log)
+    install_exception_hooks()
+    capture_windowed_streams()
     if args.self_test:
         ScriptConfig(opacity=args.opacity)
         run_transcript_self_test()
@@ -243,9 +279,11 @@ def main() -> int:
         topmost=bool(args.topmost), bg_color=args.bg_color, opacity=args.opacity,
         original_color=args.original_color, original_size=args.original_size, original_font=args.original_font,
         translated_color=args.translated_color, translated_size=args.translated_size, translated_font=args.translated_font,
+        debug_log=args.debug_log,
     )
     set_windows_app_id("MekiScript")
     root = tk.Tk()
+    install_tk_exception_hook(root)
     apply_tk_icon(root)
     window = ScriptWindow(root, config)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(window))

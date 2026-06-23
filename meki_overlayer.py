@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import datetime as _dt
 import json
 import os
 import queue
@@ -16,7 +15,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from runtime_paths import log_dir as runtime_log_dir
 from runtime_paths import is_ascii_path, path_for_tcl, sync_tk_runtime, tk_runtime_roots
 from runtime_paths import prepare_tk_environment
 
@@ -39,6 +37,15 @@ import tkinter as tk
 
 from app_identity import apply_tk_icon, set_windows_app_id
 from service_ports import OVERLAYER_DEFAULT_PORT
+from system_logging import (
+    capture_windowed_streams,
+    configure_system_logging,
+    install_exception_hooks,
+    install_tk_exception_hook,
+    log_debug as system_debug,
+    log_error as system_error,
+    set_debug_enabled,
+)
 
 DEFAULT_PORT = OVERLAYER_DEFAULT_PORT
 DEFAULT_GEOMETRY = "780x180+120+120"
@@ -64,57 +71,16 @@ def _get_resource_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def _log_dir(kind: str) -> Path:
-    return runtime_log_dir("MekiOverlayer", kind)
-
-
-def _timestamp() -> str:
-    return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _write_log(kind: str, filename: str, text: str) -> None:
-    content = text.rstrip() + "\n"
-    try:
-        with (_log_dir(kind) / filename).open("a", encoding="utf-8") as handle:
-            handle.write(content)
-            return
-    except OSError:
-        pass
-
-    try:
-        fallback = Path(_get_app_dir()) / kind
-        fallback.mkdir(parents=True, exist_ok=True)
-        with (fallback / filename).open("a", encoding="utf-8") as handle:
-            handle.write(content)
-    except OSError:
-        pass
-
-
 def log_error(stage: str, exc: BaseException | str) -> None:
-    lines = ["", "=== ERROR ===", f"time: {_timestamp()}", f"stage: {stage}"]
-    if isinstance(exc, BaseException):
-        lines.append(f"type: {type(exc).__name__}")
-        lines.append(f"message: {exc}")
-        lines.append(traceback.format_exc())
-    else:
-        lines.append(f"message: {exc}")
-    _write_log("error_log", "mekioverlayer_error.log", "\n".join(lines))
+    system_error(stage, exc, component="MekiOverlayer")
 
 
 def log_debug(enabled: bool, stage: str, message: str) -> None:
-    if not enabled:
-        return
-    lines = ["", "=== DEBUG ===", f"time: {_timestamp()}", f"stage: {stage}", message]
-    _write_log("debug_log", "mekioverlayer_debug.log", "\n".join(lines))
+    system_debug(stage, message, component="MekiOverlayer", enabled=enabled)
 
 
 def _prepare_windowed_streams() -> None:
-    global _WINDOW_STREAM
-    if sys.stderr is None:
-        _WINDOW_STREAM = open(os.devnull, "w", encoding="utf-8")
-        sys.stderr = _WINDOW_STREAM
-    if sys.stdout is None:
-        sys.stdout = sys.stderr
+    capture_windowed_streams()
 
 
 def _prepare_tk_library_paths() -> None:
@@ -229,6 +195,7 @@ class OverlayConfig:
                 self.text_font = normalize_font_name(str(value))
             else:
                 setattr(self, key, str(value))
+        set_debug_enabled(self.debug_log)
 
 
 class OverlayerApp:
@@ -236,6 +203,7 @@ class OverlayerApp:
         self.root = root
         self.config = config
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self.last_text = ""
         self._drag_start: tuple[int, int] | None = None
         self._window_start: tuple[int, int] | None = None
 
@@ -261,6 +229,7 @@ class OverlayerApp:
         self.root.after(50, self._drain_events)
 
     def enqueue_text(self, text: str) -> None:
+        self.last_text = str(text)
         self.events.put(("text", text))
 
     def enqueue_config(self, data: dict[str, Any]) -> None:
@@ -378,7 +347,15 @@ def make_handler(app_ref: OverlayerApp):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/health":
-                _write_json(self, 200, {"ok": True, "app": "MekiOverlayer"})
+                _write_json(
+                    self,
+                    200,
+                    {
+                        "ok": True,
+                        "app": "MekiOverlayer",
+                        "text": getattr(app_ref, "last_text", ""),
+                    },
+                )
                 return
             if parsed.path == "/show":
                 query = parse_qs(parsed.query)
@@ -435,10 +412,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    args = parse_args()
+    configure_system_logging("MekiOverlayer", args.debug_log)
+    set_debug_enabled(args.debug_log)
+    install_exception_hooks()
     _prepare_windowed_streams()
     _prepare_tk_library_paths()
     set_windows_app_id("MekiOverlayer")
-    args = parse_args()
     config = OverlayConfig(
         topmost=bool(args.topmost),
         hide_titlebar=bool(args.hide_titlebar),
@@ -453,6 +433,7 @@ def main() -> int:
     )
     try:
         root = tk.Tk()
+        install_tk_exception_hook(root)
         apply_tk_icon(root)
         app_ref = OverlayerApp(root, config)
         thread = threading.Thread(target=run_server, args=(app_ref, args.port), daemon=True)

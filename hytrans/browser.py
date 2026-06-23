@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -42,6 +43,7 @@ class BrowserManager:
             "--no-first-run",
             "--disable-extensions",
             "--disable-background-networking",
+            "--disable-background-mode",
         ]
         debug("browser_start", "\n".join(args))
         self.process = subprocess.Popen(args)
@@ -50,9 +52,18 @@ class BrowserManager:
         if not self.process:
             return
         if self.process.poll() is None:
+            if os.name == "nt":
+                completed = subprocess.run(
+                    ["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if completed.returncode == 0:
+                    return
             self.process.terminate()
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.process.kill()
-

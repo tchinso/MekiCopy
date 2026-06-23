@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import configparser
-import datetime as _dt
 import os
 import tempfile
-import traceback
 import tkinter as tk
 from typing import Callable
 from tkinter import messagebox
@@ -27,22 +25,14 @@ from mekicopy_runtime import (
     _prepare_windowed_streams,
 )
 from mekicopy_settings import SETTINGS_FILE
+from system_logging import log_debug as _system_debug
+from system_logging import log_error as _system_error
 
 _OCR_ENGINE = None
 _ORT_PRELOAD_READY = False
 
 def postprocess_text(text: str) -> str:
     return " ".join(text.split())
-
-
-def _log_timestamp() -> str:
-    return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _log_file_path(kind: str, filename: str) -> str:
-    directory = os.path.join(_get_app_dir(), kind)
-    os.makedirs(directory, exist_ok=True)
-    return os.path.join(directory, filename)
 
 
 def _is_debug_logging_enabled() -> bool:
@@ -55,31 +45,16 @@ def _is_debug_logging_enabled() -> bool:
 
 
 def _log_runtime_error(stage: str, exc: Exception) -> None:
-    log_path = _log_file_path("error_log", "mekicopy_error.log")
-    try:
-        with open(log_path, "a", encoding="utf-8") as handle:
-            handle.write("\n=== ERROR ===\n")
-            handle.write(f"time: {_log_timestamp()}\n")
-            handle.write(f"stage: {stage}\n")
-            handle.write(f"type: {type(exc).__name__}\n")
-            handle.write(f"message: {exc}\n")
-            handle.write(traceback.format_exc())
-    except OSError:
-        pass
+    _system_error(stage, exc, component="MekiCopy")
 
 
 def _log_runtime_message(stage: str, message: str) -> None:
-    if not _is_debug_logging_enabled():
-        return
-    log_path = _log_file_path("debug_log", "mekicopy_debug.log")
-    try:
-        with open(log_path, "a", encoding="utf-8") as handle:
-            handle.write("\n=== DEBUG ===\n")
-            handle.write(f"time: {_log_timestamp()}\n")
-            handle.write(f"stage: {stage}\n")
-            handle.write(message.rstrip() + "\n")
-    except OSError:
-        pass
+    _system_debug(
+        stage,
+        message,
+        component="MekiCopy",
+        enabled=_is_debug_logging_enabled(),
+    )
 
 
 configure_capture_runtime(

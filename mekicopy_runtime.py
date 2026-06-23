@@ -190,12 +190,9 @@ def _prepare_native_runtime_paths() -> None:
 
 
 def _prepare_windowed_streams() -> None:
-    global _WINDOW_STREAM
-    if sys.stderr is None:
-        _WINDOW_STREAM = open(os.devnull, "w", encoding="utf-8")
-        sys.stderr = _WINDOW_STREAM
-    if sys.stdout is None:
-        sys.stdout = sys.stderr
+    from system_logging import capture_windowed_streams
+
+    capture_windowed_streams()
 
 
 BOOKMARKS_FILE = os.path.join(_get_app_dir(), "bookmarks.txt")

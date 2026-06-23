@@ -17,6 +17,22 @@ const progressTextEl = document.getElementById("progress-text");
 const progressFiles = new Map();
 let modelBackupCacheInstalled = false;
 
+async function sendClientLog(level, stage, message) {
+  if (level !== "error" && level !== "fatal" && !config?.debugLog) {
+    return;
+  }
+  try {
+    await fetch("/client-log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level, stage, message: String(message) }),
+      keepalive: true,
+    });
+  } catch (_err) {
+    // The HYTrans server may already be shutting down.
+  }
+}
+
 function sendToServer(payload) {
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(payload));
@@ -26,10 +42,22 @@ function sendToServer(payload) {
 function setStatus(message, notifyServer = true) {
   statusEl.textContent = message;
   console.log("[HYTrans Worker]", message);
+  void sendClientLog("debug", "status", message);
   if (notifyServer) {
     sendToServer({ type: "loading", message });
   }
 }
+
+window.addEventListener("error", (event) => {
+  const detail = `${event.message || "worker window error"}\n${event.filename || ""}:${event.lineno || 0}:${event.colno || 0}`;
+  void sendClientLog("error", "window_error", detail);
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  const detail = reason?.stack || reason?.message || String(reason);
+  void sendClientLog("error", "unhandled_rejection", detail);
+});
 
 function setProgress(percent, message) {
   const safePercent = Math.max(0, Math.min(100, Math.round(percent)));
@@ -164,13 +192,8 @@ function onProgress(progress) {
   const percent = Math.round(overallProgress());
   const fileLabel = shortFileName(file);
   const byteLabel = info.total ? ` (${formatBytes(info.loaded)} / ${formatBytes(info.total)})` : "";
-  const loadingVerb = config?.modelMode === "local" ? "로컬 모델 읽는 중" : "다운로드 중";
-  const doneVerb = config?.modelMode === "local" ? "로컬 모델 읽기 완료" : "다운로드 완료";
-  const message =
-    progress.status === "done"
-      ? `다운로드 완료: ${fileLabel}`
-      : `다운로드 중: ${fileLabel}${byteLabel}`;
-
+  const loadingVerb = config?.modelMode === "local" ? "로컬 모델 로드 중" : "다운로드 중";
+  const doneVerb = config?.modelMode === "local" ? "로컬 모델 로드 완료" : "다운로드 완료";
   const displayMessage =
     progress.status === "done"
       ? `${doneVerb}: ${fileLabel}`
@@ -220,6 +243,48 @@ async function loadConfig() {
     throw new Error("failed to load /config");
   }
   return await response.json();
+}
+
+async function prepareLocalModel() {
+  if (config.modelMode === "local") {
+    return;
+  }
+
+  resetProgress("모델 다운로드 준비 중...");
+  const startResponse = await fetch("/model/prepare", { method: "POST" });
+  if (!startResponse.ok) {
+    throw new Error(`model download start failed: HTTP ${startResponse.status}`);
+  }
+
+  while (true) {
+    const response = await fetch("/model/status", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`model download status failed: HTTP ${response.status}`);
+    }
+    const status = await response.json();
+    if (status.state === "READY") {
+      setProgress(100, "다운로드 완료");
+      setStatus("모델 다운로드 완료. 로컬 모델을 준비합니다...");
+      config = await loadConfig();
+      if (config.modelMode !== "local") {
+        throw new Error("downloaded model was not recognized as a complete local model");
+      }
+      return;
+    }
+    if (status.state === "ERROR") {
+      throw new Error(status.error || "model download failed");
+    }
+
+    const loaded = Number(status.downloadedBytes || 0);
+    const total = Number(status.totalBytes || 0);
+    const percent = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
+    const file = shortFileName(status.currentFile || "모델 파일");
+    const byteLabel = total ? ` (${formatBytes(loaded)} / ${formatBytes(total)})` : "";
+    const message = `다운로드 중: ${file}${byteLabel}`;
+    setProgress(percent, message);
+    setStatus(`${message} (${percent}%)`);
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
 }
 
 async function getServerModelCacheStatus(url) {
@@ -466,7 +531,7 @@ async function createGeneratorWithFallback() {
   const device = await preferredDevice();
   const loadMessage =
     config.modelMode === "local"
-      ? `${config.modelId} 로컬 모델을 불러오는 중...`
+      ? `${config.modelId} 로컬 모델 로드 중...`
       : `${config.modelId} 자동 다운로드를 시작합니다...`;
   resetProgress(loadMessage);
 
@@ -578,15 +643,14 @@ async function main() {
   try {
     setStatus("설정을 불러오는 중...", false);
     config = await loadConfig();
-    setupTransformersEnv(config);
     await connectWebSocket();
+    await prepareLocalModel();
+    setupTransformersEnv(config);
     generator = await createGeneratorWithFallback();
-    if (config.modelMode !== "local") {
-      await syncBrowserModelCacheToServer();
-    }
     announceReady();
   } catch (err) {
     console.error(err);
+    void sendClientLog("fatal", "main", err?.stack || err?.message || String(err));
     setStatus(`ERROR: ${err?.message ?? String(err)}`);
     sendToServer({
       type: "fatal",

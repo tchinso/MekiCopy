@@ -41,6 +41,15 @@ from service_ports import (
     HYTRANS_DEFAULT_PORT,
     SCRIPT_DEFAULT_PORT,
 )
+from system_logging import (
+    capture_windowed_streams,
+    configure_system_logging,
+    install_exception_hooks,
+    install_tk_exception_hook,
+    log_debug,
+    log_error,
+    set_debug_enabled,
+)
 
 prepare_tk_environment("MekiCopyRuntime")
 import tkinter as tk
@@ -69,12 +78,7 @@ def work_dir() -> Path:
 
 
 def prepare_streams() -> None:
-    global _WINDOW_STREAM
-    if sys.stderr is None:
-        _WINDOW_STREAM = open(os.devnull, "w", encoding="utf-8")
-        sys.stderr = _WINDOW_STREAM
-    if sys.stdout is None:
-        sys.stdout = sys.stderr
+    capture_windowed_streams()
 
 
 class CaptureController:
@@ -127,6 +131,8 @@ class CaptureController:
         self.preset = normalize_preset(str(payload.get("preset", self.preset)))
         self.script_url = str(payload.get("scriptUrl", self.script_url)).rstrip("/")
         self.hytrans_url = str(payload.get("hytransUrl", self.hytrans_url)).rstrip("/")
+        if "debugLog" in payload:
+            set_debug_enabled(bool(payload["debugLog"]))
         if self.precision != previous_precision:
             self.prepared_models = None
             self.prepared_models_precision = ""
@@ -138,6 +144,9 @@ class CaptureController:
             self.status = status
             self.error = error
         self.events.put(("status", status))
+        log_debug("state", f"state: {state}\nstatus: {status}")
+        if error:
+            log_error("state", error)
 
     def prepare_models(self) -> None:
         """Prepare models immediately without blocking the Tk event loop."""
@@ -161,6 +170,7 @@ class CaptureController:
                 self.prepared_models_precision = precision
             self._set_state("READY", "녹음 준비")
         except Exception as exc:
+            log_error("prepare_models", exc)
             self._set_state(
                 "ERROR",
                 f"음성인식 모델 준비 실패: {exc}",
@@ -227,6 +237,7 @@ class CaptureController:
                         pcm = np.clip(block, -1.0, 1.0)
                         output.writeframes((pcm * 32767.0).astype("<i2").tobytes())
         except Exception as exc:
+            log_error("record", exc)
             self._set_state("ERROR", f"녹음 실패: {exc}", traceback.format_exc())
             self.stop_event.set()
             cleanup_work_files(work_dir())
@@ -271,6 +282,7 @@ class CaptureController:
                 try:
                     translated = translate_text(self.hytrans_url, result.text_ja)
                 except Exception as exc:
+                    log_error("translate", exc)
                     translated = f"[번역 실패] {exc}"
                 entry_id = f"{self.session_id}-{result.segment_id}"
                 set_script_translation(self.script_url, result, translated, entry_id=entry_id)
@@ -279,6 +291,7 @@ class CaptureController:
             else:
                 final_status = "완료: 인식된 일본어 음성이 없습니다."
         except Exception as exc:
+            log_error("process_audio", exc)
             final_state = "ERROR"
             final_status = f"처리 실패: {exc}"
             final_error = traceback.format_exc()
@@ -327,6 +340,7 @@ def make_handler(controller: CaptureController):
                     return
                 _write_json(self, 200, controller.health())
             except Exception as exc:
+                log_error("http_request", exc)
                 _write_json(self, 409, {"ok": False, "error": str(exc)})
 
         def log_message(self, format: str, *args: Any) -> None:
@@ -386,12 +400,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--self-test-models", action="store_true")
     parser.add_argument("--self-test-server", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--debug-log", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
-    prepare_streams()
     args = parse_args()
+    configure_system_logging("MekiAudioCapture", args.debug_log)
+    install_exception_hooks()
+    prepare_streams()
     if args.self_test:
         assert normalize_precision(args.precision) in {"fp32", "int8"}
         assert normalize_preset(args.preset) in {"FAST", "BALANCED", "LONG"}
@@ -430,6 +447,7 @@ def main() -> int:
     try:
         set_windows_app_id("MekiAudioCapture")
         root = tk.Tk()
+        install_tk_exception_hook(root)
         apply_tk_icon(root)
         CaptureWindow(root, controller)
         server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(controller))
@@ -438,6 +456,7 @@ def main() -> int:
         server.shutdown()
         return 0
     except Exception as exc:
+        log_error("main", exc)
         try:
             messagebox.showerror("MekiAudioCapture", str(exc))
         except Exception:

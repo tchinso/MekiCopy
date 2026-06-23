@@ -160,7 +160,8 @@ HYTrans는 내부적으로 Chrome 또는 Edge 브라우저를 사용해 `transfo
 2. `저장`을 누릅니다. `도구/설정` 탭의 `HYTrans 서버 실행`과 `MekiOverlayer 실행` 버튼이 활성화됩니다.
 3. `HYTrans 서버 실행` 버튼을 누릅니다.
    - HYTrans가 실행되면서 브라우저 창이 자동으로 열립니다.
-   - 브라우저에서 번역 모델을 다운로드하고 로딩합니다. **처음 실행 시 모델 다운로드에 시간이 걸립니다.**
+   - HYTrans가 모델을 `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX`에 직접 다운로드한 뒤 Worker가 로컬 모델을 로드합니다. **처음 실행 시 모델 다운로드에 시간이 걸립니다.**
+   - 완전한 로컬 모델이 이미 있으면 네트워크에 접속하거나 다시 다운로드하지 않습니다. Worker에는 `다운로드 중`과 `로컬 모델 로드 중`이 구분되어 표시됩니다.
 4. `MekiOverlayer 실행` 버튼을 누릅니다.
 5. 확정 영역을 설정한 뒤 `번역 후 표시` 버튼을 누릅니다.
 6. OCR → 번역 → MekiOverlayer 표시가 자동으로 이루어집니다.
@@ -211,7 +212,7 @@ HYTrans는 내부적으로 Chrome 또는 Edge 브라우저를 사용해 `transfo
 | MekiCopy가 최소화되면 시스템 트레이로 이동 | 최소화 시 작업 표시줄 대신 트레이 아이콘으로 이동합니다. 트레이 아이콘 클릭으로 복원합니다. |
 | MekiCopy를 항상 위로 | 메인 창을 항상 다른 창 위에 표시합니다. |
 | 복사 완료를 간단하게 표시하기 | 복사 완료 팝업 대신 버튼이 잠깐 ✓ 표시로 바뀌는 방식으로 피드백을 줍니다. |
-| 오류 분석을 위한 디버그 로그 켜기 | `debug_log/mekicopy_debug.log`에 상세 로그를 기록합니다. 문제 발생 시 활성화하세요. |
+| 오류 분석을 위한 디버그 로그 켜기 | MekiCopy, HYTrans, HyTransWorker, MekiAudioCapture, MekiOverlayer, MekiScript의 처리·통신 로그를 모두 `MekiCopy/debug_log/`에 기록합니다. |
 
 ### 분리된 버튼 창 설정
 
@@ -283,9 +284,8 @@ MekiCopy.exe --pick-bookmark
 
 - **영역이 너무 작으면** 인식이 실패하거나 오류가 발생할 수 있습니다. 텍스트 주변에 여백을 조금 포함해 잡으세요.
 - **한국어 경로 문제:** Windows에서 사용자 이름 등 경로에 한글이 포함된 경우, Tcl/Tk 라이브러리를 `%LOCALAPPDATA%\MekiCopyRuntime`에 자동으로 복사해 처리합니다. 이 경로도 ASCII가 아니면 임시 폴더를 사용합니다.
-- **오류 로그:** 오류 발생 시 `error_log/mekicopy_error.log`에 기록됩니다. 문제 신고 시 이 파일을 첨부하세요.
+- **시스템 오류 로그:** MekiCopy, HYTrans, HyTransWorker, MekiAudioCapture, MekiOverlayer, MekiScript의 오류·미처리 예외·HTTP/IPC 실패·창 없는 EXE의 stderr는 모두 `MekiCopy/error_log/`의 구성요소별 로그에 기록됩니다. 디버그 옵션이 꺼져도 오류 로그는 계속 기록됩니다.
 - **GPU 가속:** CUDA가 지원되는 환경에서는 OCR 엔진이 자동으로 GPU를 사용합니다. 지원되지 않으면 CPU로 동작합니다.
-- **HYTrans 모델 캐시:** 번역 모델은 처음 실행 시 브라우저 캐시와 `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX`에 저장됩니다. 고정 모델 리비전의 파일 크기와 SHA-256을 검증한 완전한 q4 모델 세트가 있으면 원격 다운로드를 비활성화하고 로컬 모델만 사용합니다. 부분 다운로드나 손상 파일은 재사용하지 않습니다. 브라우저 프로필 캐시 위치는 `%LOCALAPPDATA%\MekiCopy\HYTrans\ChromeProfile`입니다.
-- **MekiOverlayer 로그:** MekiOverlayer의 오류 로그는 `%LOCALAPPDATA%\MekiOverlayer\error_log\`에 저장됩니다.
+- **HYTrans 모델 저장소:** 번역 모델은 처음부터 `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX`에 원자적으로 저장됩니다. 고정 모델 리비전의 파일 크기와 SHA-256을 검증한 완전한 q4 모델 세트가 있으면 원격 다운로드를 비활성화하고 로컬 모델만 사용합니다. 부분 다운로드나 손상 파일은 재사용하지 않습니다.
 - **번역 입력 제한:** 한 번에 번역할 수 있는 텍스트는 최대 8,000자입니다.
 - **음성인식 모델 경로:** `MekiAudioCapture.exe` 옆의 `models` 폴더를 사용합니다. 없으면 MekiAudioCapture 실행 직후 백그라운드에서 자동 다운로드하고, 준비가 끝난 뒤 녹음을 활성화합니다.

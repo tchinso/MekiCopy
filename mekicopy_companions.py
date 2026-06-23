@@ -82,6 +82,23 @@ def _is_process_alive(process: subprocess.Popen | None) -> bool:
     return bool(process and process.poll() is None)
 
 
+def _terminate_process_tree(process: subprocess.Popen | None) -> None:
+    if not _is_process_alive(process):
+        return
+    assert process is not None
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if completed.returncode == 0:
+            return
+    process.terminate()
+
+
 def _mekicopy_process_command(*arguments: str) -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, *arguments]

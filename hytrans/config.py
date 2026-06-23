@@ -38,6 +38,7 @@ class RuntimeConfig(BaseModel):
     target: str = TARGET_LANG
     maxNewTokens: int = MAX_NEW_TOKENS
     hasLocalWasm: bool = False
+    debugLog: bool = False
 
 
 @dataclass
@@ -85,4 +86,5 @@ def runtime_config() -> RuntimeConfig:
         modelMode=detect_model_mode(),
         modelFiles=required_model_file_sizes(),
         hasLocalWasm=has_local_wasm_files(),
+        debugLog=options.debug_log,
     )

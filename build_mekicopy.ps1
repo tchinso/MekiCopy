@@ -386,6 +386,47 @@ foreach ($exe in $expectedExecutables) {
     }
 }
 
+# When a verified source-side HYTrans model already exists, publish it beside
+# HYTrans.exe without duplicating the 1.4 GB external-data file on this volume.
+# A release built without these files still downloads them directly into the
+# same HYTrans\models path on first launch.
+$hyTransModelSource = Join-Path $PSScriptRoot "models\onnx-community\HY-MT1.5-1.8B-ONNX"
+$hyTransRequiredFiles = @(
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "onnx\model_q4.onnx",
+    "onnx\model_q4.onnx_data"
+)
+$hasPreparedHyTransModel = $true
+foreach ($relativeFile in $hyTransRequiredFiles) {
+    if (-not (Test-Path -LiteralPath (Join-Path $hyTransModelSource $relativeFile) -PathType Leaf)) {
+        $hasPreparedHyTransModel = $false
+        break
+    }
+}
+if ($hasPreparedHyTransModel) {
+    $hyTransModelTarget = Join-Path $distRoot "HYTrans\models\onnx-community\HY-MT1.5-1.8B-ONNX"
+    Get-ChildItem -LiteralPath $hyTransModelSource -Recurse -File | ForEach-Object {
+        $relativeFile = $_.FullName.Substring($hyTransModelSource.Length).TrimStart("\")
+        $targetFile = Join-Path $hyTransModelTarget $relativeFile
+        New-Item -ItemType Directory -Path (Split-Path -Parent $targetFile) -Force | Out-Null
+        if ($_.Name -eq ".hytrans-model-manifest.json") {
+            Copy-Item -LiteralPath $_.FullName -Destination $targetFile -Force
+        }
+        else {
+            try {
+                New-Item -ItemType HardLink -Path $targetFile -Target $_.FullName -Force | Out-Null
+            }
+            catch {
+                Copy-Item -LiteralPath $_.FullName -Destination $targetFile -Force
+            }
+        }
+    }
+    Write-Host "Prepared local HYTrans model: $hyTransModelTarget"
+}
+
 if (-not $SkipSmokeTests) {
     Write-Host "Running executable smoke tests..."
     Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-runtime")

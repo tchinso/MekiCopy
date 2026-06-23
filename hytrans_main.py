@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import socket
 import sys
 import threading
@@ -15,17 +14,10 @@ from hytrans.app import app, configure_worker_opener, state
 from hytrans.browser import BrowserManager
 from hytrans.config import DEFAULT_OVERLAY_URL, DEFAULT_PORT, HOST, configure_server
 from hytrans.logging_setup import configure_logging, debug, error
-
-_window_stream = None
-
+from system_logging import capture_windowed_streams, install_exception_hooks
 
 def prepare_windowed_streams() -> None:
-    global _window_stream
-    if sys.stderr is None:
-        _window_stream = open(os.devnull, "w", encoding="utf-8")
-        sys.stderr = _window_stream
-    if sys.stdout is None:
-        sys.stdout = sys.stderr
+    capture_windowed_streams()
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,7 +57,6 @@ def wait_server_ready(host: str, port: int, timeout: float = 15.0) -> bool:
 
 def main() -> int:
     set_windows_app_id("HYTrans")
-    prepare_windowed_streams()
     args = parse_args()
     configure_server(
         host=args.host,
@@ -74,6 +65,8 @@ def main() -> int:
         debug_log=args.debug_log,
     )
     configure_logging(args.debug_log)
+    install_exception_hooks()
+    prepare_windowed_streams()
 
     browser = BrowserManager()
     server: uvicorn.Server | None = None
