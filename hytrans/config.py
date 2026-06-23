@@ -6,18 +6,17 @@ from pydantic import BaseModel
 
 from service_ports import HYTRANS_DEFAULT_PORT, OVERLAYER_DEFAULT_PORT
 
+from .model_files import (
+    MODEL_FILE_SPECS,
+    MODEL_ID,
+    MODEL_REVISION,
+    is_complete_model,
+    required_model_file_sizes,
+)
 from .paths import assets_dir, models_dir
 
-MODEL_ID = "onnx-community/HY-MT1.5-1.8B-ONNX"
 DTYPE = "q4"
-REQUIRED_Q4_MODEL_FILES = (
-    "config.json",
-    "generation_config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "onnx/model_q4.onnx",
-    "onnx/model_q4.onnx_data",
-)
+REQUIRED_Q4_MODEL_FILES = tuple(MODEL_FILE_SPECS)
 SOURCE_LANG = "Japanese"
 TARGET_LANG = "Korean"
 MAX_NEW_TOKENS = 2048
@@ -30,8 +29,10 @@ MAX_INPUT_CHARS = 8000
 
 class RuntimeConfig(BaseModel):
     modelId: str = MODEL_ID
+    revision: str = MODEL_REVISION
     dtype: str = DTYPE
     modelMode: str
+    modelFiles: dict[str, int]
     source: str = SOURCE_LANG
     target: str = TARGET_LANG
     maxNewTokens: int = MAX_NEW_TOKENS
@@ -64,8 +65,7 @@ def configure_server(
 
 def detect_model_mode() -> str:
     model_path = models_dir().joinpath(*MODEL_ID.split("/"))
-    required = [model_path.joinpath(*relative.split("/")) for relative in REQUIRED_Q4_MODEL_FILES]
-    if all(path.is_file() and path.stat().st_size > 0 for path in required):
+    if is_complete_model(model_path):
         return "local"
     return "remote"
 
@@ -80,5 +80,6 @@ def has_local_wasm_files() -> bool:
 def runtime_config() -> RuntimeConfig:
     return RuntimeConfig(
         modelMode=detect_model_mode(),
+        modelFiles=required_model_file_sizes(),
         hasLocalWasm=has_local_wasm_files(),
     )

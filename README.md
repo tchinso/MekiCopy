@@ -167,7 +167,7 @@ HYTrans는 내부적으로 Chrome 또는 Edge 브라우저를 사용해 `transfo
 
 ### 연결 상태 확인
 
-`도구/설정` 탭의 `모든 도구 연결 상태확인` 버튼으로 두 서비스가 정상 동작하는지 테스트할 수 있습니다.
+`도구/설정` 탭의 `모든 도구 연결 상태확인` 버튼은 서비스 종류, HYTransWorker 연결, 번역 모델 준비 상태와 MekiOverlayer 표시 흐름을 실제 응답으로 확인합니다.
 
 ### 주의사항
 
@@ -196,7 +196,7 @@ HYTrans는 내부적으로 Chrome 또는 Edge 브라우저를 사용해 `transfo
 | HYTrans | 일본어 원문 단위별 한국어 번역 | 6996 |
 | MekiScript | 원문·번역 누적 표시 및 스크롤 | 6999 |
 
-`모든 도구 연결 상태 확인`으로 세 앱의 HTTP 연결 상태를 한 번에 확인할 수 있습니다. 음성 모델은 기본 EXE 배포본에 포함되지 않습니다. MekiAudioCapture를 실행하면 녹음 전에 곧바로 공식 sherpa-onnx 릴리스에서 `MekiAudioCapture/models`로 준비하며, 유효한 모델이 이미 있으면 다운로드하지 않습니다.
+`모든 도구 연결 상태 확인`으로 세 앱의 HTTP 응답과 HYTransWorker/번역 모델 준비 상태를 한 번에 확인할 수 있습니다. 음성 모델은 기본 EXE 배포본에 포함되지 않습니다. MekiAudioCapture를 실행하면 녹음 전에 곧바로 공식 sherpa-onnx 릴리스에서 `MekiAudioCapture/models`로 준비하며, 유효한 모델이 이미 있으면 다운로드하지 않습니다.
 
 ---
 
@@ -285,7 +285,7 @@ MekiCopy.exe --pick-bookmark
 - **한국어 경로 문제:** Windows에서 사용자 이름 등 경로에 한글이 포함된 경우, Tcl/Tk 라이브러리를 `%LOCALAPPDATA%\MekiCopyRuntime`에 자동으로 복사해 처리합니다. 이 경로도 ASCII가 아니면 임시 폴더를 사용합니다.
 - **오류 로그:** 오류 발생 시 `error_log/mekicopy_error.log`에 기록됩니다. 문제 신고 시 이 파일을 첨부하세요.
 - **GPU 가속:** CUDA가 지원되는 환경에서는 OCR 엔진이 자동으로 GPU를 사용합니다. 지원되지 않으면 CPU로 동작합니다.
-- **HYTrans 모델 캐시:** 번역 모델은 처음 실행 시 브라우저를 통해 다운로드되고 `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX`에도 원자적으로 저장됩니다. 완전한 q4 모델 세트가 있으면 모델 원격 다운로드를 비활성화하고 로컬 모델만 사용합니다. Transformers.js와 ONNX Runtime Web은 최신 v4 계열 런타임을 CDN에서 불러오며, 브라우저 프로필 캐시 위치는 `%LOCALAPPDATA%\MekiCopy\HYTrans\ChromeProfile`입니다.
+- **HYTrans 모델 캐시:** 번역 모델은 처음 실행 시 브라우저 캐시와 `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX`에 저장됩니다. 고정 모델 리비전의 파일 크기와 SHA-256을 검증한 완전한 q4 모델 세트가 있으면 원격 다운로드를 비활성화하고 로컬 모델만 사용합니다. 부분 다운로드나 손상 파일은 재사용하지 않습니다. 브라우저 프로필 캐시 위치는 `%LOCALAPPDATA%\MekiCopy\HYTrans\ChromeProfile`입니다.
 - **MekiOverlayer 로그:** MekiOverlayer의 오류 로그는 `%LOCALAPPDATA%\MekiOverlayer\error_log\`에 저장됩니다.
 - **번역 입력 제한:** 한 번에 번역할 수 있는 텍스트는 최대 8,000자입니다.
 - **음성인식 모델 경로:** `MekiAudioCapture.exe` 옆의 `models` 폴더를 사용합니다. 없으면 MekiAudioCapture 실행 직후 백그라운드에서 자동 다운로드하고, 준비가 끝난 뒤 녹음을 활성화합니다.

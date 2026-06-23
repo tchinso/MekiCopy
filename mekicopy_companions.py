@@ -37,6 +37,47 @@ def _json_request(
     return json.loads(raw)
 
 
+def _validate_service_health(expected_app: str, payload: dict) -> str:
+    if payload.get("ok") is not True:
+        raise RuntimeError(f"{expected_app}가 정상 상태를 반환하지 않았습니다.")
+    actual_app = payload.get("app")
+    if actual_app != expected_app:
+        raise RuntimeError(
+            f"예상한 {expected_app} 대신 {actual_app or '알 수 없는 서비스'}가 응답했습니다."
+        )
+    state = str(payload.get("state") or payload.get("server") or "연결됨")
+    if state.upper() == "ERROR":
+        detail = payload.get("status") or payload.get("error") or "오류 상태"
+        raise RuntimeError(f"{expected_app} 오류: {detail}")
+    return state
+
+
+def _probe_service(expected_app: str, base_url: str, timeout: float = 2.0) -> str:
+    health = _json_request(f"{base_url.rstrip('/')}/health", timeout=timeout)
+    state = _validate_service_health(expected_app, health)
+    if expected_app != "HYTrans":
+        return state
+
+    ready = _json_request(f"{base_url.rstrip('/')}/ready", timeout=timeout)
+    if ready.get("workerConnected") is not True:
+        raise RuntimeError("HYTransWorker가 연결되어 있지 않습니다.")
+    if ready.get("ready") is not True:
+        worker_state = ready.get("state") or "모델 준비 중"
+        detail = ready.get("error")
+        suffix = f" ({detail})" if detail else ""
+        raise RuntimeError(f"HYTrans 번역 모델이 준비되지 않았습니다: {worker_state}{suffix}")
+    return str(ready.get("state") or "READY")
+
+
+def _validated_translation_text(payload: dict) -> str:
+    if payload.get("ok") is not True:
+        raise RuntimeError("HYTrans가 번역 실패 상태를 반환했습니다.")
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise RuntimeError("HYTrans가 빈 번역 결과를 반환했습니다.")
+    return text
+
+
 def _is_process_alive(process: subprocess.Popen | None) -> bool:
     return bool(process and process.poll() is None)
 

@@ -60,6 +60,44 @@ function isModelRequest(url) {
   return Boolean(config?.modelId && String(url).includes(config.modelId));
 }
 
+function modelRelativePath(url) {
+  const pathname = decodeURIComponent(new URL(url, location.href).pathname)
+    .replaceAll("\\", "/")
+    .split("/")
+    .filter(Boolean);
+  const modelParts = String(config?.modelId || "").split("/").filter(Boolean);
+  for (let index = 0; index <= pathname.length - modelParts.length; index += 1) {
+    if (!modelParts.every((part, offset) => pathname[index + offset] === part)) {
+      continue;
+    }
+    let remainder = pathname.slice(index + modelParts.length);
+    if (["resolve", "raw"].includes(remainder[0]) && remainder.length >= 3) {
+      remainder = remainder.slice(2);
+    }
+    return remainder.join("/");
+  }
+  return "";
+}
+
+function expectedModelFileSize(url) {
+  const relative = modelRelativePath(url);
+  return Number(config?.modelFiles?.[relative] || 0);
+}
+
+function completeResponseSize(response) {
+  const contentRange = response.headers.get("content-range") || "";
+  const rangeMatch = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
+  if (rangeMatch) {
+    const start = Number(rangeMatch[1]);
+    const end = Number(rangeMatch[2]);
+    const total = Number(rangeMatch[3]);
+    return start === 0 && end + 1 === total ? total : 0;
+  }
+  return response.status === 200
+    ? Number(response.headers.get("content-length") || 0)
+    : 0;
+}
+
 function formatBytes(bytes) {
   if (!bytes) {
     return "";
@@ -161,7 +199,11 @@ function extractGeneratedText(result) {
   const item = Array.isArray(result) ? result[0] : result;
   const generated = item?.generated_text ?? item?.text ?? "";
   if (Array.isArray(generated)) {
-    return generated.at(-1)?.content || "";
+    const last = generated.at(-1);
+    return typeof last === "string" ? last : last?.content || last?.text || "";
+  }
+  if (generated && typeof generated === "object") {
+    return generated.content || generated.text || "";
   }
   return typeof generated === "string" ? generated : "";
 }
@@ -190,12 +232,26 @@ async function uploadModelResponseToServer(url, response) {
   }
 
   const status = await getServerModelCacheStatus(url);
-  const contentLength = Number(response.headers.get("content-length") || 0);
+  const responseSize = completeResponseSize(response);
+  const expectedSize = expectedModelFileSize(url);
+  if (response.status === 206 && responseSize <= 0) {
+    // Transformers.js may probe a large external-data file with a byte range.
+    // A partial response must never replace a complete server-side model file.
+    return;
+  }
+  if (expectedSize > 0 && responseSize > 0 && responseSize !== expectedSize) {
+    console.warn("refusing to cache an unexpected model file size", {
+      url,
+      expectedSize,
+      responseSize,
+    });
+    return;
+  }
   if (status.exists && Number(status.size || 0) > 0) {
     // A server-cache file is published only after an atomic, complete upload.
     // Some browser cache responses omit Content-Length; treating that as a
     // mismatch rewrote every already-cached model file on each worker launch.
-    if (contentLength <= 0 || Number(status.size) === contentLength) {
+    if (responseSize <= 0 || Number(status.size) === responseSize) {
       return;
     }
   }
@@ -237,6 +293,20 @@ async function uploadModelResponseToServer(url, response) {
     throw new Error(`model backup failed: HTTP ${upload.status}`);
   }
   setStatus(`모델 파일 백업 완료: ${fileLabel}`);
+}
+
+async function storeBrowserModelResponse(request, response) {
+  if (!("caches" in window) || !response?.ok || response.status === 206) {
+    return;
+  }
+  try {
+    const cache = await caches.open(env.cacheKey || "transformers-cache");
+    await cache.put(request, response.clone());
+  } catch (err) {
+    // The server-side cache remains the durable fallback when browser quota is
+    // too small for the 1.4 GB external-data file.
+    console.warn("browser model cache write failed:", err);
+  }
 }
 
 async function findBrowserCachedModelResponse(request) {
@@ -331,8 +401,10 @@ function installModelBackupCache() {
       if (!isModelRequest(url)) {
         return;
       }
+      const serverCopy = response.clone();
+      await storeBrowserModelResponse(request, response);
       try {
-        await uploadModelResponseToServer(url, response);
+        await uploadModelResponseToServer(url, serverCopy);
       } catch (err) {
         console.warn("server model backup failed:", err);
       }
@@ -362,6 +434,7 @@ async function createPipeline(device) {
   return await pipeline("text-generation", config.modelId, {
     dtype: config.dtype,
     device,
+    revision: config.revision,
     progress_callback: onProgress,
   });
 }
@@ -439,6 +512,9 @@ async function handleTranslateRequest(req) {
     });
     const rawText = extractGeneratedText(result);
     const translated = cleanTranslationOutput(rawText).trim();
+    if (!translated) {
+      throw new Error("translation model returned an empty result");
+    }
     sendToServer({
       type: "result",
       id: req.id,

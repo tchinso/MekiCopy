@@ -91,6 +91,9 @@ async def _translate_text(text: str) -> str:
             text=text,
             timeout=TRANSLATE_TIMEOUT_SECONDS,
         )
+        result = result.strip()
+        if not result:
+            raise RuntimeError("translation worker returned an empty result")
         state.state = "READY"
         debug("translation_success", f"input_chars: {len(text)}\noutput_chars: {len(result)}")
         return result
@@ -131,6 +134,9 @@ async def health() -> dict[str, object]:
         "ok": True,
         "app": "HYTrans",
         "server": "running",
+        "state": state.state,
+        "workerConnected": state.worker_connected,
+        "ready": state.worker_ready,
     }
 
 

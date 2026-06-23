@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -8,7 +9,12 @@ from urllib.parse import unquote, urlparse
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse
 
-from .config import MODEL_ID
+from .model_files import (
+    MODEL_FILE_SPECS,
+    MODEL_ID,
+    is_verified_model_file,
+    record_verified_model_file,
+)
 from .logging_setup import debug, error
 from .paths import models_dir
 
@@ -64,9 +70,17 @@ def cached_model_file(raw_url: str) -> Path:
 
 
 def model_cache_status(raw_url: str) -> dict[str, object]:
+    relative_path = model_relative_path_from_url(raw_url)
     target = cached_model_file(raw_url)
-    if not target.is_file() or target.stat().st_size <= 0:
-        return {"ok": True, "exists": False}
+    if not is_verified_model_file(model_dir(), relative_path):
+        payload: dict[str, object] = {"ok": True, "exists": False}
+        if target.is_file():
+            payload["invalid"] = True
+            payload["size"] = target.stat().st_size
+        spec = MODEL_FILE_SPECS.get(relative_path)
+        if spec:
+            payload["expectedSize"] = spec.size
+        return payload
     return {
         "ok": True,
         "exists": True,
@@ -75,38 +89,59 @@ def model_cache_status(raw_url: str) -> dict[str, object]:
 
 
 def model_cache_file_response(raw_url: str) -> FileResponse:
+    relative_path = model_relative_path_from_url(raw_url)
     target = cached_model_file(raw_url)
-    if not target.is_file() or target.stat().st_size <= 0:
+    if not is_verified_model_file(model_dir(), relative_path):
         raise HTTPException(status_code=404, detail="model file is not cached")
     return FileResponse(target)
 
 
 async def save_model_cache_file(raw_url: str, request: Request) -> dict[str, object]:
+    relative_path = model_relative_path_from_url(raw_url)
     target = cached_model_file(raw_url)
     target.parent.mkdir(parents=True, exist_ok=True)
-    expected_size = int(request.headers.get("content-length", "0") or 0)
-    if target.is_file() and target.stat().st_size > 0:
+    spec = MODEL_FILE_SPECS.get(relative_path)
+    request_size = int(request.headers.get("content-length", "0") or 0)
+    expected_size = spec.size if spec else request_size
+    if is_verified_model_file(model_dir(), relative_path):
         current_size = target.stat().st_size
-        if expected_size > 0 and current_size == expected_size:
-            relative = target.relative_to(model_dir()).as_posix()
-            return {"ok": True, "path": relative, "bytes": current_size, "reused": True}
+        return {
+            "ok": True,
+            "path": relative_path,
+            "bytes": current_size,
+            "reused": True,
+        }
 
     temp_target = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
 
     total = 0
+    digest = hashlib.sha256()
     try:
         with temp_target.open("wb") as handle:
             async for chunk in request.stream():
                 if not chunk:
                     continue
                 total += len(chunk)
+                digest.update(chunk)
                 handle.write(chunk)
         if total <= 0:
             raise ValueError("refusing to cache an empty model file")
+        if expected_size > 0 and total != expected_size:
+            raise ValueError(
+                f"incomplete model file: expected {expected_size} bytes, received {total}"
+            )
+        actual_digest = digest.hexdigest()
+        if spec and actual_digest != spec.sha256:
+            raise ValueError("model file checksum mismatch")
         os.replace(temp_target, target)
-        relative = target.relative_to(model_dir()).as_posix()
-        debug("model_cache_save", f"{relative}\nbytes: {total}")
-        return {"ok": True, "path": relative, "bytes": total}
+        if spec:
+            record_verified_model_file(
+                model_dir(),
+                relative_path,
+                digest=actual_digest,
+            )
+        debug("model_cache_save", f"{relative_path}\nbytes: {total}")
+        return {"ok": True, "path": relative_path, "bytes": total}
     except Exception as exc:
         try:
             temp_target.unlink(missing_ok=True)

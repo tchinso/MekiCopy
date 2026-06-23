@@ -76,7 +76,9 @@ from mekicopy_companions import (
     _json_request,
     _launch_detached_button_process,
     _mekicopy_process_command,
+    _probe_service,
     _startupinfo_for_background,
+    _validated_translation_text,
 )
 from mekicopy_ocr import (
     _get_ocr_engine,
@@ -323,18 +325,21 @@ class DetachedOcrButtonApp:
             )
             return
         try:
+            hytrans_url = f"http://127.0.0.1:{self.settings.hytrans_port}"
+            overlayer_url = f"http://127.0.0.1:{self.settings.overlayer_port}"
+            _probe_service("HYTrans", hytrans_url)
+            _probe_service("MekiOverlayer", overlayer_url)
             self._send_overlayer_config()
-            _json_request(
-                f"http://127.0.0.1:{self.settings.hytrans_port}/translate-and-show",
+            response = _json_request(
+                f"{hytrans_url}/translate-and-show",
                 {
                     "text": text,
-                    "overlayUrl": (
-                        f"http://127.0.0.1:{self.settings.overlayer_port}/show"
-                    ),
+                    "overlayUrl": f"{overlayer_url}/show",
                 },
                 timeout=130,
                 method="POST",
             )
+            _validated_translation_text(response)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             _log_runtime_error("detached_translate_http", exc)
@@ -1220,8 +1225,7 @@ class MainWindow(tk.Tk):
         failures: list[str] = []
         for name, base_url in services:
             try:
-                payload = _json_request(f"{base_url}/health", timeout=2)
-                state = payload.get("state") or payload.get("server") or "연결됨"
+                state = _probe_service(name, base_url)
                 successes.append(f"{name}: {state}")
             except Exception as exc:
                 failures.append(f"{name}: 연결 실패 ({exc})")
@@ -1385,11 +1389,11 @@ class MainWindow(tk.Tk):
         owner = parent or self
         failures: list[str] = []
         try:
-            _json_request(f"{self._hytrans_base_url()}/health", timeout=2)
+            hytrans_state = _probe_service("HYTrans", self._hytrans_base_url())
         except Exception as exc:
             failures.append(f"HYTrans 연결 실패: {exc}")
         try:
-            _json_request(f"{self._overlayer_base_url()}/health", timeout=2)
+            _probe_service("MekiOverlayer", self._overlayer_base_url())
         except Exception as exc:
             failures.append(f"MekiOverlayer 연결 실패: {exc}")
 
@@ -1405,11 +1409,9 @@ class MainWindow(tk.Tk):
                 timeout=5,
                 method="POST",
             )
-            ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=2)
-            ready_text = "번역 모델 준비됨" if ready.get("ready") else "번역 모델 로딩 중"
             messagebox.showinfo(
                 "MekiCopy",
-                f"HYTrans -> MekiOverlayer 표시 흐름이 정상입니다.\n{ready_text}",
+                f"HYTrans -> MekiOverlayer 표시 흐름이 정상입니다.\n번역 모델: {hytrans_state}",
                 parent=owner,
             )
         except Exception as exc:
@@ -1417,12 +1419,16 @@ class MainWindow(tk.Tk):
             messagebox.showerror("MekiCopy", f"연결 테스트 실패:\n{exc}", parent=owner)
 
     def _request_translate_and_show(self, text: str) -> dict:
-        return _json_request(
+        _probe_service("HYTrans", self._hytrans_base_url())
+        _probe_service("MekiOverlayer", self._overlayer_base_url())
+        response = _json_request(
             f"{self._hytrans_base_url()}/translate-and-show",
             {"text": text, "overlayUrl": self._overlayer_show_url()},
             timeout=130,
             method="POST",
         )
+        _validated_translation_text(response)
+        return response
 
     def _on_ocr_copy(self, source_button: tk.Button | None = None) -> None:
         if not self.active_region:
