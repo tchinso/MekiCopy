@@ -164,14 +164,21 @@ function onProgress(progress) {
   const percent = Math.round(overallProgress());
   const fileLabel = shortFileName(file);
   const byteLabel = info.total ? ` (${formatBytes(info.loaded)} / ${formatBytes(info.total)})` : "";
+  const loadingVerb = config?.modelMode === "local" ? "로컬 모델 읽는 중" : "다운로드 중";
+  const doneVerb = config?.modelMode === "local" ? "로컬 모델 읽기 완료" : "다운로드 완료";
   const message =
     progress.status === "done"
       ? `다운로드 완료: ${fileLabel}`
       : `다운로드 중: ${fileLabel}${byteLabel}`;
 
-  setProgress(percent, message);
+  const displayMessage =
+    progress.status === "done"
+      ? `${doneVerb}: ${fileLabel}`
+      : `${loadingVerb}: ${fileLabel}${byteLabel}`;
+
+  setProgress(percent, displayMessage);
   if (shouldSendProgress(percent, progress.status)) {
-    setStatus(`${message} (${percent}%)`);
+    setStatus(`${displayMessage} (${percent}%)`);
   }
 }
 
@@ -190,9 +197,8 @@ function cleanTranslationOutput(text) {
 }
 
 function buildPrompt(inputText) {
-  const source = config?.source || "Japanese";
   const target = config?.target || "Korean";
-  return `Translate the following segment from ${source} into ${target}, without additional explanation.\n\n${inputText}`;
+  return `Translate the following segment into ${target}, without additional explanation.\n\n${inputText}`;
 }
 
 function extractGeneratedText(result) {

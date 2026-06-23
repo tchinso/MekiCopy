@@ -154,6 +154,24 @@ def is_verified_model_file(model_root: Path, relative_path: str) -> bool:
     return True
 
 
+def is_present_model_file(model_root: Path, relative_path: str) -> bool:
+    spec = MODEL_FILE_SPECS.get(relative_path)
+    path = model_file_path(model_root, relative_path)
+    if not path.is_file():
+        return False
+    stat = path.stat()
+    if spec is None:
+        return stat.st_size > 0
+    return stat.st_size == spec.size
+
+
+def is_present_model(model_root: Path) -> bool:
+    return all(
+        is_present_model_file(model_root, relative_path)
+        for relative_path in MODEL_FILE_SPECS
+    )
+
+
 def is_complete_model(model_root: Path) -> bool:
     return all(
         is_verified_model_file(model_root, relative_path)

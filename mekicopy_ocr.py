@@ -217,9 +217,18 @@ def run_meikiocr(image_path: str) -> str:
     try:
         _prepare_native_runtime_paths()
         import cv2
+        import numpy as np
 
         ocr = _get_ocr_engine()
-        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        image = None
+        try:
+            image_data = np.fromfile(image_path, dtype=np.uint8)
+            if image_data.size:
+                image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+        except Exception as exc:
+            _log_runtime_error("read_image_unicode_path", exc)
+        if image is None:
+            image = cv2.imread(image_path, cv2.IMREAD_COLOR)
         if image is None:
             return ""
         results = ocr.run_ocr(image)

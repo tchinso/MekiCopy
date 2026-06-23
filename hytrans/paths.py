@@ -5,6 +5,8 @@ from pathlib import Path
 
 from runtime_paths import writable_app_data_dir
 
+HYTRANS_MODEL_ID = "onnx-community/HY-MT1.5-1.8B-ONNX"
+
 
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
@@ -29,15 +31,38 @@ def assets_dir() -> Path:
     return resource_root() / "assets"
 
 
+def _model_root_has_hytrans_files(root: Path) -> bool:
+    model_root = root.joinpath(*HYTRANS_MODEL_ID.split("/"))
+    if not model_root.exists():
+        return False
+    return any(path.is_file() for path in model_root.rglob("*"))
+
+
+def _ensure_writable_directory(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write_test"
+        probe.write_text("ok", encoding="ascii")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def models_dir() -> Path:
     external = app_root() / "models"
-    try:
-        external.mkdir(parents=True, exist_ok=True)
-        return external
-    except OSError:
-        pass
+    stable = app_data_dir() / "models"
 
-    return resource_root() / "models"
+    if _model_root_has_hytrans_files(external):
+        return external
+    if _model_root_has_hytrans_files(stable):
+        return stable
+    if _ensure_writable_directory(stable):
+        return stable
+    if _ensure_writable_directory(external):
+        return external
+
+    return stable
 
 
 def app_data_dir() -> Path:
