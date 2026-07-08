@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -34,7 +35,13 @@ def _json_request(
         raw = response.read().decode("utf-8")
     if not raw:
         return {}
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        preview = raw[:200].replace("\n", " ").replace("\r", " ")
+        raise RuntimeError(
+            f"{url}에서 JSON이 아닌 응답을 받았습니다: {preview}"
+        ) from exc
 
 
 def _validate_service_health(expected_app: str, payload: dict) -> str:
@@ -67,6 +74,14 @@ def _probe_service(expected_app: str, base_url: str, timeout: float = 2.0) -> st
         suffix = f" ({detail})" if detail else ""
         raise RuntimeError(f"HYTrans 번역 모델이 준비되지 않았습니다: {worker_state}{suffix}")
     return str(ready.get("state") or "READY")
+
+
+def _is_loopback_port_open(port: int, timeout: float = 0.25) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def _validated_translation_text(payload: dict) -> str:

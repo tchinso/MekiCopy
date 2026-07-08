@@ -475,8 +475,18 @@ foreach ($runtimeStateName in @(
     }
 }
 
+$launcherPath = Join-Path $distRoot "Start-MekiCopy.bat"
+$launcherContent = @'
+@echo off
+setlocal
+cd /d "%~dp0MekiCopy"
+start "" "MekiCopy.exe"
+'@
+Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding ASCII
+
 Write-Host ""
 Write-Host "Build complete and verified:"
+Write-Host $launcherPath
 Write-Host $mekiCopyExe
 Write-Host $hyTransExe
 Write-Host $overlayerExe

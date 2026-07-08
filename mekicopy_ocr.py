@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import sys
 import tempfile
 import tkinter as tk
 from typing import Callable
@@ -30,6 +31,11 @@ from system_logging import log_error as _system_error
 
 _OCR_ENGINE = None
 _ORT_PRELOAD_READY = False
+CUDA_PROVIDER_REQUIRED_DLLS = (
+    "cublasLt64_13.dll",
+    "cublas64_13.dll",
+    "cudnn64_9.dll",
+)
 
 def postprocess_text(text: str) -> str:
     return " ".join(text.split())
@@ -78,12 +84,62 @@ def _patch_onnxruntime_compat() -> None:
         ort.set_default_logger_severity = _noop_set_default_logger_severity
 
 
+def _runtime_dll_search_dirs() -> list[str]:
+    directories = [
+        os.path.dirname(sys.executable),
+        _get_app_dir(),
+        _get_resource_dir(),
+    ]
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            directories.append(meipass)
+    directories.extend(os.environ.get("PATH", "").split(os.pathsep))
+    seen: set[str] = set()
+    result: list[str] = []
+    for directory in directories:
+        if not directory:
+            continue
+        normalized = os.path.normcase(os.path.abspath(directory))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(directory)
+    return result
+
+
+def _has_runtime_dll(filename: str) -> bool:
+    return any(
+        os.path.exists(os.path.join(directory, filename))
+        for directory in _runtime_dll_search_dirs()
+    )
+
+
+def _cuda_provider_looks_usable() -> bool:
+    if os.name != "nt":
+        return True
+    missing = [
+        filename
+        for filename in CUDA_PROVIDER_REQUIRED_DLLS
+        if not _has_runtime_dll(filename)
+    ]
+    if missing:
+        _log_runtime_message(
+            "cuda_provider_skipped",
+            "missing DLLs: " + ", ".join(missing),
+        )
+        return False
+    return True
+
+
 def _preload_onnxruntime_gpu_dlls() -> None:
     global _ORT_PRELOAD_READY
     if _ORT_PRELOAD_READY:
         return
 
     _ORT_PRELOAD_READY = True
+    if not _cuda_provider_looks_usable():
+        return
     try:
         import onnxruntime as ort
     except Exception as exc:
@@ -160,7 +216,7 @@ def _create_best_meikiocr_engine(meikiocr_ocr):
         "available_providers: " + ", ".join(available_providers),
     )
 
-    if "CUDAExecutionProvider" in available_providers:
+    if "CUDAExecutionProvider" in available_providers and _cuda_provider_looks_usable():
         try:
             return _create_meikiocr_engine(meikiocr_ocr, "CUDAExecutionProvider")
         except Exception as exc:

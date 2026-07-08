@@ -5,6 +5,7 @@ import ctypes
 import json
 import os
 import queue
+import socket
 import sys
 import threading
 import traceback
@@ -395,6 +396,17 @@ def run_server(app_ref: OverlayerApp, port: int) -> None:
     server.serve_forever()
 
 
+def ensure_port_available(port: int) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError as exc:
+            raise RuntimeError(
+                f"MekiOverlayer를 시작할 수 없습니다. 127.0.0.1:{port} 포트가 이미 사용 중입니다."
+            ) from exc
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MekiOverlayer")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -432,6 +444,7 @@ def main() -> int:
         debug_log=args.debug_log,
     )
     try:
+        ensure_port_available(args.port)
         root = tk.Tk()
         install_tk_exception_hook(root)
         apply_tk_icon(root)

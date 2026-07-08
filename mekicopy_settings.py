@@ -4,6 +4,7 @@ import configparser
 import ctypes
 import json
 import os
+import re
 import threading
 import tkinter as tk
 from ctypes import wintypes
@@ -23,6 +24,7 @@ from service_ports import (
 
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 KOREAN_FONT_TEST_CHARACTER = "쿈"
+HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 BOOKMARKS_FILE = os.path.join(_get_app_dir(), "bookmarks.txt")
 SETTINGS_FILE = os.path.join(_get_app_dir(), "settings.cfg")
 DETACHED_REGION_FILE = os.path.join(_get_app_dir(), "detached_button_region.json")
@@ -119,6 +121,15 @@ def _alternate_port(blocked_port: int) -> int:
 def _normalize_font_name(font_name: str) -> str:
     normalized = str(font_name).strip().lstrip("@").strip()
     return normalized or "Malgun Gothic"
+
+
+def _normalize_hex_color(value: object, fallback: str) -> str:
+    color = str(value or "").strip()
+    if HEX_COLOR_RE.match(color):
+        if len(color) == 4:
+            color = "#" + "".join(channel * 2 for channel in color[1:])
+        return color.lower()
+    return fallback
 
 
 def _font_has_character(font_name: str, character: str = KOREAN_FONT_TEST_CHARACTER) -> bool:
@@ -409,6 +420,14 @@ def load_settings() -> AppSettings:
         settings.audio_capture_port = AUDIO_CAPTURE_DEFAULT_PORT
         settings.script_port = SCRIPT_DEFAULT_PORT
     settings.overlayer_bg_opacity = max(0.1, min(1.0, settings.overlayer_bg_opacity))
+    settings.overlayer_bg_color = _normalize_hex_color(
+        settings.overlayer_bg_color,
+        AppSettings().overlayer_bg_color,
+    )
+    settings.overlayer_text_color = _normalize_hex_color(
+        settings.overlayer_text_color,
+        AppSettings().overlayer_text_color,
+    )
     settings.overlayer_text_size = max(8, min(96, settings.overlayer_text_size))
     settings.overlayer_text_font = _normalize_font_name(settings.overlayer_text_font)
     if settings.audio_stt_precision not in {"fp32", "int8"}:
@@ -416,6 +435,18 @@ def load_settings() -> AppSettings:
     if settings.audio_chunk_preset not in {"FAST", "BALANCED", "LONG"}:
         settings.audio_chunk_preset = "BALANCED"
     settings.script_bg_opacity = max(0.1, min(1.0, settings.script_bg_opacity))
+    settings.script_bg_color = _normalize_hex_color(
+        settings.script_bg_color,
+        AppSettings().script_bg_color,
+    )
+    settings.script_original_text_color = _normalize_hex_color(
+        settings.script_original_text_color,
+        AppSettings().script_original_text_color,
+    )
+    settings.script_translated_text_color = _normalize_hex_color(
+        settings.script_translated_text_color,
+        AppSettings().script_translated_text_color,
+    )
     settings.script_original_text_size = max(8, min(96, settings.script_original_text_size))
     settings.script_translated_text_size = max(8, min(96, settings.script_translated_text_size))
     settings.script_original_text_font = _normalize_font_name(settings.script_original_text_font)

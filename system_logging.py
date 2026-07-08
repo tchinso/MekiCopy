@@ -33,7 +33,14 @@ def suite_root() -> Path:
         return executable_dir
 
 
-def log_directory(kind: str) -> Path:
+def log_directory(kind: str, component: str | None = None) -> Path:
+    if getattr(sys, "frozen", False):
+        try:
+            from runtime_paths import log_dir
+
+            return log_dir(component or _component, kind)
+        except Exception:
+            pass
     directory = suite_root() / kind
     directory.mkdir(parents=True, exist_ok=True)
     return directory
@@ -69,7 +76,7 @@ def _append(kind: str, component: str, text: str) -> None:
     filename = f"{_safe_component_name(component).lower()}.log"
     payload = (text.rstrip() + "\n").encode("utf-8", errors="replace")
     try:
-        path = log_directory(kind) / filename
+        path = log_directory(kind, component) / filename
         with _write_lock, path.open("ab", buffering=0) as handle:
             handle.write(payload)
     except OSError:

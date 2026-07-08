@@ -72,6 +72,7 @@ from mekicopy_companions import (
     _find_detached_window,
     _find_magpie_executable,
     _install_latest_magpie,
+    _is_loopback_port_open,
     _is_process_alive,
     _json_request,
     _launch_detached_button_process,
@@ -109,6 +110,8 @@ from mekicopy_runtime import (
 from mekicopy_settings import (
     AppSettings,
     Bookmark,
+    DETACHED_GEOMETRY_FILE,
+    DETACHED_REGION_FILE,
     Rect,
     SETTINGS_FILE,
     _font_has_character,
@@ -123,6 +126,23 @@ from mekicopy_settings import (
     save_settings,
 )
 from mekicopy_settings_window import SettingsWindow
+from mekicopy_theme import (
+    BG,
+    BORDER,
+    BUTTON_FONT,
+    DEFAULT_FONT,
+    INK,
+    MUTED,
+    PINK,
+    ROSE,
+    RoundedButton,
+    SOFT,
+    SUCCESS,
+    SURFACE,
+    TITLE_FONT,
+    configure_window_theme,
+    style_tree,
+)
 from mekicopy_tray import WindowsTrayIcon
 from system_logging import (
     configure_system_logging,
@@ -131,7 +151,10 @@ from system_logging import (
     set_debug_enabled,
 )
 EDGE_GRAB_PX = 8
-OCR_BUTTON_HEIGHT_PX = 300
+MAIN_WINDOW_WIDTH = 520
+MAIN_WINDOW_HEIGHT = 440
+MAIN_TAB_BAR_WIDTH = 138
+OCR_BUTTON_HEIGHT_PX = 278
 SELECTION_INSTRUCTION_FONT_SIZE = 36
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 ICON_FILENAME = "MekiCopy.ico"
@@ -177,6 +200,7 @@ class DetachedOcrButtonApp:
         _set_app_user_model_id()
         _prepare_tk_library_paths()
         self.root = tk.Tk()
+        configure_window_theme(self.root)
         install_tk_exception_hook(self.root)
         self.settings = load_settings()
         self.root.title(DETACHED_WINDOW_TITLE)
@@ -190,11 +214,13 @@ class DetachedOcrButtonApp:
         self._geometry_after_id: str | None = None
         self._closing = False
 
-        self.button = tk.Button(
+        self.button = RoundedButton(
             self.root,
             text=self.ocr_action_label(),
             command=self._on_button_command,
-            font=("Segoe UI", 14, "bold"),
+            font=("Malgun Gothic", 14, "bold"),
+            variant="primary",
+            radius=22,
         )
         self.button.pack(fill=tk.BOTH, expand=True)
 
@@ -410,11 +436,11 @@ class DetachedOcrButtonApp:
         font_size = 72 if button.winfo_height() >= 220 else 42
         button.config(
             text="완료",
-            bg="#16a34a",
+            bg=SUCCESS,
             fg="white",
-            activebackground="#16a34a",
+            activebackground=SUCCESS,
             activeforeground="white",
-            font=("Segoe UI", font_size, "bold"),
+            font=("Malgun Gothic", font_size, "bold"),
         )
 
         def restore() -> None:
@@ -581,6 +607,7 @@ class MainWindow(tk.Tk):
         _set_app_user_model_id()
         _prepare_tk_library_paths()
         super().__init__()
+        configure_window_theme(self)
         install_tk_exception_hook(self)
         self.settings = load_settings()
         self.detached_process: subprocess.Popen | None = None
@@ -595,8 +622,9 @@ class MainWindow(tk.Tk):
         self.tray_icon = WindowsTrayIcon(self, "MekiCopy", self._restore_from_tray)
         self.title("MekiCopy")
         _set_window_icon(self)
-        self.geometry("460x400")
-        self.resizable(False, False)
+        self.geometry(f"{MAIN_WINDOW_WIDTH}x{MAIN_WINDOW_HEIGHT}")
+        self.minsize(500, 420)
+        self.resizable(True, True)
         self.draft_region: Region | None = None
         self.active_region: Region | None = None
         self.active_region_ratio: RegionRatio | None = None
@@ -610,37 +638,42 @@ class MainWindow(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
-        header = tk.Label(self, text="MekiCopy", font=("Segoe UI", 12, "bold"))
-        header.pack(pady=(2, 0))
+        header = tk.Label(
+            self,
+            text="MekiCopy",
+            font=TITLE_FONT,
+            bg=BG,
+            fg=ROSE,
+        )
+        header.pack(pady=(8, 2))
 
-        body = tk.Frame(self)
-        body.pack(padx=10, pady=(0, 7), fill=tk.BOTH, expand=True)
+        body = tk.Frame(self, bg=BG)
+        body.pack(padx=12, pady=(0, 12), fill=tk.BOTH, expand=True)
 
-        self.tab_buttons: dict[str, tk.Button] = {}
+        self.tab_buttons: dict[str, RoundedButton] = {}
         self.tab_frames: dict[str, tk.Frame] = {}
         self.active_tab_name = "영역"
 
-        tab_bar = tk.Frame(body, width=118)
-        tab_bar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        tab_bar = tk.Frame(body, width=MAIN_TAB_BAR_WIDTH, bg=BG)
+        tab_bar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 12))
         tab_bar.pack_propagate(False)
 
-        content = tk.Frame(body)
+        content = tk.Frame(body, bg=BG, highlightthickness=1, highlightbackground=BORDER)
         content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         for tab_name in ("영역", "캡쳐", "음성인식", "도구/설정", "행동"):
-            button = tk.Button(
+            button = RoundedButton(
                 tab_bar,
                 text=tab_name,
                 command=lambda name=tab_name: self._select_tab(name),
                 anchor="w",
-                padx=10,
-                pady=8,
-                relief=tk.FLAT,
+                height=40,
+                radius=18,
             )
             button.pack(fill=tk.X, pady=2)
             self.tab_buttons[tab_name] = button
 
-            frame = tk.Frame(content)
+            frame = tk.Frame(content, bg=SURFACE, padx=12, pady=12)
             self.tab_frames[tab_name] = frame
 
         self._build_region_tab(self.tab_frames["영역"])
@@ -649,11 +682,19 @@ class MainWindow(tk.Tk):
         self._build_tools_tab(self.tab_frames["도구/설정"])
         self._build_action_tab(self.tab_frames["행동"])
 
+        style_tree(self)
         self._select_tab(self.active_tab_name)
         self._update_status()
 
     def _build_region_tab(self, frame: tk.Frame) -> None:
-        self.status_label = tk.Label(frame, text="", justify="left", wraplength=300)
+        self.status_label = tk.Label(
+            frame,
+            text="",
+            justify="left",
+            wraplength=330,
+            bg=SURFACE,
+            fg=INK,
+        )
         self.status_label.pack(pady=(4, 12), fill=tk.X)
 
         buttons = [
@@ -671,8 +712,9 @@ class MainWindow(tk.Tk):
             frame,
             text=self.capture_status_text,
             justify="left",
-            wraplength=300,
-            fg="#1d4ed8",
+            wraplength=330,
+            bg=SURFACE,
+            fg=ROSE,
         )
         self.capture_status_label.pack(pady=(4, 12), fill=tk.X)
 
@@ -724,14 +766,16 @@ class MainWindow(tk.Tk):
             self._on_detach_ocr_button,
         )
 
-        ocr_button_frame = tk.Frame(frame, height=OCR_BUTTON_HEIGHT_PX)
+        ocr_button_frame = tk.Frame(frame, height=OCR_BUTTON_HEIGHT_PX, bg=SURFACE)
         ocr_button_frame.pack(fill=tk.X, pady=(10, 4))
         ocr_button_frame.pack_propagate(False)
-        self.ocr_button = tk.Button(
+        self.ocr_button = RoundedButton(
             ocr_button_frame,
             text="인식 후 복사",
             command=lambda: self._on_ocr_copy(source_button=self.ocr_button),
-            font=("Segoe UI", 14, "bold"),
+            font=("Malgun Gothic", 18, "bold"),
+            variant="primary",
+            radius=28,
         )
         self.ocr_button.pack(fill=tk.BOTH, expand=True)
 
@@ -740,8 +784,8 @@ class MainWindow(tk.Tk):
         frame: tk.Frame,
         text: str,
         command: Callable[[], None],
-    ) -> tk.Button:
-        button = tk.Button(frame, text=text, command=command, anchor="center")
+    ) -> RoundedButton:
+        button = RoundedButton(frame, text=text, command=command, anchor="center")
         button.pack(fill=tk.X, pady=4)
         return button
 
@@ -750,13 +794,14 @@ class MainWindow(tk.Tk):
         for tab_name, frame in self.tab_frames.items():
             if tab_name == name:
                 frame.pack(fill=tk.BOTH, expand=True)
+                frame.lift()
             else:
                 frame.pack_forget()
         for tab_name, button in self.tab_buttons.items():
             if tab_name == name:
-                button.config(relief=tk.SUNKEN, bg="#dbeafe")
+                button.config(bg=SURFACE, fg=ROSE, activebackground=SOFT)
             else:
-                button.config(relief=tk.FLAT, bg=self.cget("bg"))
+                button.config(bg=SOFT, fg=INK, activebackground=SURFACE)
 
     def ocr_action_label(self) -> str:
         if self.settings.overlay_translation_mode:
@@ -1107,6 +1152,66 @@ class MainWindow(tk.Tk):
     def _audio_capture_base_url(self) -> str:
         return f"http://127.0.0.1:{self.settings.audio_capture_port}"
 
+    def _warn_if_port_busy(self, app_name: str, port: int) -> bool:
+        if not _is_loopback_port_open(port):
+            return False
+        messagebox.showerror(
+            "MekiCopy",
+            (
+                f"{app_name}를 시작할 수 없습니다.\n\n"
+                f"127.0.0.1:{port} 포트가 이미 열려 있습니다. "
+                "이전 실행이 시작 중이면 잠시 뒤 연결 상태 확인을 눌러보고, "
+                "다른 프로그램이 사용 중이면 설정에서 포트를 바꿔주세요."
+            ),
+            parent=self,
+        )
+        return True
+
+    def _watch_started_process(
+        self,
+        app_name: str,
+        process: subprocess.Popen | None,
+        base_url: str | None = None,
+    ) -> None:
+        if process is None:
+            return
+
+        def check() -> None:
+            if self._closing:
+                return
+            if not _is_process_alive(process):
+                exit_code = process.poll()
+                _log_runtime_message(
+                    "companion_exited_after_start",
+                    f"{app_name} exit_code={exit_code}",
+                )
+                messagebox.showerror(
+                    "MekiCopy",
+                    (
+                        f"{app_name}가 시작 직후 종료되었습니다.\n\n"
+                        f"종료 코드: {exit_code}\n"
+                        "포트 충돌, 누락된 런타임, 손상된 설정이 원인일 수 있습니다. "
+                        "디버그 로그를 켜고 다시 실행하면 error_log/debug_log에 더 자세히 남습니다."
+                    ),
+                    parent=self,
+                )
+                return
+            if not base_url:
+                return
+            try:
+                health = _json_request(f"{base_url.rstrip('/')}/health", timeout=0.75)
+                _log_runtime_message(
+                    "companion_health_after_start",
+                    f"{app_name}: {health}",
+                )
+            except Exception as exc:
+                _log_runtime_message(
+                    "companion_health_pending",
+                    f"{app_name}: {exc}",
+                )
+
+        self.after(1600, check)
+
     def _script_config_payload(self) -> dict:
         return {
             "topmost": self.settings.script_always_on_top,
@@ -1183,7 +1288,8 @@ class MainWindow(tk.Tk):
             )
             return
         except Exception:
-            pass
+            if self._warn_if_port_busy("MekiScript", self.settings.script_port):
+                return
         command = _find_companion_executable("MekiScript", "meki_script.py")
         if not command:
             messagebox.showerror("MekiCopy", "MekiScript 실행 파일을 찾을 수 없습니다.", parent=self)
@@ -1206,6 +1312,11 @@ class MainWindow(tk.Tk):
         try:
             self.script_process = subprocess.Popen(command, cwd=_get_app_dir())
             _log_runtime_message("start_script", " ".join(command))
+            self._watch_started_process(
+                "MekiScript",
+                self.script_process,
+                self._script_base_url(),
+            )
             messagebox.showinfo("MekiCopy", "MekiScript를 실행했습니다.", parent=self)
         except Exception as exc:
             _log_runtime_error("start_script", exc)
@@ -1222,7 +1333,11 @@ class MainWindow(tk.Tk):
             )
             return
         except Exception:
-            pass
+            if self._warn_if_port_busy(
+                "MekiAudioCapture",
+                self.settings.audio_capture_port,
+            ):
+                return
         command = _find_companion_executable("MekiAudioCapture", "meki_audio_capture.py")
         if not command:
             messagebox.showerror("MekiCopy", "MekiAudioCapture 실행 파일을 찾을 수 없습니다.", parent=self)
@@ -1240,6 +1355,11 @@ class MainWindow(tk.Tk):
         try:
             self.audio_capture_process = subprocess.Popen(command, cwd=_get_app_dir())
             _log_runtime_message("start_audio_capture", " ".join(command))
+            self._watch_started_process(
+                "MekiAudioCapture",
+                self.audio_capture_process,
+                self._audio_capture_base_url(),
+            )
             messagebox.showinfo("MekiCopy", "MekiAudioCapture를 실행했습니다.", parent=self)
         except Exception as exc:
             _log_runtime_error("start_audio_capture", exc)
@@ -1326,7 +1446,8 @@ class MainWindow(tk.Tk):
             messagebox.showinfo("MekiCopy", "HYTrans 서버가 이미 실행 중입니다.", parent=self)
             return
         except Exception:
-            pass
+            if self._warn_if_port_busy("HYTrans", self.settings.hytrans_port):
+                return
 
         command = _find_companion_executable("HYTrans", "hytrans_main.py")
         if not command:
@@ -1352,6 +1473,11 @@ class MainWindow(tk.Tk):
                 startupinfo=_startupinfo_for_background(),
             )
             _log_runtime_message("start_hytrans", " ".join(command))
+            self._watch_started_process(
+                "HYTrans",
+                self.hytrans_process,
+                self._hytrans_base_url(),
+            )
             messagebox.showinfo("MekiCopy", "HYTrans 서버를 실행했습니다.", parent=self)
         except Exception as exc:
             _log_runtime_error("start_hytrans", exc)
@@ -1368,7 +1494,11 @@ class MainWindow(tk.Tk):
             )
             return
         except Exception:
-            pass
+            if self._warn_if_port_busy(
+                "MekiOverlayer",
+                self.settings.overlayer_port,
+            ):
+                return
 
         command = _find_companion_executable("MekiOverlayer", "meki_overlayer.py")
         if not command:
@@ -1411,6 +1541,11 @@ class MainWindow(tk.Tk):
                 startupinfo=None,
             )
             _log_runtime_message("start_overlayer", " ".join(command))
+            self._watch_started_process(
+                "MekiOverlayer",
+                self.overlayer_process,
+                self._overlayer_base_url(),
+            )
             messagebox.showinfo("MekiCopy", "MekiOverlayer를 실행했습니다.", parent=self)
         except Exception as exc:
             _log_runtime_error("start_overlayer", exc)
@@ -1558,11 +1693,11 @@ class MainWindow(tk.Tk):
         font_size = 72 if button.winfo_height() >= 220 else 42
         button.config(
             text="✓",
-            bg="#16a34a",
+            bg=SUCCESS,
             fg="white",
-            activebackground="#16a34a",
+            activebackground=SUCCESS,
             activeforeground="white",
-            font=("Segoe UI", font_size, "bold"),
+            font=("Malgun Gothic", font_size, "bold"),
         )
 
         def restore() -> None:
@@ -1854,15 +1989,45 @@ def run_tray_stress_self_test(cycles: int = 100) -> None:
                 pass
 
 
+def _snapshot_runtime_state(paths: tuple[str, ...]) -> dict[str, bytes | None]:
+    snapshot: dict[str, bytes | None] = {}
+    for path in paths:
+        try:
+            with open(path, "rb") as handle:
+                snapshot[path] = handle.read()
+        except FileNotFoundError:
+            snapshot[path] = None
+        except OSError as exc:
+            _log_runtime_error("snapshot_runtime_state", exc)
+            snapshot[path] = None
+    return snapshot
+
+
+def _restore_runtime_state(snapshot: dict[str, bytes | None]) -> None:
+    for path, payload in snapshot.items():
+        try:
+            if payload is None:
+                if os.path.exists(path):
+                    os.remove(path)
+                continue
+            with open(path, "wb") as handle:
+                handle.write(payload)
+        except OSError as exc:
+            _log_runtime_error("restore_runtime_state", exc)
+
+
 def run_ui_self_test() -> None:
     _log_runtime_message("self_test_ui", "starting")
     app: MainWindow | None = None
+    runtime_snapshot = _snapshot_runtime_state(
+        (SETTINGS_FILE, DETACHED_REGION_FILE, DETACHED_GEOMETRY_FILE)
+    )
     try:
         app = MainWindow()
         app.update_idletasks()
-        if app.winfo_height() != 400:
+        if app.winfo_height() != MAIN_WINDOW_HEIGHT:
             raise RuntimeError(
-                f"main window height is {app.winfo_height()}, expected 400"
+                f"main window height is {app.winfo_height()}, expected {MAIN_WINDOW_HEIGHT}"
             )
         expected_tabs = {"영역", "캡쳐", "음성인식", "도구/설정", "행동"}
         if set(app.tab_frames) != expected_tabs:
@@ -1976,6 +2141,7 @@ def run_ui_self_test() -> None:
         if app and app.winfo_exists():
             app.tray_icon.close()
             app.destroy()
+        _restore_runtime_state(runtime_snapshot)
 
 
 def main() -> None:

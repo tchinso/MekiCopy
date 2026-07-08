@@ -9,20 +9,80 @@ from mekicopy_settings import (
     _geometry_size,
     _japanese_font_families,
     _korean_font_families,
+    _normalize_hex_color,
     _normalize_font_name,
     _normalize_port,
     load_detached_geometry,
 )
 from service_ports import validate_unique_ports
+from mekicopy_theme import (
+    BG,
+    BORDER,
+    INK,
+    ROSE,
+    SOFT,
+    SURFACE,
+    configure_window_theme,
+    style_color_button,
+    style_standard_button,
+    style_tree,
+)
+
+
+class _ScrollableTab(tk.Frame):
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master, bg=BG)
+        self.canvas = tk.Canvas(
+            self,
+            bg=BG,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.scrollbar = ttk.Scrollbar(
+            self,
+            orient=tk.VERTICAL,
+            command=self.canvas.yview,
+        )
+        self.interior = tk.Frame(self.canvas, bg=BG, padx=12, pady=12)
+        self._window_id = self.canvas.create_window(
+            (0, 0),
+            window=self.interior,
+            anchor="nw",
+        )
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.interior.bind("<Configure>", self._on_interior_configure, add="+")
+        self.canvas.bind("<Configure>", self._on_canvas_configure, add="+")
+        self.canvas.bind("<Enter>", self._bind_mousewheel, add="+")
+        self.canvas.bind("<Leave>", self._unbind_mousewheel, add="+")
+
+    def _on_interior_configure(self, _event: tk.Event) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        self.canvas.itemconfigure(self._window_id, width=event.width)
+
+    def _bind_mousewheel(self, _event: tk.Event) -> None:
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+
+    def _unbind_mousewheel(self, _event: tk.Event) -> None:
+        self.canvas.unbind_all("<MouseWheel>")
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        if self.canvas.bbox("all") is None:
+            return
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
 class SettingsWindow(tk.Toplevel):
     def __init__(self, owner) -> None:
         super().__init__(owner)
         self.owner = owner
         self.title("MekiCopy 설정")
-        self.resizable(False, True)
-        self.geometry("540x690")
-        self.minsize(540, 560)
+        configure_window_theme(self)
+        self.resizable(True, True)
+        self._set_safe_geometry(580, 720)
+        self.minsize(560, 520)
         _set_window_icon(self)
 
         settings = owner.settings
@@ -85,18 +145,25 @@ class SettingsWindow(tk.Toplevel):
         self._update_mode_labels()
         self._update_overlay_controls()
 
+    def _set_safe_geometry(self, width: int, height: int) -> None:
+        safe_height = max(520, min(height, self.winfo_screenheight() - 90))
+        safe_width = max(560, min(width, self.winfo_screenwidth() - 80))
+        self.geometry(f"{safe_width}x{safe_height}")
+
+    def _add_scrollable_tab(self, notebook: ttk.Notebook, title: str) -> tk.Frame:
+        wrapper = _ScrollableTab(notebook)
+        notebook.add(wrapper, text=title)
+        return wrapper.interior
+
     def _build_ui(self) -> None:
-        body = tk.Frame(self, padx=14, pady=14)
+        body = tk.Frame(self, padx=14, pady=14, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
 
         notebook = ttk.Notebook(body)
         notebook.pack(fill=tk.BOTH, expand=True)
-        general_tab = tk.Frame(notebook, padx=12, pady=12)
-        overlay_tab = tk.Frame(notebook, padx=12, pady=12)
-        audio_tab = tk.Frame(notebook, padx=12, pady=12)
-        notebook.add(general_tab, text="일반")
-        notebook.add(overlay_tab, text="번역 오버레이")
-        notebook.add(audio_tab, text="음성인식")
+        general_tab = self._add_scrollable_tab(notebook, "일반")
+        overlay_tab = self._add_scrollable_tab(notebook, "번역 오버레이")
+        audio_tab = self._add_scrollable_tab(notebook, "음성인식")
 
         options = [
             (
@@ -375,12 +442,15 @@ class SettingsWindow(tk.Toplevel):
         translated_font_menu.config(width=20)
         translated_font_menu.pack(side=tk.RIGHT)
 
-        button_row = tk.Frame(body)
+        button_row = tk.Frame(body, bg=BG)
         button_row.pack(fill=tk.X, pady=(14, 0))
         save_button = tk.Button(button_row, text="저장", command=self._on_save)
         save_button.pack(side=tk.RIGHT, padx=(8, 0))
         close_button = tk.Button(button_row, text="닫기", command=self._on_close)
         close_button.pack(side=tk.RIGHT)
+        style_tree(self)
+        style_standard_button(save_button, "primary")
+        style_standard_button(close_button)
         self._refresh_color_buttons()
 
     def _choose_color(self, variable: tk.StringVar, button: tk.Button) -> None:
@@ -393,7 +463,7 @@ class SettingsWindow(tk.Toplevel):
     def _refresh_color_buttons(self) -> None:
         for button, variable in self._color_buttons:
             color = variable.get()
-            button.config(bg=color, activebackground=color)
+            style_color_button(button, color)
 
     def _mode_action_label(self) -> str:
         return "번역 후 표시" if self.overlay_mode_var.get() else "인식 후 복사"
@@ -425,6 +495,25 @@ class SettingsWindow(tk.Toplevel):
         except (tk.TclError, ValueError):
             raise ValueError(f"{label} 포트 번호는 1부터 65535 사이의 숫자여야 합니다.")
 
+    def _read_int_range(
+        self,
+        variable: tk.IntVar,
+        label: str,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        try:
+            value = int(variable.get())
+        except (tk.TclError, ValueError):
+            raise ValueError(f"{label} 값은 {minimum}부터 {maximum} 사이의 숫자여야 합니다.")
+        return max(minimum, min(maximum, value))
+
+    def _read_color(self, variable: tk.StringVar, label: str, fallback: str) -> str:
+        color = _normalize_hex_color(variable.get(), "")
+        if not color:
+            raise ValueError(f"{label} 색상은 #RRGGBB 형식이어야 합니다.")
+        return color
+
     def _collect_settings(self) -> AppSettings:
         current = self.owner.settings
         detached_geometry = load_detached_geometry(current.detached_geometry)
@@ -442,8 +531,11 @@ class SettingsWindow(tk.Toplevel):
                 "MekiScript": script_port,
             }
         )
-        opacity = max(0.1, min(1.0, self.overlayer_opacity_var.get() / 100.0))
-        text_size = max(8, min(96, int(self.overlayer_text_size_var.get())))
+        opacity = self._read_int_range(self.overlayer_opacity_var, "MekiOverlayer 배경 투명도", 10, 100) / 100.0
+        text_size = self._read_int_range(self.overlayer_text_size_var, "MekiOverlayer 글씨 크기", 8, 96)
+        script_opacity = self._read_int_range(self.script_opacity_var, "MekiScript 배경 투명도", 10, 100) / 100.0
+        script_original_size = self._read_int_range(self.script_original_size_var, "미번역 글씨 크기", 8, 96)
+        script_translated_size = self._read_int_range(self.script_translated_size_var, "번역 글씨 크기", 8, 96)
         return AppSettings(
             minimize_to_tray=self.minimize_to_tray_var.get(),
             main_always_on_top=self.main_topmost_var.get(),
@@ -463,9 +555,17 @@ class SettingsWindow(tk.Toplevel):
             overlayer_hide_titlebar=self.overlayer_hide_titlebar_var.get(),
             overlayer_fixed_size=self.overlayer_fixed_size_var.get(),
             overlayer_exclude_from_capture=self.overlayer_exclude_capture_var.get(),
-            overlayer_bg_color=self.overlayer_bg_color_var.get(),
+            overlayer_bg_color=self._read_color(
+                self.overlayer_bg_color_var,
+                "MekiOverlayer 배경",
+                current.overlayer_bg_color,
+            ),
             overlayer_bg_opacity=opacity,
-            overlayer_text_color=self.overlayer_text_color_var.get(),
+            overlayer_text_color=self._read_color(
+                self.overlayer_text_color_var,
+                "MekiOverlayer 글씨",
+                current.overlayer_text_color,
+            ),
             overlayer_text_size=text_size,
             overlayer_text_font=_normalize_font_name(self.overlayer_text_font_var.get()),
             audio_stt_precision=(
@@ -479,13 +579,25 @@ class SettingsWindow(tk.Toplevel):
                 else "BALANCED"
             ),
             script_always_on_top=self.script_topmost_var.get(),
-            script_bg_color=self.script_bg_color_var.get(),
-            script_bg_opacity=max(0.1, min(1.0, self.script_opacity_var.get() / 100.0)),
-            script_original_text_color=self.script_original_color_var.get(),
-            script_original_text_size=max(8, min(96, int(self.script_original_size_var.get()))),
+            script_bg_color=self._read_color(
+                self.script_bg_color_var,
+                "MekiScript 배경",
+                current.script_bg_color,
+            ),
+            script_bg_opacity=script_opacity,
+            script_original_text_color=self._read_color(
+                self.script_original_color_var,
+                "미번역 글씨",
+                current.script_original_text_color,
+            ),
+            script_original_text_size=script_original_size,
             script_original_text_font=_normalize_font_name(self.script_original_font_var.get()),
-            script_translated_text_color=self.script_translated_color_var.get(),
-            script_translated_text_size=max(8, min(96, int(self.script_translated_size_var.get()))),
+            script_translated_text_color=self._read_color(
+                self.script_translated_color_var,
+                "번역 글씨",
+                current.script_translated_text_color,
+            ),
+            script_translated_text_size=script_translated_size,
             script_translated_text_font=_normalize_font_name(self.script_translated_font_var.get()),
             suppress_magpie_launch_notice=self.suppress_magpie_notice_var.get(),
             debug_logging=self.debug_logging_var.get(),
