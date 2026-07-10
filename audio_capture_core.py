@@ -14,6 +14,8 @@ from typing import Callable, Iterable
 
 import numpy as np
 
+from runtime_paths import writable_app_data_dir
+
 
 INTERNAL_SAMPLE_RATE = 16_000
 CAPTURE_SAMPLE_RATE = 48_000
@@ -152,10 +154,40 @@ def translate_text(hytrans_url: str, text: str, timeout: float = 130.0) -> str:
 
 def model_root_candidates(application_dir: Path, resource_dir: Path) -> list[Path]:
     del resource_dir
-    # In a frozen build application_dir is the MekiAudioCapture executable
-    # folder, so this is always MekiAudioCapture/models. Models deliberately
-    # live outside PyInstaller's _internal resource directory.
-    return [application_dir / "models"]
+    # Keep portable/prepared models beside the executable first, but never
+    # require write access there. Program Files and protected folders need a
+    # per-user cache for first-run downloads.
+    candidates = [
+        application_dir / "models",
+        writable_app_data_dir("MekiAudioCapture") / "models",
+    ]
+    seen: set[str] = set()
+    result: list[Path] = []
+    for root in candidates:
+        key = os.path.normcase(str(root))
+        if key not in seen:
+            seen.add(key)
+            result.append(root)
+    return result
+
+
+def _select_writable_model_root(candidates: list[Path]) -> Path:
+    failures: list[str] = []
+    for root in candidates:
+        probe = root / f".write-test-{os.getpid()}"
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            probe.write_text("ok", encoding="ascii")
+            probe.unlink(missing_ok=True)
+            return root
+        except OSError as exc:
+            failures.append(f"{root}: {exc}")
+            try:
+                probe.unlink(missing_ok=True)
+            except OSError:
+                pass
+    detail = "\n".join(failures)
+    raise PermissionError(f"No writable speech-model directory is available.\n{detail}")
 
 
 def _model_paths(root: Path, precision: str) -> dict[str, Path]:
@@ -277,7 +309,9 @@ def ensure_models(
     except FileNotFoundError:
         pass
 
-    root = model_root_candidates(application_dir, resource_dir)[0]
+    root = _select_writable_model_root(
+        model_root_candidates(application_dir, resource_dir)
+    )
     speech_dir = root / "reazonspeech-ja"
     vad_file = root / "vad" / "silero_vad.onnx"
     try:

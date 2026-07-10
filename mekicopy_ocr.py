@@ -3,7 +3,7 @@ from __future__ import annotations
 import configparser
 import os
 import sys
-import tempfile
+import threading
 import tkinter as tk
 from typing import Callable
 from tkinter import messagebox
@@ -31,6 +31,8 @@ from system_logging import log_error as _system_error
 
 _OCR_ENGINE = None
 _ORT_PRELOAD_READY = False
+_OCR_ENGINE_LOCK = threading.Lock()
+_OCR_RUN_LOCK = threading.Lock()
 CUDA_PROVIDER_REQUIRED_DLLS = (
     "cublasLt64_13.dll",
     "cublas64_13.dll",
@@ -46,7 +48,7 @@ def _is_debug_logging_enabled() -> bool:
     try:
         parser.read(SETTINGS_FILE, encoding="utf-8")
         return parser.getboolean("settings", "debug_logging", fallback=False)
-    except configparser.Error:
+    except (configparser.Error, TypeError, ValueError, OSError):
         return False
 
 
@@ -227,45 +229,47 @@ def _create_best_meikiocr_engine(meikiocr_ocr):
 
 def _get_ocr_engine():
     global _OCR_ENGINE
-    if _OCR_ENGINE is not None:
+    with _OCR_ENGINE_LOCK:
+        if _OCR_ENGINE is not None:
+            return _OCR_ENGINE
+
+        _prepare_windowed_streams()
+        _prepare_native_runtime_paths()
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        os.environ.setdefault("TQDM_DISABLE", "1")
+        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+        _patch_onnxruntime_compat()
+        _preload_onnxruntime_gpu_dlls()
+        import meikiocr.ocr as meikiocr_ocr
+
+        _patch_meikiocr_model_loader(meikiocr_ocr)
+        _OCR_ENGINE = _create_best_meikiocr_engine(meikiocr_ocr)
         return _OCR_ENGINE
 
-    _prepare_windowed_streams()
-    _prepare_native_runtime_paths()
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    os.environ.setdefault("TQDM_DISABLE", "1")
-    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-    _patch_onnxruntime_compat()
-    _preload_onnxruntime_gpu_dlls()
-    import meikiocr.ocr as meikiocr_ocr
 
-    _patch_meikiocr_model_loader(meikiocr_ocr)
-    _OCR_ENGINE = _create_best_meikiocr_engine(meikiocr_ocr)
-    return _OCR_ENGINE
+class OcrError(RuntimeError):
+    """A recoverable OCR engine or input failure."""
 
 
-def run_meikiocr(image_path: str) -> str:
+def recognize_image(image: Image.Image) -> str:
+    """Run OCR on a captured image without touching Tk or temporary files."""
     try:
         _prepare_native_runtime_paths()
-        import cv2
         import numpy as np
 
-        ocr = _get_ocr_engine()
-        image = None
-        try:
-            image_data = np.fromfile(image_path, dtype=np.uint8)
-            if image_data.size:
-                image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
-        except Exception as exc:
-            _log_runtime_error("read_image_unicode_path", exc)
-        if image is None:
-            image = cv2.imread(image_path, cv2.IMREAD_COLOR)
-        if image is None:
-            return ""
-        results = ocr.run_ocr(image)
+        rgb_image = image.convert("RGB")
+        # OpenCV/MeikiOCR receive BGR data when they load an image file. Keep
+        # that channel order while avoiding fragile temporary Unicode paths.
+        image_data = np.asarray(rgb_image)[:, :, ::-1].copy()
+        if image_data.size == 0:
+            raise OcrError("captured image is empty")
+        with _OCR_RUN_LOCK:
+            results = _get_ocr_engine().run_ocr(image_data)
+    except OcrError:
+        raise
     except Exception as exc:
-        _log_runtime_error("run_meikiocr", exc)
-        return postprocess_text(str(exc))
+        _log_runtime_error("recognize_image", exc)
+        raise OcrError(str(exc) or type(exc).__name__) from exc
 
     output_lines = []
     for line in results:
@@ -275,10 +279,36 @@ def run_meikiocr(image_path: str) -> str:
     return postprocess_text("\n".join(output_lines))
 
 
+def run_meikiocr(image_path: str) -> str:
+    try:
+        with Image.open(image_path) as source:
+            return recognize_image(source)
+    except OcrError:
+        raise
+    except Exception as exc:
+        _log_runtime_error("run_meikiocr", exc)
+        raise OcrError(str(exc) or type(exc).__name__) from exc
+
+
 def capture_region(left: int, top: int, width: int, height: int) -> Image.Image:
     result = capture_region_result(left, top, width, height)
     if result.image is None:
         raise RuntimeError(_capture_problem_message(result))
+    return result.image
+
+
+def capture_ocr_image(left: int, top: int, width: int, height: int) -> Image.Image:
+    """Capture a valid OCR frame without presenting a Tk dialog."""
+    if width < MIN_SIZE_PX or height < MIN_SIZE_PX:
+        raise OcrError("OCR capture region is too small")
+    result = capture_region_result(left, top, width, height)
+    if result.status in (
+        CaptureStatus.REGION_OUT_OF_BOUNDS,
+        CaptureStatus.BLACK_FRAME_SUSPECTED,
+        CaptureStatus.CAPTURE_EXCEPTION,
+        CaptureStatus.SIZE_MISMATCH,
+    ) or result.image is None:
+        raise OcrError(_capture_problem_message(result))
     return result.image
 
 
@@ -326,18 +356,11 @@ def ocr_region(
     if result.image is None:
         messagebox.showwarning("MekiCopy", _capture_problem_message(result), parent=parent)
         return None
-    image = result.image
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
-        temp_path = temp_file.name
-        image.save(temp_path)
     try:
-        text = run_meikiocr(temp_path)
-    finally:
-        try:
-            os.remove(temp_path)
-        except OSError:
-            pass
-    return text
+        return recognize_image(result.image)
+    except OcrError as exc:
+        messagebox.showerror("MekiCopy", f"OCR ?ㅽ뻾 ?ㅽ뙣:\n{exc}", parent=parent)
+        return None
 
 
 def ocr_and_copy(

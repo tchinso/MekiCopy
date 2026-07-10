@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import configparser
 import ctypes
+import io
 import json
+import math
 import os
 import re
+import shutil
 import threading
 import tkinter as tk
+import uuid
 from ctypes import wintypes
 from dataclasses import dataclass
+from pathlib import Path
 from tkinter import font as tkfont
 
 from mekicopy_capture import MIN_SIZE_PX, Region
 from mekicopy_runtime import _get_app_dir
+from runtime_paths import exclusive_file_lock, state_data_dir
 from service_ports import (
     AUDIO_CAPTURE_DEFAULT_PORT,
     HYTRANS_DEFAULT_PORT,
@@ -25,10 +31,100 @@ from service_ports import (
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 KOREAN_FONT_TEST_CHARACTER = "쿈"
 HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
-BOOKMARKS_FILE = os.path.join(_get_app_dir(), "bookmarks.txt")
-SETTINGS_FILE = os.path.join(_get_app_dir(), "settings.cfg")
-DETACHED_REGION_FILE = os.path.join(_get_app_dir(), "detached_button_region.json")
-DETACHED_GEOMETRY_FILE = os.path.join(_get_app_dir(), "detached_button_geometry.json")
+_STATE_FILENAMES = (
+    "bookmarks.txt",
+    "settings.cfg",
+    "detached_button_region.json",
+    "detached_button_geometry.json",
+)
+_STATE_MIGRATION_MARKER = ".state_migration_v1"
+_STATE_MIGRATION_THREAD_LOCK = threading.RLock()
+
+
+def _same_path(first: Path, second: Path) -> bool:
+    try:
+        return first.resolve() == second.resolve()
+    except OSError:
+        return os.path.normcase(str(first)) == os.path.normcase(str(second))
+
+
+def _write_text_atomic(path: str | Path, text: str) -> bool:
+    """Durably replace a small text file without propagating filesystem errors."""
+    destination = Path(path)
+    temporary = destination.with_name(
+        f"{destination.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with temporary.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        return True
+    except (OSError, UnicodeError):
+        return False
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _atomic_copy(source: Path, destination: Path) -> bool:
+    """Copy an existing legacy state file without exposing a partial target."""
+    temporary = destination.with_name(
+        f"{destination.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _migrate_legacy_state_files(legacy_dir: Path, destination_dir: Path) -> None:
+    """Copy executable-side state once into the writable persistent folder."""
+    if _same_path(legacy_dir, destination_dir):
+        return
+    try:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        marker = destination_dir / _STATE_MIGRATION_MARKER
+        with _STATE_MIGRATION_THREAD_LOCK, exclusive_file_lock(
+            destination_dir / ".state_migration.lock"
+        ):
+            if marker.is_file():
+                return
+            for filename in _STATE_FILENAMES:
+                source = legacy_dir / filename
+                destination = destination_dir / filename
+                if destination.exists() or not source.is_file():
+                    continue
+                _atomic_copy(source, destination)
+            _write_text_atomic(marker, "migrated\n")
+    except OSError:
+        # Migration is best effort.  Save APIs below remain safe in restrictive
+        # environments, and a later launch may retry if no marker was written.
+        return
+
+
+def _initialize_state_directory() -> Path:
+    destination = state_data_dir("MekiCopy")
+    _migrate_legacy_state_files(Path(_get_app_dir()), destination)
+    return destination
+
+
+STATE_DIR = _initialize_state_directory()
+BOOKMARKS_FILE = str(STATE_DIR / "bookmarks.txt")
+SETTINGS_FILE = str(STATE_DIR / "settings.cfg")
+DETACHED_REGION_FILE = str(STATE_DIR / "detached_button_region.json")
+DETACHED_GEOMETRY_FILE = str(STATE_DIR / "detached_button_geometry.json")
 
 @dataclass
 class Rect:
@@ -251,12 +347,59 @@ def _japanese_font_families(root: tk.Misc) -> list[str]:
     return [name for name in font_names if _font_has_character(name, "ー")]
 
 
+_CONFIG_UNSET = configparser._UNSET
+
+
+class _SafeConfigParser(configparser.ConfigParser):
+    """ConfigParser variant that preserves usable settings around bad values."""
+
+    @staticmethod
+    def _fallback_or_raise(fallback: object, exc: Exception) -> object:
+        if fallback is not _CONFIG_UNSET:
+            return fallback
+        raise exc
+
+    def get(self, section, option, *, raw=False, vars=None, fallback=_CONFIG_UNSET):
+        try:
+            return super().get(section, option, raw=raw, vars=vars, fallback=fallback)
+        except (configparser.Error, TypeError, ValueError) as exc:
+            return self._fallback_or_raise(fallback, exc)
+
+    def getboolean(self, section, option, *, raw=False, vars=None, fallback=_CONFIG_UNSET):
+        try:
+            return super().getboolean(section, option, raw=raw, vars=vars, fallback=fallback)
+        except (configparser.Error, TypeError, ValueError) as exc:
+            return self._fallback_or_raise(fallback, exc)
+
+    def getint(self, section, option, *, raw=False, vars=None, fallback=_CONFIG_UNSET):
+        try:
+            return super().getint(section, option, raw=raw, vars=vars, fallback=fallback)
+        except (configparser.Error, TypeError, ValueError) as exc:
+            return self._fallback_or_raise(fallback, exc)
+
+    def getfloat(self, section, option, *, raw=False, vars=None, fallback=_CONFIG_UNSET):
+        try:
+            return super().getfloat(section, option, raw=raw, vars=vars, fallback=fallback)
+        except (configparser.Error, TypeError, ValueError) as exc:
+            return self._fallback_or_raise(fallback, exc)
+
+
+def _bounded_float(value: object, fallback: float, minimum: float, maximum: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(number):
+        return fallback
+    return max(minimum, min(maximum, number))
+
+
 def load_settings() -> AppSettings:
     settings = AppSettings()
-    parser = configparser.ConfigParser()
+    parser = _SafeConfigParser()
     try:
         parser.read(SETTINGS_FILE, encoding="utf-8")
-    except configparser.Error:
+    except (OSError, UnicodeError, configparser.Error):
         return settings
 
     section = "settings"
@@ -419,7 +562,12 @@ def load_settings() -> AppSettings:
         settings.overlayer_port = OVERLAYER_DEFAULT_PORT
         settings.audio_capture_port = AUDIO_CAPTURE_DEFAULT_PORT
         settings.script_port = SCRIPT_DEFAULT_PORT
-    settings.overlayer_bg_opacity = max(0.1, min(1.0, settings.overlayer_bg_opacity))
+    settings.overlayer_bg_opacity = _bounded_float(
+        settings.overlayer_bg_opacity,
+        AppSettings().overlayer_bg_opacity,
+        0.1,
+        1.0,
+    )
     settings.overlayer_bg_color = _normalize_hex_color(
         settings.overlayer_bg_color,
         AppSettings().overlayer_bg_color,
@@ -434,7 +582,12 @@ def load_settings() -> AppSettings:
         settings.audio_stt_precision = "fp32"
     if settings.audio_chunk_preset not in {"FAST", "BALANCED", "LONG"}:
         settings.audio_chunk_preset = "BALANCED"
-    settings.script_bg_opacity = max(0.1, min(1.0, settings.script_bg_opacity))
+    settings.script_bg_opacity = _bounded_float(
+        settings.script_bg_opacity,
+        AppSettings().script_bg_opacity,
+        0.1,
+        1.0,
+    )
     settings.script_bg_color = _normalize_hex_color(
         settings.script_bg_color,
         AppSettings().script_bg_color,
@@ -454,7 +607,7 @@ def load_settings() -> AppSettings:
     return settings
 
 
-def save_settings(settings: AppSettings) -> None:
+def save_settings(settings: AppSettings) -> bool:
     parser = configparser.ConfigParser()
     parser["settings"] = {
         "service_ports_version": "2",
@@ -499,39 +652,24 @@ def save_settings(settings: AppSettings) -> None:
         ).lower(),
         "debug_logging": str(settings.debug_logging).lower(),
     }
-    temp_path = f"{SETTINGS_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
+    output = io.StringIO()
     try:
-        with open(temp_path, "w", encoding="utf-8") as handle:
-            parser.write(handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, SETTINGS_FILE)
-    finally:
-        try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except OSError:
-            pass
+        parser.write(output)
+    except (TypeError, ValueError):
+        return False
+    return _write_text_atomic(SETTINGS_FILE, output.getvalue())
 
 
-def _write_json_atomic(path: str, payload: dict) -> None:
-    temp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+def _write_json_atomic(path: str, payload: dict) -> bool:
     try:
-        with open(temp_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, path)
-    finally:
-        try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except OSError:
-            pass
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        return False
+    return _write_text_atomic(path, text)
 
 
-def save_detached_region(region: Region) -> None:
-    _write_json_atomic(
+def save_detached_region(region: Region) -> bool:
+    return _write_json_atomic(
         DETACHED_REGION_FILE,
         {
             "version": 1,
@@ -560,8 +698,8 @@ def load_detached_region() -> Region | None:
         return None
 
 
-def save_detached_geometry(geometry: str) -> None:
-    _write_json_atomic(
+def save_detached_geometry(geometry: str) -> bool:
+    return _write_json_atomic(
         DETACHED_GEOMETRY_FILE,
         {"version": 1, "geometry": str(geometry)},
     )
@@ -590,34 +728,39 @@ def _geometry_size(geometry: str) -> tuple[int, int] | None:
 
 def load_bookmarks() -> dict[str, Bookmark]:
     bookmarks: dict[str, Bookmark] = {}
-    if not os.path.exists(BOOKMARKS_FILE):
-        return bookmarks
-    with open(BOOKMARKS_FILE, "r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t")
-            if len(parts) != 5:
-                continue
-            name, left, top, width, height = parts
-            try:
-                bookmarks[name] = Bookmark(
-                    name=name,
-                    left=int(left),
-                    top=int(top),
-                    width=int(width),
-                    height=int(height),
-                )
-            except ValueError:
-                continue
+    try:
+        with open(BOOKMARKS_FILE, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split("\t")
+                if len(parts) != 5:
+                    continue
+                name, left, top, width, height = parts
+                try:
+                    bookmarks[name] = Bookmark(
+                        name=name,
+                        left=int(left),
+                        top=int(top),
+                        width=int(width),
+                        height=int(height),
+                    )
+                except ValueError:
+                    continue
+    except (OSError, UnicodeError):
+        return {}
     return bookmarks
 
 
-def save_bookmarks(bookmarks: dict[str, Bookmark]) -> None:
-    with open(BOOKMARKS_FILE, "w", encoding="utf-8") as handle:
+def save_bookmarks(bookmarks: dict[str, Bookmark]) -> bool:
+    lines: list[str] = []
+    try:
         for name in sorted(bookmarks):
             bookmark = bookmarks[name]
-            handle.write(
+            lines.append(
                 f"{bookmark.name}\t{bookmark.left}\t{bookmark.top}\t{bookmark.width}\t{bookmark.height}\n"
             )
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return _write_text_atomic(BOOKMARKS_FILE, "".join(lines))

@@ -6,10 +6,15 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 DATA_DIR_ENV = "MEKICOPY_DATA_DIR"
 _DATA_DIR_CACHE: dict[str, Path] = {}
+_TK_RUNTIME_SYNC_LOCK = threading.RLock()
 
 
 def app_root() -> Path:
@@ -131,10 +136,83 @@ def writable_app_data_dir(app_name: str) -> Path:
     return fallback
 
 
+def state_data_dir(app_name: str = "MekiCopy") -> Path:
+    """Return the durable directory used for user-editable application state.
+
+    Source runs keep their checked-out settings beside the source files.  Frozen
+    releases instead use a writable per-user location, so installing below
+    Program Files or another read-only directory cannot prevent clean shutdown
+    or saving settings.  ``MEKICOPY_DATA_DIR`` intentionally opts into the same
+    durable-location behavior for development and test runs.
+    """
+    if getattr(sys, "frozen", False) or os.environ.get(DATA_DIR_ENV):
+        return writable_app_data_dir(app_name)
+    return app_root()
+
+
 def log_dir(app_name: str, kind: str) -> Path:
     directory = writable_app_data_dir(app_name) / kind
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+@contextmanager
+def exclusive_file_lock(path: str | Path, timeout: float = 30.0) -> Iterator[None]:
+    """Acquire a small cross-process lock file.
+
+    Tcl/Tk's script folders are copied lazily when the executable lives below a
+    non-ASCII path.  Several companion executables can start simultaneously,
+    so a process-local lock alone is insufficient.  The lock is released by
+    the operating system if a process exits unexpectedly; the lock file itself
+    is deliberately retained and harmless.
+    """
+    lock_path = Path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + max(0.0, timeout)
+
+    with lock_path.open("a+b") as handle:
+        # msvcrt.locking locks the byte at the current file position.  Ensure
+        # that byte exists before trying to lock it.
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+
+        locked = False
+        while not locked:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for lock: {lock_path}") from None
+                time.sleep(0.05)
+
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                # The operating system will release a process-owned lock on
+                # close even if an explicit unlock fails.
+                pass
 
 
 def tk_runtime_roots(runtime_dirname: str) -> list[Path]:
@@ -173,22 +251,38 @@ def sync_tk_runtime(
         digest.update(script.read_bytes())
     expected_signature = digest.hexdigest()
 
-    current_signature = ""
-    try:
-        current_signature = marker.read_text(encoding="ascii").strip()
-    except OSError:
-        pass
+    # Copying both script trees must be a single transaction from every
+    # companion process's perspective.  Without this lock, two frozen
+    # executables can interleave ``copytree`` calls and leave Tcl seeing a
+    # half-populated directory on startup.
+    target_root_path.mkdir(parents=True, exist_ok=True)
+    lock_path = target_root_path / ".runtime_sync.lock"
+    with _TK_RUNTIME_SYNC_LOCK, exclusive_file_lock(lock_path):
+        current_signature = ""
+        try:
+            current_signature = marker.read_text(encoding="ascii").strip()
+        except OSError:
+            pass
 
-    runtime_is_current = (
-        current_signature == expected_signature
-        and (target_tcl / "init.tcl").is_file()
-        and (target_tk / "tk.tcl").is_file()
-    )
-    if not runtime_is_current:
-        target_root_path.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_tcl_path, target_tcl, dirs_exist_ok=True)
-        shutil.copytree(source_tk_path, target_tk, dirs_exist_ok=True)
-        marker.write_text(expected_signature, encoding="ascii")
+        runtime_is_current = (
+            current_signature == expected_signature
+            and (target_tcl / "init.tcl").is_file()
+            and (target_tk / "tk.tcl").is_file()
+        )
+        if not runtime_is_current:
+            shutil.copytree(source_tcl_path, target_tcl, dirs_exist_ok=True)
+            shutil.copytree(source_tk_path, target_tk, dirs_exist_ok=True)
+            temporary_marker = marker.with_name(
+                f"{marker.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+            )
+            try:
+                temporary_marker.write_text(expected_signature, encoding="ascii")
+                os.replace(temporary_marker, marker)
+            finally:
+                try:
+                    temporary_marker.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     return target_tcl, target_tk
 

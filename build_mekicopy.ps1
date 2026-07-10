@@ -149,6 +149,122 @@ function Remove-WorkspaceDirectory {
     }
 }
 
+function Assert-ArtifactFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$AppRoot,
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $path = Join-Path $AppRoot $RelativePath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Required $Description is missing: $path"
+    }
+}
+
+function Assert-ArtifactPattern {
+    param(
+        [Parameter(Mandatory = $true)][string]$AppRoot,
+        [Parameter(Mandatory = $true)][string]$RelativeDirectory,
+        [Parameter(Mandatory = $true)][string]$FilePattern,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $directory = Join-Path $AppRoot $RelativeDirectory
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        throw "Required artifact directory for $Description is missing: $directory"
+    }
+
+    $matches = @(
+        Get-ChildItem `
+            -LiteralPath $directory `
+            -Filter $FilePattern `
+            -File `
+            -ErrorAction Stop
+    )
+    if ($matches.Count -eq 0) {
+        throw "Required $Description matching '$FilePattern' is missing from: $directory"
+    }
+}
+
+function Assert-BundledPythonRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$AppRoot,
+        [Parameter(Mandatory = $true)][string]$AppName
+    )
+
+    Assert-ArtifactPattern `
+        -AppRoot $AppRoot `
+        -RelativeDirectory "_internal" `
+        -FilePattern "python*.dll" `
+        -Description "$AppName bundled Python runtime"
+}
+
+function Assert-TkRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$AppRoot,
+        [Parameter(Mandatory = $true)][string]$AppName
+    )
+
+    Assert-ArtifactPattern `
+        -AppRoot $AppRoot `
+        -RelativeDirectory "_internal" `
+        -FilePattern "_tkinter*.pyd" `
+        -Description "$AppName Tk extension"
+    Assert-ArtifactFile `
+        -AppRoot $AppRoot `
+        -RelativePath "_internal\tcl86t.dll" `
+        -Description "$AppName Tcl runtime"
+    Assert-ArtifactFile `
+        -AppRoot $AppRoot `
+        -RelativePath "_internal\tk86t.dll" `
+        -Description "$AppName Tk runtime"
+    Assert-ArtifactFile `
+        -AppRoot $AppRoot `
+        -RelativePath "_internal\_tcl_data\init.tcl" `
+        -Description "$AppName Tcl script library"
+    Assert-ArtifactFile `
+        -AppRoot $AppRoot `
+        -RelativePath "_internal\_tk_data\tk.tcl" `
+        -Description "$AppName Tk script library"
+}
+
+function New-ReleaseZip {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$ArchivePath
+    )
+
+    # Windows 10 includes bsdtar. Use its ZIP writer rather than
+    # Compress-Archive so large optional model files remain packageable.
+    $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
+    if (-not $tar -or -not $tar.Source) {
+        throw "tar.exe is required to create the release ZIP. Use Windows 10 or newer."
+    }
+
+    if (Test-Path -LiteralPath $ArchivePath) {
+        if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
+            throw "Release archive path is not a file: $ArchivePath"
+        }
+        Remove-Item -LiteralPath $ArchivePath -Force
+    }
+
+    $parent = Split-Path -Parent $SourceRoot
+    $directoryName = Split-Path -Leaf $SourceRoot
+    if (-not $parent -or -not $directoryName) {
+        throw "Cannot determine archive root for: $SourceRoot"
+    }
+
+    & $tar.Source --format=zip -c -f $ArchivePath -C $parent $directoryName
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar.exe failed while creating release ZIP: $ArchivePath"
+    }
+    if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf) -or
+        (Get-Item -LiteralPath $ArchivePath).Length -le 0) {
+        throw "Release ZIP was not created: $ArchivePath"
+    }
+}
+
 function Invoke-ExeSmokeTest {
     param(
         [Parameter(Mandatory = $true)][string]$ExePath,
@@ -370,21 +486,78 @@ $hyTransExe = Join-Path $distRoot "HYTrans\HYTrans.exe"
 $overlayerExe = Join-Path $distRoot "MekiDisplay\MekiOverlayer.exe"
 $scriptExe = Join-Path $distRoot "MekiDisplay\MekiScript.exe"
 $audioCaptureExe = Join-Path $distRoot "MekiAudioCapture\MekiAudioCapture.exe"
+$mekiCopyRoot = Split-Path -Parent $mekiCopyExe
+$hyTransRoot = Split-Path -Parent $hyTransExe
+$displayRoot = Split-Path -Parent $overlayerExe
+$audioCaptureRoot = Split-Path -Parent $audioCaptureExe
 $expectedExecutables = @($mekiCopyExe, $hyTransExe, $overlayerExe, $scriptExe, $audioCaptureExe)
 foreach ($exe in $expectedExecutables) {
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
         throw "Expected executable was not created: $exe"
     }
-    $pythonDll = Get-ChildItem `
-        -LiteralPath (Split-Path -Parent $exe) `
-        -Recurse `
-        -Filter "python*.dll" `
-        -File |
-        Select-Object -First 1
-    if (-not $pythonDll) {
-        throw "Bundled Python DLL was not found beside: $exe"
-    }
+    Assert-BundledPythonRuntime `
+        -AppRoot (Split-Path -Parent $exe) `
+        -AppName ([System.IO.Path]::GetFileNameWithoutExtension($exe))
 }
+
+# Validate the runtime resources that a successful PyInstaller command alone
+# cannot guarantee: Tk for GUI companions, native OCR, native STT, and the
+# HYTrans browser-worker assets.
+Assert-TkRuntime -AppRoot $mekiCopyRoot -AppName "MekiCopy"
+Assert-TkRuntime -AppRoot $displayRoot -AppName "MekiDisplay"
+Assert-TkRuntime -AppRoot $audioCaptureRoot -AppName "MekiAudioCapture"
+
+Assert-ArtifactPattern `
+    -AppRoot $mekiCopyRoot `
+    -RelativeDirectory "_internal\cv2" `
+    -FilePattern "cv2*.pyd" `
+    -Description "MekiCopy OpenCV native extension"
+Assert-ArtifactFile `
+    -AppRoot $mekiCopyRoot `
+    -RelativePath "_internal\onnxruntime\capi\onnxruntime.dll" `
+    -Description "MekiCopy ONNX Runtime core"
+Assert-ArtifactPattern `
+    -AppRoot $mekiCopyRoot `
+    -RelativeDirectory "_internal\onnxruntime\capi" `
+    -FilePattern "onnxruntime_pybind11_state*.pyd" `
+    -Description "MekiCopy ONNX Runtime Python extension"
+foreach ($ocrModel in @(
+    "meiki.text.detect.v0.1.960x544.onnx",
+    "meiki.text.rec.v0.960x32.onnx",
+    "meiki.text.rec.v0.vertical.32x480.onnx"
+)) {
+    Assert-ArtifactFile `
+        -AppRoot $mekiCopyRoot `
+        -RelativePath (Join-Path "_internal\runtime_models\meikiocr" $ocrModel) `
+        -Description "MekiCopy bundled OCR model"
+}
+
+Assert-ArtifactFile `
+    -AppRoot $audioCaptureRoot `
+    -RelativePath "_internal\sherpa_onnx\lib\onnxruntime.dll" `
+    -Description "MekiAudioCapture ONNX Runtime"
+Assert-ArtifactFile `
+    -AppRoot $audioCaptureRoot `
+    -RelativePath "_internal\sherpa_onnx\lib\sherpa-onnx-c-api.dll" `
+    -Description "MekiAudioCapture sherpa-onnx C API"
+Assert-ArtifactPattern `
+    -AppRoot $audioCaptureRoot `
+    -RelativeDirectory "_internal\sherpa_onnx\lib" `
+    -FilePattern "_sherpa_onnx*.pyd" `
+    -Description "MekiAudioCapture sherpa-onnx Python extension"
+
+Assert-ArtifactFile `
+    -AppRoot $hyTransRoot `
+    -RelativePath "_internal\assets\worker.html" `
+    -Description "HYTrans worker page"
+Assert-ArtifactFile `
+    -AppRoot $hyTransRoot `
+    -RelativePath "_internal\assets\worker.js" `
+    -Description "HYTrans worker script"
+Assert-ArtifactFile `
+    -AppRoot $hyTransRoot `
+    -RelativePath "_internal\assets\transformers.min.js" `
+    -Description "HYTrans transformers loader"
 
 # When a verified source-side HYTrans model already exists, publish it beside
 # HYTrans.exe without duplicating the 1.4 GB external-data file on this volume.
@@ -427,7 +600,17 @@ if ($hasPreparedHyTransModel) {
     Write-Host "Prepared local HYTrans model: $hyTransModelTarget"
 }
 
+$smokeStateRoot = Join-Path $distRoot ".smoke-state"
+$smokeStateRelativePath = Join-Path $distRelativePath ".smoke-state"
+$previousSmokeDataDir = $env:MEKICOPY_DATA_DIR
 if (-not $SkipSmokeTests) {
+    if (Test-Path -LiteralPath $smokeStateRoot) {
+        Remove-WorkspaceDirectory $smokeStateRelativePath
+    }
+    New-Item -ItemType Directory -Path $smokeStateRoot -Force | Out-Null
+    # Keep frozen smoke tests from reading or modifying the developer's real
+    # LocalAppData state. All child companions inherit this isolated location.
+    $env:MEKICOPY_DATA_DIR = $smokeStateRoot
     Write-Host "Running executable smoke tests..."
     Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-runtime")
     Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-ui")
@@ -463,15 +646,18 @@ if (-not $SkipSmokeTests) {
         $audioPort
 }
 
-# UI smoke tests intentionally publish a synthetic OCR region and window
-# geometry. Do not ship that test state to users.
-foreach ($runtimeStateName in @(
-    "detached_button_region.json",
-    "detached_button_geometry.json"
-)) {
-    $runtimeStatePath = Join-Path (Split-Path -Parent $mekiCopyExe) $runtimeStateName
-    if (Test-Path -LiteralPath $runtimeStatePath -PathType Leaf) {
-        Remove-Item -LiteralPath $runtimeStatePath -Force
+if (-not $SkipSmokeTests) {
+    try {
+        Remove-WorkspaceDirectory $smokeStateRelativePath
+    }
+    catch {
+        Write-Warning "Could not remove isolated smoke-test state: $smokeStateRoot"
+    }
+    if ($null -eq $previousSmokeDataDir) {
+        Remove-Item Env:MEKICOPY_DATA_DIR -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:MEKICOPY_DATA_DIR = $previousSmokeDataDir
     }
 }
 
@@ -484,6 +670,19 @@ start "" "MekiCopy.exe"
 '@
 Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding ASCII
 
+$releaseArchivePath = Join-Path $PSScriptRoot "$distRelativePath.zip"
+$releaseChecksumPath = "$releaseArchivePath.sha256"
+if (Test-Path -LiteralPath $releaseChecksumPath) {
+    if (-not (Test-Path -LiteralPath $releaseChecksumPath -PathType Leaf)) {
+        throw "Release checksum path is not a file: $releaseChecksumPath"
+    }
+    Remove-Item -LiteralPath $releaseChecksumPath -Force
+}
+New-ReleaseZip -SourceRoot $distRoot -ArchivePath $releaseArchivePath
+$releaseHash = (Get-FileHash -LiteralPath $releaseArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$releaseChecksum = "$releaseHash *$(Split-Path -Leaf $releaseArchivePath)"
+Set-Content -LiteralPath $releaseChecksumPath -Value $releaseChecksum -Encoding ASCII
+
 Write-Host ""
 Write-Host "Build complete and verified:"
 Write-Host $launcherPath
@@ -492,3 +691,5 @@ Write-Host $hyTransExe
 Write-Host $overlayerExe
 Write-Host $scriptExe
 Write-Host $audioCaptureExe
+Write-Host $releaseArchivePath
+Write-Host $releaseChecksumPath

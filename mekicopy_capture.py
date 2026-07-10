@@ -5,6 +5,7 @@ import datetime as _dt
 import json
 import os
 import sys
+import threading
 from ctypes import wintypes
 from dataclasses import dataclass, field
 from typing import Callable
@@ -334,6 +335,7 @@ def _capture_stats(image: Image.Image) -> CaptureFrameStats:
 class CaptureManager:
     def __init__(self) -> None:
         self.sct = None
+        self._lock = threading.RLock()
         self.monitor_signature: tuple[tuple[int, int, int, int], ...] = ()
         self.last_result: CaptureResult | None = None
         self.blank_frame_count = 0
@@ -341,32 +343,52 @@ class CaptureManager:
         self.reinitialize("startup")
 
     def close(self) -> None:
-        if self.sct is None:
-            return
-        try:
-            self.sct.close()
-        except Exception:
-            pass
-        self.sct = None
+        with self._lock:
+            if self.sct is None:
+                return
+            try:
+                self.sct.close()
+            except Exception:
+                pass
+            self.sct = None
 
     def reinitialize(self, reason: str) -> None:
-        self.close()
-        self.sct = mss.mss()
-        self.monitor_signature = monitor_signature(self.get_monitors(refresh=False))
-        _log_runtime_message(
-            "capture_reinitialize",
-            f"reason: {reason}\nmonitor_signature: {self.monitor_signature}",
-        )
+        with self._lock:
+            self.close()
+            try:
+                self.sct = mss.mss()
+                raw_monitors = list(self.sct.monitors)
+                monitors = [
+                    _monitor_from_mss(index, monitor, is_virtual=(index == 0))
+                    for index, monitor in enumerate(raw_monitors)
+                ]
+                self.monitor_signature = monitor_signature(monitors)
+                _log_runtime_message(
+                    "capture_reinitialize",
+                    f"reason: {reason}\nmonitor_signature: {self.monitor_signature}",
+                )
+            except Exception as exc:
+                self.close()
+                self.monitor_signature = ()
+                _log_runtime_error("capture_reinitialize", exc)
 
     def get_monitors(self, refresh: bool = True) -> list[MonitorInfo]:
-        if self.sct is None:
-            self.reinitialize("missing_mss")
-        assert self.sct is not None
-        raw_monitors = list(self.sct.monitors)
-        monitors: list[MonitorInfo] = []
-        for index, monitor in enumerate(raw_monitors):
-            monitors.append(_monitor_from_mss(index, monitor, is_virtual=(index == 0)))
-        return monitors
+        del refresh
+        with self._lock:
+            if self.sct is None:
+                self.reinitialize("missing_mss")
+            if self.sct is None:
+                return []
+            try:
+                raw_monitors = list(self.sct.monitors)
+            except Exception as exc:
+                _log_runtime_error("capture_get_monitors", exc)
+                self.close()
+                return []
+            return [
+                _monitor_from_mss(index, monitor, is_virtual=(index == 0))
+                for index, monitor in enumerate(raw_monitors)
+            ]
 
     def get_real_monitors(self) -> list[MonitorInfo]:
         monitors = [monitor for monitor in self.get_monitors() if not monitor.is_virtual]
@@ -385,7 +407,7 @@ class CaptureManager:
         except Exception as exc:
             _log_runtime_error("capture_check_display_changed", exc)
             self.reinitialize("display_check_failed")
-            return True
+            return bool(self.monitor_signature)
         if fresh_signature == self.monitor_signature:
             return False
         previous = self.monitor_signature
@@ -581,7 +603,8 @@ class CaptureManager:
     def _capture_with_mss(self, region: Region) -> Image.Image:
         if self.sct is None:
             self.reinitialize("missing_mss_before_capture")
-        assert self.sct is not None
+        if self.sct is None:
+            raise RuntimeError("mss capture backend is unavailable")
         mss_region = {
             "left": region.left,
             "top": region.top,
@@ -848,4 +871,3 @@ def run_capture_diagnostics(region: Region | None = None) -> str:
     with open(os.path.join(directory, "diagnostics.json"), "w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
     return directory
-

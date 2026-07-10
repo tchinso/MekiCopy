@@ -91,6 +91,17 @@ def configure_worker_opener(opener: Callable[[], None] | None) -> None:
     worker_opener = opener
 
 
+def _clear_current_worker(websocket: WebSocket, reason: str) -> bool:
+    """Move state to an error only when this websocket still owns the worker."""
+    if not translation_queue.clear_worker(websocket, reason=reason):
+        return False
+    state.worker_connected = False
+    state.worker_ready = False
+    state.state = "ERROR"
+    state.error = reason
+    return True
+
+
 def _post_overlay_text(url: str, text: str) -> None:
     data = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
@@ -324,15 +335,19 @@ async def overlay_test(body: TranslateBody) -> dict[str, object]:
 @app.websocket("/ws/worker")
 async def worker_ws(websocket: WebSocket) -> None:
     await websocket.accept()
+    translation_queue.set_worker(websocket)
     state.worker_connected = True
     state.worker_ready = False
     state.state = "WORKER_CONNECTED"
-    translation_queue.set_worker(websocket)
+    state.error = None
     debug("worker_connected", "websocket connected")
 
     try:
         while True:
             raw = await websocket.receive_text()
+            if not translation_queue.is_current_worker(websocket):
+                debug("worker_stale", "ignoring message from replaced websocket")
+                return
             message = json.loads(raw)
             msg_type = message.get("type")
 
@@ -364,26 +379,27 @@ async def worker_ws(websocket: WebSocket) -> None:
                 )
 
             elif msg_type == "fatal":
-                state.worker_ready = False
-                state.state = "ERROR"
-                state.error = message.get("message", "worker fatal error")
-                error("worker_fatal", state.error)
+                detail = str(message.get("message", "worker fatal error"))
+                if _clear_current_worker(websocket, detail):
+                    error("worker_fatal", detail)
+                else:
+                    debug("worker_stale_fatal", detail)
+                try:
+                    await websocket.close(code=1011)
+                except RuntimeError:
+                    pass
+                return
 
     except WebSocketDisconnect:
-        state.worker_connected = False
-        state.worker_ready = False
-        state.state = "ERROR"
-        state.error = "worker disconnected"
-        translation_queue.clear_worker()
-        debug("worker_disconnected", "websocket disconnected")
+        if _clear_current_worker(websocket, "worker disconnected"):
+            debug("worker_disconnected", "websocket disconnected")
+        else:
+            debug("worker_stale_disconnected", "replaced websocket disconnected")
     except Exception as exc:
-        state.worker_connected = False
-        state.worker_ready = False
-        state.state = "ERROR"
-        state.error = str(exc)
-        translation_queue.clear_worker()
-        error("worker_websocket", exc)
-        raise
+        if _clear_current_worker(websocket, str(exc)):
+            error("worker_websocket", exc)
+            raise
+        debug("worker_stale_error", str(exc))
 
 
 if assets_dir().exists():

@@ -11,7 +11,6 @@ from .model_files import (
     MODEL_ID,
     MODEL_REVISION,
     is_complete_model,
-    is_present_model,
     required_model_file_sizes,
 )
 from .paths import assets_dir, models_dir
@@ -67,8 +66,6 @@ def configure_server(
 
 def detect_model_mode() -> str:
     model_path = models_dir().joinpath(*MODEL_ID.split("/"))
-    if is_present_model(model_path):
-        return "local"
     if is_complete_model(model_path):
         return "local"
     return "remote"

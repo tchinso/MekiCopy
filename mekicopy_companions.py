@@ -93,6 +93,44 @@ def _validated_translation_text(payload: dict) -> str:
     return text
 
 
+def request_translation_and_show(
+    text: str,
+    *,
+    hytrans_url: str,
+    overlayer_url: str,
+    overlayer_config: dict | None = None,
+    timeout: float = 130.0,
+) -> str:
+    """Translate text through HYTrans and publish it to a verified overlay.
+
+    This is deliberately UI-free so desktop windows can run the network wait
+    outside Tk's event loop. All URLs are captured by the caller before a
+    background task starts, preventing settings edits from changing a request
+    midway through execution.
+    """
+    hytrans_base = hytrans_url.rstrip("/")
+    overlayer_base = overlayer_url.rstrip("/")
+    _probe_service("HYTrans", hytrans_base)
+    _probe_service("MekiOverlayer", overlayer_base)
+    if overlayer_config is not None:
+        _json_request(
+            f"{overlayer_base}/config",
+            overlayer_config,
+            timeout=3,
+            method="POST",
+        )
+    response = _json_request(
+        f"{hytrans_base}/translate-and-show",
+        {
+            "text": text,
+            "overlayUrl": f"{overlayer_base}/show",
+        },
+        timeout=timeout,
+        method="POST",
+    )
+    return _validated_translation_text(response)
+
+
 def _is_process_alive(process: subprocess.Popen | None) -> bool:
     return bool(process and process.poll() is None)
 

@@ -80,15 +80,21 @@ from mekicopy_companions import (
     _probe_service,
     _startupinfo_for_background,
     _terminate_process_tree,
+    _validate_service_health,
     _validated_translation_text,
+    request_translation_and_show,
 )
 from mekicopy_ocr import (
+    OcrError,
     _get_ocr_engine,
     _log_runtime_error,
     _log_runtime_message,
+    capture_ocr_image,
     capture_region,
+    copy_text_to_clipboard,
     ocr_and_copy,
     ocr_region,
+    recognize_image,
 )
 from mekicopy_region_ui import (
     build_initial_rect,
@@ -143,6 +149,7 @@ from mekicopy_theme import (
     configure_window_theme,
     style_tree,
 )
+from mekicopy_tasks import TkTaskRunner
 from mekicopy_tray import WindowsTrayIcon
 from system_logging import (
     configure_system_logging,
@@ -202,6 +209,7 @@ class DetachedOcrButtonApp:
         self.root = tk.Tk()
         configure_window_theme(self.root)
         install_tk_exception_hook(self.root)
+        self._task_runner = TkTaskRunner(self.root)
         self.settings = load_settings()
         self.root.title(DETACHED_WINDOW_TITLE)
         _set_window_icon(self.root)
@@ -290,6 +298,7 @@ class DetachedOcrButtonApp:
         if self._closing:
             return
         self._closing = True
+        self._task_runner.close()
         if self._settings_after_id:
             try:
                 self.root.after_cancel(self._settings_after_id)
@@ -300,8 +309,13 @@ class DetachedOcrButtonApp:
                 self.root.after_cancel(self._geometry_after_id)
             except tk.TclError:
                 pass
-        self.capture_geometry(persist=True)
-        self.root.destroy()
+        try:
+            self.capture_geometry(persist=True)
+        except Exception as exc:
+            _log_runtime_error("save_detached_geometry_on_close", exc)
+        finally:
+            if self.root.winfo_exists():
+                self.root.destroy()
 
     def _on_button_command(self) -> None:
         if self._suppress_next_click:
@@ -328,78 +342,96 @@ class DetachedOcrButtonApp:
             )
             return
 
-        if self.settings.overlay_translation_mode:
-            self._translate_and_show(region)
+        try:
+            image = capture_ocr_image(
+                region.left,
+                region.top,
+                region.width,
+                region.height,
+            )
+        except OcrError as exc:
+            messagebox.showwarning("MekiCopy", str(exc), parent=self.root)
             return
-        simple_feedback = self.settings.simple_copy_complete
-        ocr_and_copy(
-            region.left,
-            region.top,
-            region.width,
-            region.height,
-            notify=not simple_feedback,
-            parent=self.root,
-            on_copy_complete=self._show_feedback if simple_feedback else None,
+
+        self._start_ocr_task(
+            image,
+            translate=self.settings.overlay_translation_mode,
         )
 
-    def _translate_and_show(self, region: Region) -> None:
-        text = ocr_region(
-            region.left,
-            region.top,
-            region.width,
-            region.height,
-            parent=self.root,
+    def _start_ocr_task(self, image: Image.Image, *, translate: bool) -> None:
+        settings = self.settings
+        simple_feedback = settings.simple_copy_complete
+        hytrans_url = f"http://127.0.0.1:{settings.hytrans_port}"
+        overlayer_url = f"http://127.0.0.1:{settings.overlayer_port}"
+        overlayer_config = {
+            "topmost": settings.overlayer_always_on_top,
+            "hide_titlebar": settings.overlayer_hide_titlebar,
+            "fixed_size": settings.overlayer_fixed_size,
+            "exclude_from_capture": settings.overlayer_exclude_from_capture,
+            "bg_color": settings.overlayer_bg_color,
+            "opacity": settings.overlayer_bg_opacity,
+            "text_color": settings.overlayer_text_color,
+            "text_size": settings.overlayer_text_size,
+            "text_font": settings.overlayer_text_font,
+        }
+
+        def operation() -> str:
+            text = recognize_image(image)
+            if translate and text.strip():
+                request_translation_and_show(
+                    text,
+                    hytrans_url=hytrans_url,
+                    overlayer_url=overlayer_url,
+                    overlayer_config=overlayer_config,
+                )
+            return text
+
+        def on_success(text: str) -> None:
+            if translate:
+                if not text.strip():
+                    messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=self.root)
+                    return
+                if simple_feedback:
+                    self._show_feedback()
+                else:
+                    messagebox.showinfo(
+                        "MekiCopy",
+                        "번역 결과를 MekiOverlayer에 표시했습니다.",
+                        parent=self.root,
+                    )
+                return
+
+            try:
+                copy_text_to_clipboard(
+                    text,
+                    notify=not simple_feedback,
+                    parent=self.root,
+                )
+            except Exception as exc:
+                _log_runtime_error("detached_copy_text", exc)
+                messagebox.showerror("MekiCopy", f"클립보드 복사 실패:\n{exc}", parent=self.root)
+                return
+            if simple_feedback:
+                self._show_feedback()
+
+        def on_error(exc: Exception) -> None:
+            stage = "detached_translate" if translate else "detached_ocr"
+            _log_runtime_error(stage, exc)
+            detail = str(exc)
+            if isinstance(exc, urllib.error.HTTPError):
+                try:
+                    detail = f"HTTP {exc.code}\n{exc.read().decode('utf-8', errors='replace')}"
+                except Exception:
+                    detail = f"HTTP {exc.code}"
+            title = "번역 및 표시 실패" if translate else "OCR 실행 실패"
+            messagebox.showerror("MekiCopy", f"{title}:\n{detail}", parent=self.root)
+
+        self._task_runner.submit(
+            "detached_ocr",
+            operation,
+            on_success=on_success,
+            on_error=on_error,
         )
-        if text is None:
-            return
-        if not text.strip():
-            messagebox.showwarning(
-                "MekiCopy",
-                "인식된 텍스트가 없습니다.",
-                parent=self.root,
-            )
-            return
-        try:
-            hytrans_url = f"http://127.0.0.1:{self.settings.hytrans_port}"
-            overlayer_url = f"http://127.0.0.1:{self.settings.overlayer_port}"
-            _probe_service("HYTrans", hytrans_url)
-            _probe_service("MekiOverlayer", overlayer_url)
-            self._send_overlayer_config()
-            response = _json_request(
-                f"{hytrans_url}/translate-and-show",
-                {
-                    "text": text,
-                    "overlayUrl": f"{overlayer_url}/show",
-                },
-                timeout=130,
-                method="POST",
-            )
-            _validated_translation_text(response)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            _log_runtime_error("detached_translate_http", exc)
-            messagebox.showerror(
-                "MekiCopy",
-                f"번역 후 표시 실패:\nHTTP {exc.code}\n{detail}",
-                parent=self.root,
-            )
-            return
-        except Exception as exc:
-            _log_runtime_error("detached_translate", exc)
-            messagebox.showerror(
-                "MekiCopy",
-                f"번역 후 표시 실패:\n{exc}",
-                parent=self.root,
-            )
-            return
-        if self.settings.simple_copy_complete:
-            self._show_feedback()
-        else:
-            messagebox.showinfo(
-                "MekiCopy",
-                "번역 결과를 MekiOverlayer에 표시했습니다.",
-                parent=self.root,
-            )
 
     def _send_overlayer_config(self) -> None:
         settings = self.settings
@@ -609,6 +641,7 @@ class MainWindow(tk.Tk):
         super().__init__()
         configure_window_theme(self)
         install_tk_exception_hook(self)
+        self._task_runner = TkTaskRunner(self)
         self.settings = load_settings()
         self.detached_process: subprocess.Popen | None = None
         self.settings_window: SettingsWindow | None = None
@@ -1279,7 +1312,7 @@ class MainWindow(tk.Tk):
 
     def _on_start_script(self) -> None:
         try:
-            _json_request(f"{self._script_base_url()}/health", timeout=1)
+            _probe_service("MekiScript", self._script_base_url(), timeout=1)
             self._send_script_config()
             messagebox.showinfo(
                 "MekiCopy",
@@ -1324,7 +1357,7 @@ class MainWindow(tk.Tk):
 
     def _on_start_audio_capture(self) -> None:
         try:
-            _json_request(f"{self._audio_capture_base_url()}/health", timeout=1)
+            _probe_service("MekiAudioCapture", self._audio_capture_base_url(), timeout=1)
             self._send_audio_capture_config()
             messagebox.showinfo(
                 "MekiCopy",
@@ -1424,7 +1457,8 @@ class MainWindow(tk.Tk):
 
     def _on_start_hytrans(self) -> None:
         try:
-            _json_request(f"{self._hytrans_base_url()}/health", timeout=1)
+            health = _json_request(f"{self._hytrans_base_url()}/health", timeout=1)
+            _validate_service_health("HYTrans", health)
             self._send_hytrans_logging_config(log_errors=False)
             try:
                 ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=1)
@@ -1485,7 +1519,7 @@ class MainWindow(tk.Tk):
 
     def _on_start_overlayer(self) -> None:
         try:
-            _json_request(f"{self._overlayer_base_url()}/health", timeout=1)
+            _probe_service("MekiOverlayer", self._overlayer_base_url(), timeout=1)
             self._send_overlayer_config()
             messagebox.showinfo(
                 "MekiCopy",
@@ -1584,89 +1618,108 @@ class MainWindow(tk.Tk):
             _log_runtime_error("test_overlay_connection", exc)
             messagebox.showerror("MekiCopy", f"연결 테스트 실패:\n{exc}", parent=owner)
 
-    def _request_translate_and_show(self, text: str) -> dict:
-        _probe_service("HYTrans", self._hytrans_base_url())
-        _probe_service("MekiOverlayer", self._overlayer_base_url())
-        response = _json_request(
-            f"{self._hytrans_base_url()}/translate-and-show",
-            {"text": text, "overlayUrl": self._overlayer_show_url()},
-            timeout=130,
-            method="POST",
-        )
-        _validated_translation_text(response)
-        return response
-
     def _on_ocr_copy(self, source_button: tk.Button | None = None) -> None:
         if not self.active_region:
             messagebox.showerror("MekiCopy", "설정된 영역이 없습니다.", parent=self)
             return
         if not self._prepare_active_region_for_capture():
             return
-        simple_feedback = self.settings.simple_copy_complete
-        if self.settings.overlay_translation_mode:
-            self._ocr_translate_and_show(
-                source_button=source_button or self.ocr_button,
-                simple_feedback=simple_feedback,
+        try:
+            image = capture_ocr_image(
+                self.active_region.left,
+                self.active_region.top,
+                self.active_region.width,
+                self.active_region.height,
             )
+        except OcrError as exc:
+            self._set_capture_status_from_last_result()
+            messagebox.showwarning("MekiCopy", str(exc), parent=self)
             return
-        ocr_and_copy(
-            self.active_region.left,
-            self.active_region.top,
-            self.active_region.width,
-            self.active_region.height,
-            notify=not simple_feedback,
-            parent=self,
-            on_copy_complete=(
-                lambda: self._show_copy_feedback(source_button or self.ocr_button)
-                if simple_feedback
-                else None
-            ),
-        )
         self._set_capture_status_from_last_result()
+        self._start_ocr_task(
+            image,
+            source_button=source_button or self.ocr_button,
+            simple_feedback=self.settings.simple_copy_complete,
+            translate=self.settings.overlay_translation_mode,
+        )
 
-    def _ocr_translate_and_show(
+    def _start_ocr_task(
         self,
+        image: Image.Image,
+        *,
         source_button: tk.Button,
         simple_feedback: bool,
+        translate: bool,
     ) -> None:
-        assert self.active_region is not None
-        text = ocr_region(
-            self.active_region.left,
-            self.active_region.top,
-            self.active_region.width,
-            self.active_region.height,
-            parent=self,
+        settings = self.settings
+        hytrans_url = f"http://127.0.0.1:{settings.hytrans_port}"
+        overlayer_url = f"http://127.0.0.1:{settings.overlayer_port}"
+        overlayer_config = {
+            "topmost": settings.overlayer_always_on_top,
+            "hide_titlebar": settings.overlayer_hide_titlebar,
+            "fixed_size": settings.overlayer_fixed_size,
+            "exclude_from_capture": settings.overlayer_exclude_from_capture,
+            "bg_color": settings.overlayer_bg_color,
+            "opacity": settings.overlayer_bg_opacity,
+            "text_color": settings.overlayer_text_color,
+            "text_size": settings.overlayer_text_size,
+            "text_font": settings.overlayer_text_font,
+            "debug_log": settings.debug_logging,
+        }
+
+        def operation() -> str:
+            text = recognize_image(image)
+            if translate and text.strip():
+                request_translation_and_show(
+                    text,
+                    hytrans_url=hytrans_url,
+                    overlayer_url=overlayer_url,
+                    overlayer_config=overlayer_config,
+                )
+            return text
+
+        def on_success(text: str) -> None:
+            if translate:
+                if not text.strip():
+                    messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=self)
+                    return
+                if simple_feedback:
+                    self._show_copy_feedback(source_button)
+                else:
+                    messagebox.showinfo(
+                        "MekiCopy",
+                        "번역 결과를 MekiOverlayer에 표시했습니다.",
+                        parent=self,
+                    )
+                return
+
+            try:
+                copy_text_to_clipboard(text, notify=not simple_feedback, parent=self)
+            except Exception as exc:
+                _log_runtime_error("ocr_copy_clipboard", exc)
+                messagebox.showerror("MekiCopy", f"클립보드 복사 실패:\n{exc}", parent=self)
+                return
+            if simple_feedback:
+                self._show_copy_feedback(source_button)
+
+        def on_error(exc: Exception) -> None:
+            stage = "ocr_translate_and_show" if translate else "ocr"
+            _log_runtime_error(stage, exc)
+            detail = str(exc)
+            if isinstance(exc, urllib.error.HTTPError):
+                try:
+                    detail = f"HTTP {exc.code}\n{exc.read().decode('utf-8', errors='replace')}"
+                except Exception:
+                    detail = f"HTTP {exc.code}"
+            title = "번역 및 표시 실패" if translate else "OCR 실행 실패"
+            messagebox.showerror("MekiCopy", f"{title}:\n{detail}", parent=self)
+
+        self._task_runner.submit(
+            "main_ocr",
+            operation,
+            on_success=on_success,
+            on_error=on_error,
         )
-        self._set_capture_status_from_last_result()
-        if text is None:
-            return
-        if not text.strip():
-            messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=self)
-            return
-        try:
-            self._send_overlayer_config()
-            self._request_translate_and_show(text)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            _log_runtime_error("ocr_translate_and_show_http", exc)
-            messagebox.showerror(
-                "MekiCopy",
-                f"번역 후 표시 실패:\nHTTP {exc.code}\n{detail}",
-                parent=self,
-            )
-            return
-        except Exception as exc:
-            _log_runtime_error("ocr_translate_and_show", exc)
-            messagebox.showerror("MekiCopy", f"번역 후 표시 실패:\n{exc}", parent=self)
-            return
-        if simple_feedback:
-            self._show_copy_feedback(source_button)
-        else:
-            messagebox.showinfo(
-                "MekiCopy",
-                "번역 결과를 MekiOverlayer에 표시했습니다.",
-                parent=self,
-            )
 
     def _show_copy_feedback(self, button: tk.Button) -> None:
         if not button.winfo_exists():
@@ -1749,9 +1802,13 @@ class MainWindow(tk.Tk):
 
     def _on_close(self) -> None:
         self._closing = True
+        self._task_runner.close()
         self.tray_icon.close()
         _close_detached_window()
-        save_settings(self.settings)
+        try:
+            save_settings(self.settings)
+        except OSError as exc:
+            _log_runtime_error("save_settings_on_close", exc)
         for process in (
             self.hytrans_process,
             self.overlayer_process,

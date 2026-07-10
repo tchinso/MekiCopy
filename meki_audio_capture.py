@@ -4,7 +4,6 @@ import argparse
 import ctypes
 import datetime as dt
 import json
-import os
 import queue
 import sys
 import threading
@@ -27,6 +26,7 @@ from audio_capture_core import (
     create_recognizer,
     ensure_models,
     ensure_ascii_model_paths,
+    model_root_candidates,
     normalize_precision,
     normalize_preset,
     recognize_segments,
@@ -35,7 +35,7 @@ from audio_capture_core import (
     translate_text,
     wav_to_mono_16k,
 )
-from runtime_paths import prepare_tk_environment
+from runtime_paths import prepare_tk_environment, writable_app_data_dir
 from service_ports import (
     AUDIO_CAPTURE_DEFAULT_PORT,
     HYTRANS_DEFAULT_PORT,
@@ -71,8 +71,7 @@ def resource_dir() -> Path:
 
 
 def work_dir() -> Path:
-    base = Path(os.environ.get("PROGRAMDATA", str(Path.home() / "AppData" / "Local")))
-    path = base / "MekiCopy" / "MekiAudioCapture"
+    path = writable_app_data_dir("MekiAudioCapture") / "work"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -103,11 +102,12 @@ class CaptureController:
         self.prepared_models: dict[str, Path] | None = None
         self.prepared_models_precision = ""
         self.wav_path: Path | None = None
+        self.session_work_dir: Path | None = None
         self.session_id = ""
         self.state = "READY"
         self.status = "녹음 준비"
         self.error = ""
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         if prepare_models_on_start:
             self.prepare_models()
 
@@ -194,20 +194,28 @@ class CaptureController:
         return models
 
     def start(self) -> None:
-        if self.state != "READY":
-            return
-        cleanup_work_files(work_dir())
+        with self._lock:
+            if self.state != "READY":
+                return
+            # Reserve the state before allocating paths so concurrent HTTP
+            # requests cannot begin a second recording session.
+            self.state = "STARTING"
+        session_root = work_dir()
         now = dt.datetime.now()
         self.session_id = f"{now:%Y%m%d-%H%M%S-%f}"
-        self.wav_path = work_dir() / f"capture-{now:%Y%m%d-%H%M%S}.wav"
+        self.session_work_dir = session_root / self.session_id
+        self.session_work_dir.mkdir(parents=True, exist_ok=True)
+        self.wav_path = self.session_work_dir / "capture.wav"
         self.stop_event.clear()
         self._set_state("RECORDING", "컴퓨터 소리를 녹음하고 있습니다…")
         self.record_thread = threading.Thread(target=self._record_loop, daemon=True)
         self.record_thread.start()
 
     def stop(self) -> None:
-        if self.state != "RECORDING":
-            return
+        with self._lock:
+            if self.state != "RECORDING":
+                return
+            self.state = "STOPPING"
         self._set_state("STOPPING", "녹음을 마무리하고 있습니다…")
         self.stop_event.set()
         self.process_thread = threading.Thread(target=self._finish_and_process, daemon=True)
@@ -240,13 +248,18 @@ class CaptureController:
             log_error("record", exc)
             self._set_state("ERROR", f"녹음 실패: {exc}", traceback.format_exc())
             self.stop_event.set()
-            cleanup_work_files(work_dir())
+            if self.session_work_dir is not None:
+                cleanup_work_files(self.session_work_dir)
 
     def _finish_and_process(self) -> None:
         if self.record_thread:
             self.record_thread.join(timeout=5)
+            if self.record_thread.is_alive():
+                self._set_state("ERROR", "Recording did not stop in time.")
+                return
         if self.state == "ERROR":
-            cleanup_work_files(work_dir())
+            if self.session_work_dir is not None:
+                cleanup_work_files(self.session_work_dir)
             return
         final_state = "READY"
         final_status = "완료"
@@ -254,7 +267,8 @@ class CaptureController:
         audio = None
         try:
             assert self.wav_path is not None
-            raw_path = work_dir() / "capture-16k.f32"
+            session_work_dir = self.session_work_dir or work_dir()
+            raw_path = session_work_dir / "capture-16k.f32"
             self._set_state("PROCESSING", "음성을 16 kHz mono로 변환하고 있습니다…")
             audio = wav_to_mono_16k(self.wav_path, raw_path)
             models = self._models_for_processing()
@@ -301,7 +315,8 @@ class CaptureController:
                     audio._mmap.close()
                 except Exception:
                     pass
-            cleanup_work_files(work_dir())
+            if self.session_work_dir is not None:
+                cleanup_work_files(self.session_work_dir)
             self._set_state(final_state, final_status, final_error)
 
 
@@ -413,8 +428,8 @@ def main() -> int:
         assert normalize_precision(args.precision) in {"fp32", "int8"}
         assert normalize_preset(args.preset) in {"FAST", "BALANCED", "LONG"}
         work_dir()
-        expected_model_root = app_dir() / "models"
-        if expected_model_root.parent != app_dir():
+        model_roots = model_root_candidates(app_dir(), resource_dir())
+        if not model_roots or not any(root.name == "models" for root in model_roots):
             raise RuntimeError("모델 경로가 MekiAudioCapture/models가 아닙니다.")
         return 0
     if args.self_test_models:
