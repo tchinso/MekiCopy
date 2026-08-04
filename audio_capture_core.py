@@ -143,7 +143,7 @@ def set_script_translation(
     )
 
 
-def translate_text(hytrans_url: str, text: str, timeout: float = 130.0) -> str:
+def translate_text(hytrans_url: str, text: str, timeout: float = 650.0) -> str:
     response = _post_json(
         f"{hytrans_url.rstrip('/')}/translate?format=json",
         {"text": text},
@@ -325,7 +325,10 @@ def ensure_models(
     if not all(path.is_file() and path.stat().st_size > 0 for path in required_speech):
         if progress:
             progress("ReazonSpeech 모델을 다운로드합니다. 최초 실행에는 시간이 걸릴 수 있습니다.")
-        with tempfile.TemporaryDirectory(prefix="mekiaudio-model-") as temporary_dir:
+        with tempfile.TemporaryDirectory(
+            prefix=".mekiaudio-model-",
+            dir=root,
+        ) as temporary_dir:
             archive = Path(temporary_dir) / "reazonspeech.tar.bz2"
             _download_file(REAZONSPEECH_ARCHIVE_URL, archive, progress)
             _extract_reazonspeech_archive(archive, speech_dir)

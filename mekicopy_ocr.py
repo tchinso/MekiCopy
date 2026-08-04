@@ -160,10 +160,10 @@ def _preload_onnxruntime_gpu_dlls() -> None:
 
 def _find_bundled_model(filename: str) -> str | None:
     candidate_dirs = [
-        os.path.join(_get_resource_dir(), "runtime_models"),
-        os.path.join(_get_resource_dir(), "runtime_models", "meikiocr"),
         os.path.join(_get_app_dir(), "runtime_models"),
         os.path.join(_get_app_dir(), "runtime_models", "meikiocr"),
+        os.path.join(_get_resource_dir(), "runtime_models"),
+        os.path.join(_get_resource_dir(), "runtime_models", "meikiocr"),
     ]
     for directory in candidate_dirs:
         candidate = os.path.join(directory, filename)

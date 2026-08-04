@@ -162,6 +162,72 @@ function Assert-ArtifactFile {
     }
 }
 
+function Assert-RuntimeAssetManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$AssetsRoot,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $manifestPath = Join-Path $AssetsRoot "runtime_manifest.json"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "$Description runtime manifest is missing: $manifestPath"
+    }
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw |
+            ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "$Description runtime manifest is invalid JSON: $manifestPath"
+    }
+
+    if ($manifest.transformers.version -cne "4.2.0") {
+        throw "$Description has an unexpected Transformers.js version"
+    }
+    if ($manifest.onnxRuntimeWeb.version -cne "1.26.0-dev.20260416-b7804b056c") {
+        throw "$Description has an unexpected ONNX Runtime Web version"
+    }
+
+    $requiredPaths = @(
+        "transformers.min.js",
+        "transformers.LICENSE.txt",
+        "onnxruntime-web.LICENSE.txt",
+        "onnxruntime-web.ThirdPartyNotices.txt",
+        "wasm/ort-wasm-simd-threaded.asyncify.mjs",
+        "wasm/ort-wasm-simd-threaded.asyncify.wasm",
+        "wasm/ort-wasm-simd-threaded.jsep.mjs",
+        "wasm/ort-wasm-simd-threaded.jsep.wasm",
+        "wasm/ort-wasm-simd-threaded.jspi.mjs",
+        "wasm/ort-wasm-simd-threaded.jspi.wasm",
+        "wasm/ort-wasm-simd-threaded.mjs",
+        "wasm/ort-wasm-simd-threaded.wasm"
+    )
+    $entriesByPath = @{}
+    foreach ($entry in @($manifest.files)) {
+        $entriesByPath[[string]$entry.path] = $entry
+    }
+    foreach ($relativePath in $requiredPaths) {
+        $entry = $entriesByPath[$relativePath]
+        if ($null -eq $entry) {
+            throw "$Description manifest is missing '$relativePath'"
+        }
+        $path = Join-Path $AssetsRoot $relativePath
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "$Description asset is missing: $path"
+        }
+        $item = Get-Item -LiteralPath $path
+        if ($item.Length -ne [long]$entry.size) {
+            throw (
+                "$Description asset '$relativePath' is $($item.Length) bytes; " +
+                "expected $($entry.size)"
+            )
+        }
+        $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        if ($actualHash -cne ([string]$entry.sha256).ToUpperInvariant()) {
+            throw "$Description asset hash mismatch: $path"
+        }
+    }
+}
+
 function Assert-ArtifactPattern {
     param(
         [Parameter(Mandatory = $true)][string]$AppRoot,
@@ -305,6 +371,8 @@ function Invoke-HealthSmokeTest {
         [Parameter(Mandatory = $true)][string]$ExePath,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][int]$Port,
+        [hashtable]$ExpectedConfig,
+        [switch]$GracefulShutdown,
         [int]$TimeoutSeconds = 30
     )
 
@@ -313,8 +381,10 @@ function Invoke-HealthSmokeTest {
         -ArgumentList $Arguments `
         -PassThru `
         -WindowStyle Hidden
+    $controlToken = ""
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $healthy = $false
         while ([DateTime]::UtcNow -lt $deadline) {
             if ($process.HasExited) {
                 throw "Process exited before its health endpoint became ready: $ExePath"
@@ -325,22 +395,93 @@ function Invoke-HealthSmokeTest {
                     -Uri "http://127.0.0.1:$Port/health" `
                     -TimeoutSec 1
                 if ($response.StatusCode -eq 200) {
-                    return
+                    try {
+                        $healthPayload = $response.Content |
+                            ConvertFrom-Json -ErrorAction Stop
+                        $controlToken = [string]$healthPayload.controlToken
+                    }
+                    catch {
+                        $controlToken = ""
+                    }
+                    $healthy = $true
+                    break
                 }
             }
             catch {
                 Start-Sleep -Milliseconds 250
             }
         }
-        throw "Health check timed out: $ExePath"
+        if (-not $healthy) {
+            throw "Health check timed out: $ExePath"
+        }
+
+        if ($ExpectedConfig) {
+            $configResponse = Invoke-WebRequest `
+                -UseBasicParsing `
+                -Uri "http://127.0.0.1:$Port/config" `
+                -TimeoutSec 120
+            if ($configResponse.StatusCode -ne 200) {
+                throw "Config check failed with HTTP $($configResponse.StatusCode): $ExePath"
+            }
+            try {
+                $config = $configResponse.Content | ConvertFrom-Json -ErrorAction Stop
+            }
+            catch {
+                throw "Config endpoint returned invalid JSON: $ExePath"
+            }
+            foreach ($entry in $ExpectedConfig.GetEnumerator()) {
+                $property = $config.PSObject.Properties[$entry.Key]
+                if ($null -eq $property) {
+                    throw "Config field '$($entry.Key)' is missing: $ExePath"
+                }
+                if ([string]$property.Value -cne [string]$entry.Value) {
+                    throw (
+                        "Config field '$($entry.Key)' was '$($property.Value)'; " +
+                        "expected '$($entry.Value)': $ExePath"
+                    )
+                }
+            }
+        }
     }
     finally {
+        $gracefulFailure = ""
+        if ($GracefulShutdown -and $process -and -not $process.HasExited) {
+            try {
+                if (-not $controlToken) {
+                    throw "health endpoint did not provide a control token"
+                }
+                $shutdownResponse = Invoke-WebRequest `
+                    -UseBasicParsing `
+                    -Uri "http://127.0.0.1:$Port/shutdown" `
+                    -Method Post `
+                    -Headers @{ "X-HYTrans-Shutdown-Token" = $controlToken } `
+                    -ContentType "application/json" `
+                    -Body "{}" `
+                    -TimeoutSec 3
+                if ($shutdownResponse.StatusCode -ne 200) {
+                    throw "shutdown returned HTTP $($shutdownResponse.StatusCode)"
+                }
+                if (-not $process.WaitForExit(15000)) {
+                    throw "process did not exit within 15 seconds"
+                }
+            }
+            catch {
+                $gracefulFailure = $_.Exception.Message
+            }
+        }
         if ($process -and -not $process.HasExited) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
             $process.WaitForExit()
         }
+        if ($gracefulFailure) {
+            throw "Graceful shutdown smoke failed for $ExePath`: $gracefulFailure"
+        }
     }
 }
+
+Assert-RuntimeAssetManifest `
+    -AssetsRoot (Join-Path $PSScriptRoot "assets") `
+    -Description "Source HYTrans"
 
 $script:PythonExe = Resolve-BuildPython -RequestedPython $PythonExe
 Write-Host "Using build Python: $script:PythonExe"
@@ -558,29 +699,85 @@ Assert-ArtifactFile `
     -AppRoot $hyTransRoot `
     -RelativePath "_internal\assets\transformers.min.js" `
     -Description "HYTrans transformers loader"
+Assert-RuntimeAssetManifest `
+    -AssetsRoot (Join-Path $hyTransRoot "_internal\assets") `
+    -Description "Bundled HYTrans"
 
-# When a verified source-side HYTrans model already exists, publish it beside
-# HYTrans.exe without duplicating the 1.4 GB external-data file on this volume.
-# A release built without these files still downloads them directly into the
-# same HYTrans\models path on first launch.
-$hyTransModelSource = Join-Path $PSScriptRoot "models\onnx-community\HY-MT1.5-1.8B-ONNX"
-$hyTransRequiredFiles = @(
-    "config.json",
-    "generation_config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "onnx\model_q4.onnx",
-    "onnx\model_q4.onnx_data"
-)
-$hasPreparedHyTransModel = $true
-foreach ($relativeFile in $hyTransRequiredFiles) {
-    if (-not (Test-Path -LiteralPath (Join-Path $hyTransModelSource $relativeFile) -PathType Leaf)) {
-        $hasPreparedHyTransModel = $false
-        break
-    }
+# When a complete source-side HYTrans model already exists, publish it beside
+# HYTrans.exe. Neither model is required to build a release: missing models are
+# downloaded directly into the same HYTrans\models path on first launch.
+$verifyPreparedHyTransModels = @'
+import json
+from pathlib import Path
+
+from hytrans.model_files import MODEL_PROFILES, is_complete_model
+
+models_root = Path("models")
+verified = []
+for key, profile in MODEL_PROFILES.items():
+    target = models_root.joinpath(*profile.model_id.split("/"))
+    if target.is_dir() and is_complete_model(target, profile):
+        verified.append(key)
+print(json.dumps(verified))
+'@
+$verifiedModelOutput = $verifyPreparedHyTransModels | & $script:PythonExe -
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to validate prepared HYTrans models"
 }
-if ($hasPreparedHyTransModel) {
-    $hyTransModelTarget = Join-Path $distRoot "HYTrans\models\onnx-community\HY-MT1.5-1.8B-ONNX"
+$verifiedHyTransModelKeys = @($verifiedModelOutput | ConvertFrom-Json)
+
+$hyTransPreparedModels = @(
+    @{
+        Key = "mt2"
+        RelativePath = "tchinso\Hy-MT2-1.8B-onnx-q4f16"
+        RequiredFiles = @(
+            "chat_template.jinja",
+            "config.json",
+            "generation_config.json",
+            "special_tokens_map.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "onnx\model_q4f16.onnx"
+        )
+    },
+    @{
+        Key = "mt1.5"
+        RelativePath = "onnx-community\HY-MT1.5-1.8B-ONNX"
+        RequiredFiles = @(
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "onnx\model_q4.onnx",
+            "onnx\model_q4.onnx_data"
+        )
+    }
+)
+foreach ($preparedModel in $hyTransPreparedModels) {
+    if ($verifiedHyTransModelKeys -notcontains $preparedModel.Key) {
+        continue
+    }
+    $hyTransModelSource = Join-Path `
+        (Join-Path $PSScriptRoot "models") `
+        $preparedModel.RelativePath
+    $hasPreparedHyTransModel = Test-Path `
+        -LiteralPath $hyTransModelSource `
+        -PathType Container
+    if ($hasPreparedHyTransModel) {
+        foreach ($relativeFile in $preparedModel.RequiredFiles) {
+            if (-not (Test-Path -LiteralPath (Join-Path $hyTransModelSource $relativeFile) -PathType Leaf)) {
+                $hasPreparedHyTransModel = $false
+                break
+            }
+        }
+    }
+    if (-not $hasPreparedHyTransModel) {
+        continue
+    }
+
+    $hyTransModelTarget = Join-Path `
+        (Join-Path $hyTransRoot "models") `
+        $preparedModel.RelativePath
     Get-ChildItem -LiteralPath $hyTransModelSource -Recurse -File | ForEach-Object {
         $relativeFile = $_.FullName.Substring($hyTransModelSource.Length).TrimStart("\")
         $targetFile = Join-Path $hyTransModelTarget $relativeFile
@@ -603,14 +800,17 @@ if ($hasPreparedHyTransModel) {
 $smokeStateRoot = Join-Path $distRoot ".smoke-state"
 $smokeStateRelativePath = Join-Path $distRelativePath ".smoke-state"
 $previousSmokeDataDir = $env:MEKICOPY_DATA_DIR
+$previousSmokeForceDataDir = $env:MEKICOPY_FORCE_DATA_DIR
 if (-not $SkipSmokeTests) {
     if (Test-Path -LiteralPath $smokeStateRoot) {
         Remove-WorkspaceDirectory $smokeStateRelativePath
     }
     New-Item -ItemType Directory -Path $smokeStateRoot -Force | Out-Null
     # Keep frozen smoke tests from reading or modifying the developer's real
-    # LocalAppData state. All child companions inherit this isolated location.
+    # executable-adjacent state. All child companions inherit this isolated
+    # forced location.
     $env:MEKICOPY_DATA_DIR = $smokeStateRoot
+    $env:MEKICOPY_FORCE_DATA_DIR = "1"
     Write-Host "Running executable smoke tests..."
     Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-runtime")
     Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-ui")
@@ -620,9 +820,27 @@ if (-not $SkipSmokeTests) {
 
     $hyTransPort = Get-FreeTcpPort
     Invoke-HealthSmokeTest `
-        $hyTransExe `
-        @("--port", "$hyTransPort", "--no-browser") `
-        $hyTransPort
+        -ExePath $hyTransExe `
+        -Arguments @("--port", "$hyTransPort", "--no-browser") `
+        -Port $hyTransPort `
+        -ExpectedConfig @{
+            modelId = "tchinso/Hy-MT2-1.8B-onnx-q4f16"
+            dtype = "q4f16"
+            hasLocalWasm = $true
+        } `
+        -GracefulShutdown
+
+    $hyTransMt15Port = Get-FreeTcpPort
+    Invoke-HealthSmokeTest `
+        -ExePath $hyTransExe `
+        -Arguments @("--port", "$hyTransMt15Port", "--no-browser", "--model", "mt1.5") `
+        -Port $hyTransMt15Port `
+        -ExpectedConfig @{
+            modelId = "onnx-community/HY-MT1.5-1.8B-ONNX"
+            dtype = "q4"
+            hasLocalWasm = $true
+        } `
+        -GracefulShutdown
 
     $overlayerPort = Get-FreeTcpPort
     Invoke-HealthSmokeTest `
@@ -658,6 +876,12 @@ if (-not $SkipSmokeTests) {
     }
     else {
         $env:MEKICOPY_DATA_DIR = $previousSmokeDataDir
+    }
+    if ($null -eq $previousSmokeForceDataDir) {
+        Remove-Item Env:MEKICOPY_FORCE_DATA_DIR -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:MEKICOPY_FORCE_DATA_DIR = $previousSmokeForceDataDir
     }
 }
 

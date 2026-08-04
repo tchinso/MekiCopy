@@ -14,6 +14,7 @@ from mekicopy_settings import (
     _normalize_port,
     load_detached_geometry,
 )
+from hytrans.model_files import DEFAULT_MODEL_ID, normalize_model_id
 from service_ports import validate_unique_ports
 from mekicopy_theme import (
     BG,
@@ -27,6 +28,14 @@ from mekicopy_theme import (
     style_standard_button,
     style_tree,
 )
+
+HYTRANS_MODEL_LABELS = {
+    "mt2": "MT2 (기본) · Hy-MT2 1.8B q4f16",
+    "mt1.5": "MT1.5 · Hy-MT1.5 1.8B q4",
+}
+HYTRANS_MODEL_IDS_BY_LABEL = {
+    label: model_id for model_id, label in HYTRANS_MODEL_LABELS.items()
+}
 
 
 class _ScrollableTab(tk.Frame):
@@ -97,6 +106,13 @@ class SettingsWindow(tk.Toplevel):
             value=settings.simple_copy_complete
         )
         self.overlay_mode_var = tk.BooleanVar(value=settings.overlay_translation_mode)
+        selected_model = normalize_model_id(settings.hytrans_model_id)
+        self.hytrans_model_var = tk.StringVar(
+            value=HYTRANS_MODEL_LABELS.get(
+                selected_model,
+                HYTRANS_MODEL_LABELS[DEFAULT_MODEL_ID],
+            )
+        )
         self.hytrans_port_var = tk.IntVar(value=settings.hytrans_port)
         self.overlayer_port_var = tk.IntVar(value=settings.overlayer_port)
         self.audio_capture_port_var = tk.IntVar(value=settings.audio_capture_port)
@@ -213,6 +229,19 @@ class SettingsWindow(tk.Toplevel):
             anchor="w",
         )
         overlay_checkbox.pack(fill=tk.X, pady=3)
+
+        model_row = tk.Frame(overlay_frame)
+        model_row.pack(fill=tk.X, pady=3)
+        model_label = tk.Label(model_row, text="HYTrans 번역 모델")
+        model_label.pack(side=tk.LEFT)
+        model_menu = tk.OptionMenu(
+            model_row,
+            self.hytrans_model_var,
+            *HYTRANS_MODEL_LABELS.values(),
+        )
+        model_menu.configure(width=29, anchor="e")
+        model_menu.pack(side=tk.RIGHT)
+        self.overlay_only_widgets.extend([model_label, model_menu])
 
         port_row = tk.Frame(overlay_frame)
         port_row.pack(fill=tk.X, pady=3)
@@ -547,6 +576,10 @@ class SettingsWindow(tk.Toplevel):
             detached_fixed_width=current.detached_fixed_width,
             detached_fixed_height=current.detached_fixed_height,
             overlay_translation_mode=self.overlay_mode_var.get(),
+            hytrans_model_id=HYTRANS_MODEL_IDS_BY_LABEL.get(
+                self.hytrans_model_var.get(),
+                DEFAULT_MODEL_ID,
+            ),
             hytrans_port=hytrans_port,
             overlayer_port=overlayer_port,
             audio_capture_port=audio_capture_port,
@@ -615,7 +648,9 @@ class SettingsWindow(tk.Toplevel):
                 width, height = detached_size
                 settings.detached_fixed_width = width
                 settings.detached_fixed_height = height
-        self.owner.apply_settings(settings, persist=True)
+        result = self.owner.apply_settings(settings, persist=True)
+        if result is None:
+            return
         self._on_close()
 
     def _on_test_connection(self) -> None:
@@ -624,7 +659,16 @@ class SettingsWindow(tk.Toplevel):
         except ValueError as exc:
             messagebox.showerror("MekiCopy", str(exc), parent=self)
             return
-        self.owner.apply_settings(settings, persist=True)
+        result = self.owner.apply_settings(settings, persist=True)
+        if result is None:
+            return
+        if result:
+            messagebox.showinfo(
+                "MekiCopy",
+                "HYTrans를 재시작하고 있습니다. 모델 준비가 끝난 뒤 연결 상태를 확인해 주세요.",
+                parent=self,
+            )
+            return
         self.owner._on_test_overlay_connection(parent=self)
 
     def _on_close(self) -> None:

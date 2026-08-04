@@ -1,22 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
+import ipaddress
 import json
 from pathlib import Path
+import secrets
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from typing import Callable
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import (
     MAX_INPUT_CHARS,
-    TRANSLATE_TIMEOUT_SECONDS,
+    MAX_NEW_TOKENS,
     options,
     runtime_config,
+    translation_timeout_seconds,
 )
 from .logging_setup import configure_logging, debug, error
 from .model_cache import (
@@ -25,6 +30,7 @@ from .model_cache import (
     save_model_cache_file,
 )
 from .model_download import model_download_manager
+from .model_files import active_model_profile
 from .paths import assets_dir, models_dir
 from .queue import TranslationQueue
 from .state import AppState
@@ -36,6 +42,8 @@ state = AppState()
 translation_queue = TranslationQueue()
 queue_task: asyncio.Task | None = None
 worker_opener: Callable[[], None] | None = None
+shutdown_handler: Callable[[], None] | None = None
+shutdown_token: str | None = None
 
 
 class ModelFileResponse(FileResponse):
@@ -91,6 +99,40 @@ def configure_worker_opener(opener: Callable[[], None] | None) -> None:
     worker_opener = opener
 
 
+def configure_shutdown_handler(
+    handler: Callable[[], None] | None,
+    token: str | None = None,
+) -> None:
+    global shutdown_handler, shutdown_token
+    shutdown_handler = handler
+    shutdown_token = token
+
+
+def _is_loopback_host(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.casefold() == "localhost"
+
+
+def _is_trusted_shutdown_origin(origin: str | None) -> bool:
+    # Native callers such as MekiCopy do not send Origin. Browser POSTs do, so
+    # only the HYTrans loopback origin may reach the token comparison.
+    if origin is None:
+        return True
+    try:
+        parsed = urlparse(origin)
+        return (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname is not None
+            and _is_loopback_host(parsed.hostname)
+            and (parsed.port or (443 if parsed.scheme == "https" else 80))
+            == options.port
+        )
+    except ValueError:
+        return False
+
+
 def _clear_current_worker(websocket: WebSocket, reason: str) -> bool:
     """Move state to an error only when this websocket still owns the worker."""
     if not translation_queue.clear_worker(websocket, reason=reason):
@@ -135,21 +177,38 @@ async def _translate_text(text: str) -> str:
         state.state = "BUSY"
         result = await translation_queue.submit(
             text=text,
-            timeout=TRANSLATE_TIMEOUT_SECONDS,
+            timeout=translation_timeout_seconds(len(text)),
         )
         result = result.strip()
         if not result:
             raise RuntimeError("translation worker returned an empty result")
         state.state = "READY"
+        state.error = None
         debug("translation_success", f"input_chars: {len(text)}\noutput_chars: {len(result)}")
         return result
     except asyncio.TimeoutError:
-        state.state = "READY" if state.worker_ready else "ERROR"
+        state.error = "translation timeout"
+        if translation_queue.worker_ws is None:
+            state.worker_connected = False
+            state.worker_ready = False
+            state.state = "WORKER_TIMEOUT"
+            if worker_opener is not None:
+                try:
+                    await asyncio.to_thread(worker_opener)
+                    state.state = "BROWSER_OPENING"
+                except Exception as exc:
+                    state.state = "ERROR"
+                    state.error = str(exc)
+                    error("worker_timeout_reopen", exc)
+        else:
+            state.state = "READY"
         raise HTTPException(status_code=504, detail="translation timeout")
     except HTTPException:
         raise
     except Exception as exc:
-        state.state = "ERROR"
+        # A request-specific generation error does not make a connected model
+        # permanently unhealthy. Fatal/disconnect paths clear worker_ready.
+        state.state = "READY" if state.worker_ready else "ERROR"
         state.error = str(exc)
         error("translate", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -159,23 +218,29 @@ async def _translate_text(text: str) -> str:
 async def on_startup() -> None:
     global queue_task
     state.state = "STARTING"
-    config = runtime_config()
     queue_task = asyncio.create_task(
-        translation_queue.run(max_new_tokens=config.maxNewTokens)
+        translation_queue.run(max_new_tokens=MAX_NEW_TOKENS)
     )
-    debug("startup", f"model_mode: {config.modelMode}\nport: {options.port}")
+    profile = active_model_profile()
+    debug("startup", f"model: {profile.model_id}\nport: {options.port}")
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    global queue_task
     state.state = "STOPPING"
     translation_queue.stop()
     if queue_task:
         queue_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await queue_task
+        queue_task = None
 
 
 @app.get("/health")
-async def health() -> dict[str, object]:
+async def health(response: Response) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    profile = active_model_profile()
     return {
         "ok": True,
         "app": "HYTrans",
@@ -183,7 +248,29 @@ async def health() -> dict[str, object]:
         "state": state.state,
         "workerConnected": state.worker_connected,
         "ready": state.worker_ready,
+        "model": profile.model_id,
+        "dtype": profile.dtype,
+        # The per-process capability is readable by native loopback clients.
+        # Same-origin policy prevents an unrelated website from reading it,
+        # while /shutdown additionally checks Origin and the custom header.
+        "controlToken": shutdown_token,
     }
+
+
+@app.post("/shutdown")
+async def shutdown(request: Request) -> dict[str, object]:
+    client_host = request.client.host if request.client else ""
+    if not _is_loopback_host(client_host):
+        raise HTTPException(status_code=403, detail="shutdown is limited to loopback clients")
+    if not _is_trusted_shutdown_origin(request.headers.get("origin")):
+        raise HTTPException(status_code=403, detail="untrusted shutdown origin")
+    if shutdown_handler is None or shutdown_token is None:
+        raise HTTPException(status_code=503, detail="shutdown handler is unavailable")
+    supplied_token = request.headers.get("x-hytrans-shutdown-token", "")
+    if not supplied_token or not secrets.compare_digest(supplied_token, shutdown_token):
+        raise HTTPException(status_code=403, detail="invalid shutdown token")
+    asyncio.get_running_loop().call_later(0.1, shutdown_handler)
+    return {"ok": True, "state": "STOPPING"}
 
 
 @app.get("/ready")
@@ -211,7 +298,8 @@ async def reopen_worker() -> dict[str, object]:
 
 @app.get("/config")
 async def get_config() -> dict[str, object]:
-    return runtime_config().model_dump()
+    config = await asyncio.to_thread(runtime_config)
+    return config.model_dump()
 
 
 @app.post("/logging/config")
@@ -241,12 +329,12 @@ async def client_log(body: ClientLogBody) -> dict[str, object]:
 
 @app.get("/model-cache-status")
 async def get_model_cache_status(url: str) -> dict[str, object]:
-    return model_cache_status(url)
+    return await asyncio.to_thread(model_cache_status, url)
 
 
 @app.get("/model-cache")
 async def get_model_cache_file(url: str) -> FileResponse:
-    return model_cache_file_response(url)
+    return await asyncio.to_thread(model_cache_file_response, url)
 
 
 @app.post("/model-cache")
@@ -256,12 +344,12 @@ async def post_model_cache_file(url: str, request: Request) -> dict[str, object]
 
 @app.post("/model/prepare")
 async def prepare_model() -> dict[str, object]:
-    return model_download_manager.start()
+    return await asyncio.to_thread(model_download_manager.start)
 
 
 @app.get("/model/status")
 async def model_status() -> dict[str, object]:
-    return model_download_manager.status()
+    return await asyncio.to_thread(model_download_manager.status)
 
 
 @app.get("/worker.html")
@@ -356,6 +444,22 @@ async def worker_ws(websocket: WebSocket) -> None:
                 debug("worker_loading", str(message.get("message", "")))
 
             elif msg_type == "ready":
+                profile = active_model_profile()
+                reported_model = str(message.get("model") or "")
+                reported_dtype = str(message.get("dtype") or "")
+                if (
+                    reported_model != profile.model_id
+                    or reported_dtype != profile.dtype
+                ):
+                    detail = (
+                        "worker profile mismatch: "
+                        f"expected {profile.model_id}/{profile.dtype}, "
+                        f"received {reported_model}/{reported_dtype}"
+                    )
+                    _clear_current_worker(websocket, detail)
+                    error("worker_profile_mismatch", detail)
+                    await websocket.close(code=1008)
+                    return
                 state.worker_ready = True
                 state.state = "READY"
                 state.device = message.get("device")

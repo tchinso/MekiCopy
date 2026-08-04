@@ -8,12 +8,15 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 DATA_DIR_ENV = "MEKICOPY_DATA_DIR"
-_DATA_DIR_CACHE: dict[str, Path] = {}
+FORCE_DATA_DIR_ENV = "MEKICOPY_FORCE_DATA_DIR"
+_DATA_DIR_CACHE: dict[tuple[str, str, str, str], Path] = {}
+_DATA_DIR_LOCK = threading.RLock()
 _TK_RUNTIME_SYNC_LOCK = threading.RLock()
 
 
@@ -79,14 +82,21 @@ def _local_app_data_root() -> Path | None:
 
 
 def _can_write_directory(path: Path) -> bool:
+    probe = path / (
+        f".write-test-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
+    )
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".write_test"
         probe.write_text("ok", encoding="ascii")
         probe.unlink(missing_ok=True)
         return True
     except OSError:
         return False
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _dedupe(paths: list[Path]) -> list[Path]:
@@ -101,11 +111,8 @@ def _dedupe(paths: list[Path]) -> list[Path]:
     return result
 
 
-def writable_app_data_dir(app_name: str) -> Path:
-    cached = _DATA_DIR_CACHE.get(app_name)
-    if cached:
-        return cached
-
+def fallback_app_data_dirs(app_name: str) -> list[Path]:
+    """Return secondary data locations in their normal fallback order."""
     candidates: list[Path] = []
     override = os.environ.get(DATA_DIR_ENV)
     if override:
@@ -125,29 +132,52 @@ def writable_app_data_dir(app_name: str) -> Path:
         candidates.append(Path.home() / ".local" / "share" / "MekiCopy" / app_name)
 
     candidates.append(Path(tempfile.gettempdir()) / "MekiCopy" / app_name)
+    return _dedupe(candidates)
 
-    for candidate in _dedupe(candidates):
-        if _can_write_directory(candidate):
-            _DATA_DIR_CACHE[app_name] = candidate
-            return candidate
 
-    fallback = app_root()
-    _DATA_DIR_CACHE[app_name] = fallback
-    return fallback
+def writable_app_data_dir(app_name: str) -> Path:
+    """Choose one stable writable data root for the lifetime of this process.
+
+    Portable data beside the executable is the normal first choice.  The
+    LocalAppData, ProgramData and temporary locations are consulted only when
+    that directory is not writable.  Build/smoke-test harnesses can opt into
+    an isolated forced override by setting both ``MEKICOPY_DATA_DIR`` and
+    ``MEKICOPY_FORCE_DATA_DIR``.
+    """
+    override = os.environ.get(DATA_DIR_ENV, "")
+    force_override = os.environ.get(FORCE_DATA_DIR_ENV, "").strip().lower()
+    cache_key = (app_name, str(app_root()), override, force_override)
+    with _DATA_DIR_LOCK:
+        cached = _DATA_DIR_CACHE.get(cache_key)
+        if cached:
+            return cached
+
+        fallback_candidates = fallback_app_data_dirs(app_name)
+        forced = force_override in {"1", "true", "yes", "on"} and bool(override)
+        candidates = (
+            fallback_candidates + [app_root()]
+            if forced
+            else [app_root(), *fallback_candidates]
+        )
+
+        for candidate in _dedupe(candidates):
+            if _can_write_directory(candidate):
+                _DATA_DIR_CACHE[cache_key] = candidate
+                return candidate
+
+        fallback = app_root()
+        _DATA_DIR_CACHE[cache_key] = fallback
+        return fallback
 
 
 def state_data_dir(app_name: str = "MekiCopy") -> Path:
     """Return the durable directory used for user-editable application state.
 
-    Source runs keep their checked-out settings beside the source files.  Frozen
-    releases instead use a writable per-user location, so installing below
-    Program Files or another read-only directory cannot prevent clean shutdown
-    or saving settings.  ``MEKICOPY_DATA_DIR`` intentionally opts into the same
-    durable-location behavior for development and test runs.
+    Both source and frozen runs prefer their program directory.  Protected
+    installations (for example Program Files) transparently fall back to a
+    writable per-user or machine location.
     """
-    if getattr(sys, "frozen", False) or os.environ.get(DATA_DIR_ENV):
-        return writable_app_data_dir(app_name)
-    return app_root()
+    return writable_app_data_dir(app_name)
 
 
 def log_dir(app_name: str, kind: str) -> Path:
@@ -216,21 +246,27 @@ def exclusive_file_lock(path: str | Path, timeout: float = 30.0) -> Iterator[Non
 
 
 def tk_runtime_roots(runtime_dirname: str) -> list[Path]:
-    candidates: list[Path] = []
+    secondary: list[Path] = []
     override = os.environ.get(DATA_DIR_ENV)
     if override:
-        candidates.append(Path(override).expanduser() / runtime_dirname)
+        secondary.append(Path(override).expanduser() / runtime_dirname)
 
     local_app_data = _local_app_data_root()
     if local_app_data:
-        candidates.append(local_app_data / runtime_dirname)
+        secondary.append(local_app_data / runtime_dirname)
 
     program_data = _program_data_root()
     if program_data:
-        candidates.append(program_data / runtime_dirname)
+        secondary.append(program_data / runtime_dirname)
 
-    candidates.append(app_root() / runtime_dirname)
-    candidates.append(Path(tempfile.gettempdir()) / "MekiCopy" / runtime_dirname)
+    secondary.append(Path(tempfile.gettempdir()) / "MekiCopy" / runtime_dirname)
+    force_override = os.environ.get(FORCE_DATA_DIR_ENV, "").strip().lower()
+    forced = force_override in {"1", "true", "yes", "on"} and bool(override)
+    candidates = (
+        [*secondary, app_root() / runtime_dirname]
+        if forced
+        else [app_root() / runtime_dirname, *secondary]
+    )
     return _dedupe(candidates)
 
 

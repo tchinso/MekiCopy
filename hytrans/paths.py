@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import os
 import sys
+import threading
+import uuid
 from pathlib import Path
 
-from runtime_paths import writable_app_data_dir
+from runtime_paths import fallback_app_data_dirs, writable_app_data_dir
+
+_models_dir_cache: Path | None = None
+_models_dir_lock = threading.RLock()
 
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
@@ -29,14 +35,21 @@ def assets_dir() -> Path:
 
 
 def _ensure_writable_directory(path: Path) -> bool:
+    probe = path / (
+        f".write-test-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
+    )
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".write_test"
         probe.write_text("ok", encoding="ascii")
         probe.unlink(missing_ok=True)
         return True
     except OSError:
         return False
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def models_dir() -> Path:
@@ -48,15 +61,35 @@ def models_dir() -> Path:
     an existing LocalAppData cache must never make a writable executable-
     adjacent directory lose priority.
     """
-    external = app_root() / "models"
-    if _ensure_writable_directory(external):
-        return external
+    global _models_dir_cache
+    with _models_dir_lock:
+        if _models_dir_cache is not None:
+            return _models_dir_cache
 
-    stable = app_data_dir() / "models"
-    if _ensure_writable_directory(stable):
-        return stable
+        external = app_root() / "models"
+        if _ensure_writable_directory(external):
+            _models_dir_cache = external
+            return external
 
-    return stable
+        # app_data_dir() normally selects the executable root first. If only
+        # its child ``models`` is unusable (for example, a regular file with
+        # that name), do not accidentally select the same broken path again.
+        fallback_roots = [app_data_dir(), *fallback_app_data_dirs("HYTrans")]
+        last_candidate = external
+        seen: set[str] = {os.path.normcase(str(external))}
+        for root in fallback_roots:
+            candidate = root / "models"
+            key = os.path.normcase(str(candidate))
+            if key in seen:
+                continue
+            seen.add(key)
+            last_candidate = candidate
+            if _ensure_writable_directory(candidate):
+                _models_dir_cache = candidate
+                return candidate
+
+        _models_dir_cache = last_candidate
+        return last_candidate
 
 
 def app_data_dir() -> Path:

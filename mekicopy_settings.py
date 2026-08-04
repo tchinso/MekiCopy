@@ -18,7 +18,11 @@ from tkinter import font as tkfont
 
 from mekicopy_capture import MIN_SIZE_PX, Region
 from mekicopy_runtime import _get_app_dir
-from runtime_paths import exclusive_file_lock, state_data_dir
+from hytrans.model_files import (
+    DEFAULT_MODEL_ID,
+    normalize_model_id,
+)
+from runtime_paths import exclusive_file_lock, fallback_app_data_dirs, state_data_dir
 from service_ports import (
     AUDIO_CAPTURE_DEFAULT_PORT,
     HYTRANS_DEFAULT_PORT,
@@ -37,7 +41,7 @@ _STATE_FILENAMES = (
     "detached_button_region.json",
     "detached_button_geometry.json",
 )
-_STATE_MIGRATION_MARKER = ".state_migration_v1"
+_STATE_MIGRATION_MARKER = ".state_migration_v2"
 _STATE_MIGRATION_THREAD_LOCK = threading.RLock()
 
 
@@ -89,9 +93,15 @@ def _atomic_copy(source: Path, destination: Path) -> bool:
             pass
 
 
-def _migrate_legacy_state_files(legacy_dir: Path, destination_dir: Path) -> None:
-    """Copy executable-side state once into the writable persistent folder."""
-    if _same_path(legacy_dir, destination_dir):
+def _migrate_legacy_state_files(
+    legacy_dirs: list[Path],
+    destination_dir: Path,
+) -> None:
+    """Copy missing state once from older secondary storage locations."""
+    sources = [
+        path for path in legacy_dirs if not _same_path(path, destination_dir)
+    ]
+    if not sources:
         return
     try:
         destination_dir.mkdir(parents=True, exist_ok=True)
@@ -102,11 +112,13 @@ def _migrate_legacy_state_files(legacy_dir: Path, destination_dir: Path) -> None
             if marker.is_file():
                 return
             for filename in _STATE_FILENAMES:
-                source = legacy_dir / filename
                 destination = destination_dir / filename
-                if destination.exists() or not source.is_file():
+                if destination.exists():
                     continue
-                _atomic_copy(source, destination)
+                for legacy_dir in sources:
+                    source = legacy_dir / filename
+                    if source.is_file() and _atomic_copy(source, destination):
+                        break
             _write_text_atomic(marker, "migrated\n")
     except OSError:
         # Migration is best effort.  Save APIs below remain safe in restrictive
@@ -116,7 +128,9 @@ def _migrate_legacy_state_files(legacy_dir: Path, destination_dir: Path) -> None
 
 def _initialize_state_directory() -> Path:
     destination = state_data_dir("MekiCopy")
-    _migrate_legacy_state_files(Path(_get_app_dir()), destination)
+    program_dir = Path(_get_app_dir())
+    legacy_dirs = [program_dir, *fallback_app_data_dirs("MekiCopy")]
+    _migrate_legacy_state_files(legacy_dirs, destination)
     return destination
 
 
@@ -170,6 +184,7 @@ class AppSettings:
     detached_fixed_width: int = 260
     detached_fixed_height: int = 160
     overlay_translation_mode: bool = True
+    hytrans_model_id: str = DEFAULT_MODEL_ID
     hytrans_port: int = HYTRANS_DEFAULT_PORT
     overlayer_port: int = OVERLAYER_DEFAULT_PORT
     audio_capture_port: int = AUDIO_CAPTURE_DEFAULT_PORT
@@ -438,6 +453,13 @@ def load_settings() -> AppSettings:
         "overlay_translation_mode",
         fallback=settings.overlay_translation_mode,
     )
+    settings.hytrans_model_id = normalize_model_id(
+        parser.get(
+            section,
+            "hytrans_model_id",
+            fallback=settings.hytrans_model_id,
+        )
+    )
     settings.hytrans_port = parser.getint(
         section, "hytrans_port", fallback=settings.hytrans_port
     )
@@ -621,6 +643,7 @@ def save_settings(settings: AppSettings) -> bool:
         "detached_fixed_width": str(settings.detached_fixed_width),
         "detached_fixed_height": str(settings.detached_fixed_height),
         "overlay_translation_mode": str(settings.overlay_translation_mode).lower(),
+        "hytrans_model_id": normalize_model_id(settings.hytrans_model_id),
         "hytrans_port": str(settings.hytrans_port),
         "overlayer_port": str(settings.overlayer_port),
         "audio_capture_port": str(settings.audio_capture_port),

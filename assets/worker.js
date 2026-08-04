@@ -221,7 +221,12 @@ function cleanTranslationOutput(text) {
 
 function buildPrompt(inputText) {
   const target = config?.target || "Korean";
-  return `Translate the following segment into ${target}, without additional explanation.\n\n${inputText}`;
+  const template =
+    config?.promptTemplate ||
+    "Translate the following segment into {target}, without additional explanation.\n\n{text}";
+  return String(template)
+    .replaceAll("{target}", () => target)
+    .replaceAll("{text}", () => inputText);
 }
 
 function extractGeneratedText(result) {
@@ -488,6 +493,7 @@ function installModelBackupCache() {
 function setupTransformersEnv(runtimeConfig) {
   env.allowLocalModels = true;
   env.localModelPath = "/models/";
+  env.useWasmCache = true;
 
   if (runtimeConfig.modelMode === "local") {
     env.allowRemoteModels = false;
@@ -497,7 +503,12 @@ function setupTransformersEnv(runtimeConfig) {
   }
 
   if (runtimeConfig.hasLocalWasm && env.backends?.onnx?.wasm) {
-    env.backends.onnx.wasm.wasmPaths = "/assets/wasm/";
+    // Transformers.js 4.2.0 selects the asyncify runtime for Chromium. Keep
+    // the pair explicit so its preloader/cache never falls back to the CDN.
+    env.backends.onnx.wasm.wasmPaths = {
+      mjs: "/assets/wasm/ort-wasm-simd-threaded.asyncify.mjs",
+      wasm: "/assets/wasm/ort-wasm-simd-threaded.asyncify.wasm",
+    };
   }
 }
 

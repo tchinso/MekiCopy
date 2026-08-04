@@ -132,6 +132,7 @@ from mekicopy_settings import (
     save_settings,
 )
 from mekicopy_settings_window import SettingsWindow
+from hytrans.model_files import get_model_profile
 from mekicopy_theme import (
     BG,
     BORDER,
@@ -646,6 +647,10 @@ class MainWindow(tk.Tk):
         self.detached_process: subprocess.Popen | None = None
         self.settings_window: SettingsWindow | None = None
         self.hytrans_process: subprocess.Popen | None = None
+        self._hytrans_restart_after_id: str | None = None
+        self._hytrans_restart_process: subprocess.Popen | None = None
+        self._hytrans_restart_old_port: int | None = None
+        self._hytrans_restart_attempts = 0
         self.overlayer_process: subprocess.Popen | None = None
         self.audio_capture_process: subprocess.Popen | None = None
         self.script_process: subprocess.Popen | None = None
@@ -1456,9 +1461,32 @@ class MainWindow(tk.Tk):
             return False
 
     def _on_start_hytrans(self) -> None:
+        if self._hytrans_restart_after_id is not None:
+            messagebox.showinfo(
+                "MekiCopy",
+                "변경된 번역 모델로 HYTrans를 재시작하고 있습니다.",
+                parent=self,
+            )
+            return
         try:
             health = _json_request(f"{self._hytrans_base_url()}/health", timeout=1)
-            _validate_service_health("HYTrans", health)
+            # A disconnected/fatal worker intentionally reports an ERROR
+            # state, but the server is still the correct HYTrans instance and
+            # /worker/reopen is precisely how it recovers. Validate identity
+            # here without rejecting that recoverable state first.
+            if health.get("ok") is not True or health.get("app") != "HYTrans":
+                _validate_service_health("HYTrans", health)
+                raise RuntimeError("HYTrans service identity could not be verified")
+            expected_profile = get_model_profile(self.settings.hytrans_model_id)
+            if (
+                health.get("model") != expected_profile.model_id
+                or health.get("dtype") != expected_profile.dtype
+            ):
+                if self._begin_hytrans_restart(
+                    self.settings.hytrans_port,
+                    "running-profile-mismatch",
+                ):
+                    return
             self._send_hytrans_logging_config(log_errors=False)
             try:
                 ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=1)
@@ -1483,6 +1511,9 @@ class MainWindow(tk.Tk):
             if self._warn_if_port_busy("HYTrans", self.settings.hytrans_port):
                 return
 
+        self._launch_hytrans()
+
+    def _launch_hytrans(self, *, restarted: bool = False) -> bool:
         command = _find_companion_executable("HYTrans", "hytrans_main.py")
         if not command:
             messagebox.showerror(
@@ -1490,13 +1521,15 @@ class MainWindow(tk.Tk):
                 "HYTrans 실행 파일을 찾을 수 없습니다.",
                 parent=self,
             )
-            return
+            return False
 
         command += [
             "--port",
             str(self.settings.hytrans_port),
             "--overlay-url",
             self._overlayer_show_url(),
+            "--model",
+            self.settings.hytrans_model_id,
         ]
         if self.settings.debug_logging:
             command.append("--debug-log")
@@ -1512,10 +1545,124 @@ class MainWindow(tk.Tk):
                 self.hytrans_process,
                 self._hytrans_base_url(),
             )
-            messagebox.showinfo("MekiCopy", "HYTrans 서버를 실행했습니다.", parent=self)
+            action = "재시작했습니다" if restarted else "실행했습니다"
+            messagebox.showinfo(
+                "MekiCopy",
+                f"HYTrans 서버를 {action}.\n번역 모델: {self.settings.hytrans_model_id}",
+                parent=self,
+            )
+            return True
         except Exception as exc:
             _log_runtime_error("start_hytrans", exc)
             messagebox.showerror("MekiCopy", f"HYTrans 실행 실패:\n{exc}", parent=self)
+            return False
+
+    def _begin_hytrans_restart(self, old_port: int, reason: str) -> bool:
+        if self._hytrans_restart_after_id is not None:
+            return True
+
+        old_base_url = f"http://127.0.0.1:{old_port}"
+        tracked_process = (
+            self.hytrans_process if _is_process_alive(self.hytrans_process) else None
+        )
+        service_running = False
+        shutdown_token = ""
+        try:
+            health = _json_request(f"{old_base_url}/health", timeout=0.75)
+            # A worker/model failure can legitimately put HYTrans in ERROR,
+            # but its local shutdown endpoint is still usable. Recognize the
+            # service by identity here instead of requiring a healthy worker,
+            # so changing models can recover an unhealthy external instance.
+            service_running = (
+                health.get("ok") is True
+                and health.get("app") == "HYTrans"
+            )
+            shutdown_token = str(health.get("controlToken") or "")
+        except Exception:
+            service_running = False
+
+        if not service_running and tracked_process is None:
+            return False
+
+        if service_running:
+            try:
+                _json_request(
+                    f"{old_base_url}/shutdown",
+                    {},
+                    timeout=2,
+                    method="POST",
+                    headers=(
+                        {"X-HYTrans-Shutdown-Token": shutdown_token}
+                        if shutdown_token
+                        else None
+                    ),
+                )
+            except Exception as exc:
+                _log_runtime_error("restart_hytrans_shutdown", exc)
+                if tracked_process is None:
+                    messagebox.showerror(
+                        "MekiCopy",
+                        (
+                            "실행 중인 HYTrans에 종료를 요청하지 못해 자동 재시작할 수 "
+                            "없습니다. HYTrans를 닫은 뒤 다시 실행해 주세요."
+                        ),
+                        parent=self,
+                    )
+                    return False
+                _terminate_process_tree(tracked_process)
+        elif tracked_process is not None:
+            _terminate_process_tree(tracked_process)
+
+        _log_runtime_message(
+            "restart_hytrans",
+            f"reason={reason}, old_port={old_port}, model={self.settings.hytrans_model_id}",
+        )
+        self._hytrans_restart_process = tracked_process
+        self._hytrans_restart_old_port = old_port
+        self._hytrans_restart_attempts = 0
+        self._hytrans_restart_after_id = self.after(100, self._poll_hytrans_restart)
+        return True
+
+    def _poll_hytrans_restart(self) -> None:
+        self._hytrans_restart_after_id = None
+        if self._closing:
+            return
+
+        self._hytrans_restart_attempts += 1
+        process = self._hytrans_restart_process
+        process_alive = _is_process_alive(process)
+        old_port = self._hytrans_restart_old_port
+        port_open = bool(old_port and _is_loopback_port_open(old_port))
+
+        if not process_alive and not port_open:
+            if process is self.hytrans_process:
+                self.hytrans_process = None
+            self._hytrans_restart_process = None
+            self._hytrans_restart_old_port = None
+            self._hytrans_restart_attempts = 0
+            self._launch_hytrans(restarted=True)
+            return
+
+        # Give graceful shutdown time to close the browser and Uvicorn. If a
+        # process owned by this MekiCopy instance hangs, fall back to its tree.
+        if self._hytrans_restart_attempts == 12 and process_alive:
+            try:
+                _terminate_process_tree(process)
+            except Exception as exc:
+                _log_runtime_error("restart_hytrans_force_stop", exc)
+
+        if self._hytrans_restart_attempts >= 40:
+            self._hytrans_restart_process = None
+            self._hytrans_restart_old_port = None
+            self._hytrans_restart_attempts = 0
+            messagebox.showerror(
+                "MekiCopy",
+                "기존 HYTrans가 종료되지 않아 재시작하지 못했습니다.",
+                parent=self,
+            )
+            return
+
+        self._hytrans_restart_after_id = self.after(250, self._poll_hytrans_restart)
 
     def _on_start_overlayer(self) -> None:
         try:
@@ -1763,7 +1910,38 @@ class MainWindow(tk.Tk):
         after_id = button.after(1000, restore)
         setattr(button, "_mekicopy_feedback_after_id", after_id)
 
-    def apply_settings(self, settings: AppSettings, persist: bool) -> None:
+    def apply_settings(self, settings: AppSettings, persist: bool) -> bool | None:
+        previous = self.settings
+        restart_reason_parts: list[str] = []
+        if previous.hytrans_model_id != settings.hytrans_model_id:
+            restart_reason_parts.append("model")
+        if previous.hytrans_port != settings.hytrans_port:
+            restart_reason_parts.append("port")
+
+        if (
+            persist
+            and previous.hytrans_port != settings.hytrans_port
+            and _is_loopback_port_open(settings.hytrans_port)
+        ):
+            messagebox.showerror(
+                "MekiCopy",
+                (
+                    f"새 HYTrans 포트가 이미 사용 중입니다: {settings.hytrans_port}\n"
+                    "실행 중인 프로그램을 종료하거나 다른 포트를 선택하세요."
+                ),
+                parent=self.settings_window or self,
+            )
+            return None
+
+        if persist and not save_settings(settings):
+            _log_runtime_error("save_settings", "settings file could not be written")
+            messagebox.showerror(
+                "MekiCopy",
+                "설정 파일을 저장하지 못했습니다. 프로그램 폴더의 쓰기 권한을 확인해 주세요.",
+                parent=self.settings_window or self,
+            )
+            return None
+
         self.settings = settings
         set_debug_enabled(self.settings.debug_logging)
         self.attributes("-topmost", self.settings.main_always_on_top)
@@ -1773,8 +1951,12 @@ class MainWindow(tk.Tk):
         self._send_script_config(log_errors=False)
         self._send_audio_capture_config(log_errors=False)
         self._send_hytrans_logging_config(log_errors=False)
-        if persist:
-            save_settings(self.settings)
+        if persist and restart_reason_parts:
+            return self._begin_hytrans_restart(
+                previous.hytrans_port,
+                ",".join(restart_reason_parts),
+            )
+        return False
 
     def _on_unmap(self, event: tk.Event) -> None:
         if event.widget != self or not self.settings.minimize_to_tray:
@@ -1802,13 +1984,20 @@ class MainWindow(tk.Tk):
 
     def _on_close(self) -> None:
         self._closing = True
+        if self._hytrans_restart_after_id is not None:
+            try:
+                self.after_cancel(self._hytrans_restart_after_id)
+            except tk.TclError:
+                pass
+            self._hytrans_restart_after_id = None
         self._task_runner.close()
         self.tray_icon.close()
         _close_detached_window()
-        try:
-            save_settings(self.settings)
-        except OSError as exc:
-            _log_runtime_error("save_settings_on_close", exc)
+        if not save_settings(self.settings):
+            _log_runtime_error(
+                "save_settings_on_close",
+                "settings file could not be written",
+            )
         for process in (
             self.hytrans_process,
             self.overlayer_process,

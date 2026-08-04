@@ -1,0 +1,75 @@
+{
+  "transformers": {
+    "package": "@huggingface/transformers",
+    "version": "4.2.0",
+    "npmIntegrity": "sha512-8BRCoBMH0XsWaEIamuR0LrJGAfftgHAfb2Vrffy0VKlSAE/MnUJ5/h/zTfEP3fDIft+nk7TqB8xXEyABGitBjQ=="
+  },
+  "onnxRuntimeWeb": {
+    "package": "onnxruntime-web",
+    "version": "1.26.0-dev.20260416-b7804b056c",
+    "commit": "b7804b056c30aa35c1748f8e4e239d0e2ff25d6d",
+    "npmIntegrity": "sha512-MD6Ss4GSpQBo6zqoJzyT9LRbKYs7x/JVN23FT24EcEvlqF4VuzPOeH6X38orZPKHQDbprn7K+SBpu0/mj2CQiw=="
+  },
+  "files": [
+    {
+      "path": "transformers.min.js",
+      "size": 558373,
+      "sha256": "e74bd32ed4453369ebb0edcaa27f6bc6204004a949a0233cdb87b62dda8d6978"
+    },
+    {
+      "path": "transformers.LICENSE.txt",
+      "size": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "onnxruntime-web.LICENSE.txt",
+      "size": 1073,
+      "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+    },
+    {
+      "path": "onnxruntime-web.ThirdPartyNotices.txt",
+      "size": 325054,
+      "sha256": "0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.asyncify.mjs",
+      "size": 47389,
+      "sha256": "5959c6733039619c9af710d8e1bae8d6e84402787990637be987c2b1bd6c5fa9"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.asyncify.wasm",
+      "size": 23567050,
+      "sha256": "e0c0c6d3e73d43b8a249972f8358f845b08cc16fec3c80efafdf8bed40366786"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.jsep.mjs",
+      "size": 46490,
+      "sha256": "522b3769929f5684c83a12cf1e06eedf073b65d161728b4f3757c75d62b14384"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.jsep.wasm",
+      "size": 26101073,
+      "sha256": "ae61141f8fbf0a4e43fd7b4f4d40a1a115627f6facc4f33ddf84074a655e33ea"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.jspi.mjs",
+      "size": 44518,
+      "sha256": "0cc011001c75c3d5dfdabbd1e1377d1968fa9759afd20729032e229433df5cd8"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.jspi.wasm",
+      "size": 14555814,
+      "sha256": "61ee6e49e16e8989a7b889524c4403aa1ed79bcf3e04d5af2318477558d598f4"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.mjs",
+      "size": 24180,
+      "sha256": "5f2cd914554830762579c372d0211614c1e3f40ab3f6c0cfcf0900343229071d"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.wasm",
+      "size": 12942611,
+      "sha256": "f4f290847a4df02d0b93cdbf39b4b0e71acefbe80573e7e6b9342a7abd7b290a"
+    }
+  ]
+}

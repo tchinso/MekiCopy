@@ -34,13 +34,12 @@ def suite_root() -> Path:
 
 
 def log_directory(kind: str, component: str | None = None) -> Path:
-    if getattr(sys, "frozen", False):
-        try:
-            from runtime_paths import log_dir
+    try:
+        from runtime_paths import log_dir
 
-            return log_dir(component or _component, kind)
-        except Exception:
-            pass
+        return log_dir(component or _component, kind)
+    except Exception:
+        pass
     directory = suite_root() / kind
     directory.mkdir(parents=True, exist_ok=True)
     return directory

@@ -15,6 +15,7 @@ import zipfile
 from ctypes import wintypes
 
 from mekicopy_runtime import _get_app_dir
+from runtime_paths import writable_app_data_dir
 
 DETACHED_WINDOW_TITLE = "MekiCopy - 분리 버튼"
 MAGPIE_RELEASE_API_URL = "https://api.github.com/repos/Blinue/Magpie/releases/latest"
@@ -24,13 +25,21 @@ def _json_request(
     payload: dict | None = None,
     timeout: float = 5.0,
     method: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> dict:
     data = None
-    headers = {"Accept": "application/json"}
+    request_headers = {"Accept": "application/json"}
+    if headers:
+        request_headers.update(headers)
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers["Content-Type"] = "application/json; charset=utf-8"
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        request_headers["Content-Type"] = "application/json; charset=utf-8"
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers=request_headers,
+        method=method,
+    )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         raw = response.read().decode("utf-8")
     if not raw:
@@ -99,14 +108,16 @@ def request_translation_and_show(
     hytrans_url: str,
     overlayer_url: str,
     overlayer_config: dict | None = None,
-    timeout: float = 130.0,
+    timeout: float = 650.0,
 ) -> str:
     """Translate text through HYTrans and publish it to a verified overlay.
 
     This is deliberately UI-free so desktop windows can run the network wait
     outside Tk's event loop. All URLs are captured by the caller before a
     background task starts, preventing settings edits from changing a request
-    midway through execution.
+    midway through execution. The default exceeds HYTrans's bounded 600-second
+    server timeout so a slow MT2 request receives the server's real response
+    instead of failing first in the client.
     """
     hytrans_base = hytrans_url.rstrip("/")
     overlayer_base = overlayer_url.rstrip("/")
@@ -271,20 +282,38 @@ def _startupinfo_for_background() -> subprocess.STARTUPINFO | None:
 
 
 def _magpie_install_dir() -> str:
-    return os.path.join(os.path.dirname(_get_app_dir()), "MagPie")
+    return str(writable_app_data_dir("MekiCopy") / "MagPie")
+
+
+def _magpie_install_candidates() -> list[str]:
+    # Keep finding suites installed by earlier releases at the distribution
+    # root, while all new files follow the executable-adjacent-first policy.
+    candidates = [
+        _magpie_install_dir(),
+        os.path.join(os.path.dirname(_get_app_dir()), "MagPie"),
+    ]
+    seen: set[str] = set()
+    result: list[str] = []
+    for candidate in candidates:
+        key = os.path.normcase(os.path.abspath(candidate))
+        if key not in seen:
+            seen.add(key)
+            result.append(candidate)
+    return result
 
 
 def _find_magpie_executable(directory: str | None = None) -> str | None:
-    install_dir = directory or _magpie_install_dir()
-    direct_path = os.path.join(install_dir, "MagPie.exe")
-    if os.path.isfile(direct_path):
-        return direct_path
-    if not os.path.isdir(install_dir):
-        return None
-    for root, _dirs, files in os.walk(install_dir):
-        for filename in files:
-            if filename.casefold() == "magpie.exe":
-                return os.path.join(root, filename)
+    install_dirs = [directory] if directory else _magpie_install_candidates()
+    for install_dir in install_dirs:
+        direct_path = os.path.join(install_dir, "MagPie.exe")
+        if os.path.isfile(direct_path):
+            return direct_path
+        if not os.path.isdir(install_dir):
+            continue
+        for root, _dirs, files in os.walk(install_dir):
+            for filename in files:
+                if filename.casefold() == "magpie.exe":
+                    return os.path.join(root, filename)
     return None
 
 

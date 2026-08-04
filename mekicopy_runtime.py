@@ -7,7 +7,13 @@ import tkinter as tk
 from ctypes import wintypes
 
 from PIL import Image, ImageTk
-from runtime_paths import is_ascii_path, path_for_tcl, sync_tk_runtime, tk_runtime_roots
+from runtime_paths import (
+    is_ascii_path,
+    path_for_tcl,
+    state_data_dir,
+    sync_tk_runtime,
+    tk_runtime_roots,
+)
 
 ICON_FILENAME = "MekiCopy.ico"
 APP_USER_MODEL_ID = "MekiCopy.MekiCopy"
@@ -46,7 +52,7 @@ def _set_app_user_model_id() -> None:
 
 
 def _get_icon_path() -> str | None:
-    for directory in (_get_resource_dir(), _get_app_dir()):
+    for directory in (_get_app_dir(), _get_resource_dir()):
         candidate = os.path.join(directory, ICON_FILENAME)
         if os.path.exists(candidate):
             return candidate
@@ -195,7 +201,8 @@ def _prepare_windowed_streams() -> None:
     capture_windowed_streams()
 
 
-BOOKMARKS_FILE = os.path.join(_get_app_dir(), "bookmarks.txt")
-SETTINGS_FILE = os.path.join(_get_app_dir(), "settings.cfg")
-DETACHED_REGION_FILE = os.path.join(_get_app_dir(), DETACHED_REGION_FILENAME)
-DETACHED_GEOMETRY_FILE = os.path.join(_get_app_dir(), DETACHED_GEOMETRY_FILENAME)
+_STATE_DATA_DIR = state_data_dir("MekiCopy")
+BOOKMARKS_FILE = str(_STATE_DATA_DIR / "bookmarks.txt")
+SETTINGS_FILE = str(_STATE_DATA_DIR / "settings.cfg")
+DETACHED_REGION_FILE = str(_STATE_DATA_DIR / DETACHED_REGION_FILENAME)
+DETACHED_GEOMETRY_FILE = str(_STATE_DATA_DIR / DETACHED_GEOMETRY_FILENAME)
