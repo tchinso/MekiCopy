@@ -8,9 +8,9 @@ $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
-$PipVersion = "26.1.2"
+$PipVersion = "26.2.1"
 $RequirementsFile = Join-Path $PSScriptRoot "requirements-build.txt"
-$OnnxRuntimeGpuVersion = "1.27.0"
+$OnnxRuntimeGpuVersion = "1.28.0"
 
 function Test-BuildPython {
     param([Parameter(Mandatory = $true)][string]$Candidate)
@@ -21,8 +21,8 @@ function Test-BuildPython {
 
     $probe = @'
 import sys
-if sys.version_info < (3, 11):
-    raise SystemExit("Python 3.11 or newer is required")
+if not ((3, 12) <= sys.version_info[:2] < (3, 15)):
+    raise SystemExit("Python 3.12 through 3.14 is required")
 import tkinter as tk
 root = tk.Tk()
 root.withdraw()
@@ -108,13 +108,13 @@ function Resolve-BuildPython {
         if (Test-BuildPython -Candidate $expanded) {
             return (Resolve-Path -LiteralPath $expanded).Path
         }
-        Write-Warning "Rejected Python because Tk initialization failed: $expanded"
+        Write-Warning "Rejected Python because its version or Tk runtime is unsupported: $expanded"
     }
 
     if ($RequestedPython) {
         throw "The requested Python cannot create a Tk window: $RequestedPython"
     }
-    throw "No usable Python with Tk was found. Install Python 3.11+ with Tcl/Tk, or pass -PythonExe."
+    throw "No usable Python with Tk was found. Install Python 3.12-3.14 with Tcl/Tk, or pass -PythonExe."
 }
 
 function Invoke-CheckedPython {
@@ -183,7 +183,7 @@ function Assert-RuntimeAssetManifest {
     if ($manifest.transformers.version -cne "4.2.0") {
         throw "$Description has an unexpected Transformers.js version"
     }
-    if ($manifest.onnxRuntimeWeb.version -cne "1.26.0-dev.20260416-b7804b056c") {
+    if ($manifest.onnxRuntimeWeb.version -cne "1.27.0") {
         throw "$Description has an unexpected ONNX Runtime Web version"
     }
 
@@ -192,6 +192,8 @@ function Assert-RuntimeAssetManifest {
         "transformers.LICENSE.txt",
         "onnxruntime-web.LICENSE.txt",
         "onnxruntime-web.ThirdPartyNotices.txt",
+        "worker.html",
+        "worker.js",
         "wasm/ort-wasm-simd-threaded.asyncify.mjs",
         "wasm/ort-wasm-simd-threaded.asyncify.wasm",
         "wasm/ort-wasm-simd-threaded.jsep.mjs",
@@ -515,25 +517,34 @@ import fastapi
 import huggingface_hub
 import meikiocr
 import mss
+import numpy
 import onnxruntime
 import PIL
+import pydantic
 import sherpa_onnx
 import soundcard
+import typer
 import uvicorn
+import cv2
 root = tk.Tk()
 root.withdraw()
 root.update_idletasks()
 root.destroy()
 expected = {
     "meikiocr": "0.3.4",
-    "pyinstaller": "6.21.0",
+    "pyinstaller": "6.22.0",
     "mss": "10.2.0",
-    "pillow": "12.2.0",
-    "fastapi": "0.138.0",
-    "uvicorn": "0.49.0",
-    "huggingface-hub": "1.20.1",
-    "onnxruntime-gpu": "1.27.0",
-    "sherpa-onnx": "1.13.3",
+    "pillow": "12.3.0",
+    "numpy": "2.5.2",
+    "opencv-python-headless": "5.0.0.93",
+    "fastapi": "0.141.1",
+    "uvicorn": "0.52.1",
+    "pydantic": "2.13.4",
+    "typer": "0.27.1",
+    "huggingface-hub": "1.27.0",
+    "onnxruntime": "1.28.0",
+    "onnxruntime-gpu": "1.28.0",
+    "sherpa-onnx": "1.13.4",
     "SoundCard": "0.4.6",
 }
 for package, wanted in expected.items():
@@ -541,9 +552,18 @@ for package, wanted in expected.items():
     if actual != wanted:
         raise SystemExit(f"{package} {actual} is installed; expected {wanted}")
     print(f"{package}=={actual}")
+if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
+    raise SystemExit(
+        "onnxruntime-gpu metadata is installed, but CUDAExecutionProvider is missing; "
+        "the CPU wheel likely overwrote the GPU runtime"
+    )
+print(f"ONNX Runtime providers: {onnxruntime.get_available_providers()}")
 print("Pinned build dependencies and Tk are ready")
 '@
 Invoke-CheckedPythonScript $dependencyProbe
+
+Write-Host "Running source regression tests..."
+Invoke-CheckedPython @("-m", "unittest", "discover", "-s", "tests", "-v")
 
 $modelDir = Join-Path $PSScriptRoot "runtime_models\meikiocr"
 New-Item -ItemType Directory -Path $modelDir -Force | Out-Null
@@ -657,6 +677,10 @@ Assert-ArtifactFile `
     -AppRoot $mekiCopyRoot `
     -RelativePath "_internal\onnxruntime\capi\onnxruntime.dll" `
     -Description "MekiCopy ONNX Runtime core"
+Assert-ArtifactFile `
+    -AppRoot $mekiCopyRoot `
+    -RelativePath "_internal\onnxruntime\capi\onnxruntime_providers_cuda.dll" `
+    -Description "MekiCopy ONNX Runtime CUDA provider"
 Assert-ArtifactPattern `
     -AppRoot $mekiCopyRoot `
     -RelativeDirectory "_internal\onnxruntime\capi" `

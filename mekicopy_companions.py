@@ -15,7 +15,7 @@ import zipfile
 from ctypes import wintypes
 
 from mekicopy_runtime import _get_app_dir
-from runtime_paths import writable_app_data_dir
+from runtime_paths import writable_app_subdir
 
 DETACHED_WINDOW_TITLE = "MekiCopy - 분리 버튼"
 MAGPIE_RELEASE_API_URL = "https://api.github.com/repos/Blinue/Magpie/releases/latest"
@@ -151,16 +151,34 @@ def _terminate_process_tree(process: subprocess.Popen | None) -> None:
         return
     assert process is not None
     if os.name == "nt":
-        completed = subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if completed.returncode == 0:
-            return
-    process.terminate()
+        try:
+            completed = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            completed = None
+        if completed is not None and completed.returncode == 0:
+            try:
+                process.wait(timeout=5)
+                return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    try:
+        process.terminate()
+        process.wait(timeout=5)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        process.kill()
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def _mekicopy_process_command(*arguments: str) -> list[str]:
@@ -282,7 +300,7 @@ def _startupinfo_for_background() -> subprocess.STARTUPINFO | None:
 
 
 def _magpie_install_dir() -> str:
-    return str(writable_app_data_dir("MekiCopy") / "MagPie")
+    return str(writable_app_subdir("MekiCopy", "MagPie"))
 
 
 def _magpie_install_candidates() -> list[str]:
@@ -355,9 +373,11 @@ def _install_latest_magpie() -> str:
         release = json.loads(response.read().decode("utf-8"))
     asset = _select_magpie_release_asset(release)
     install_dir = _magpie_install_dir()
-    suite_root = os.path.dirname(install_dir)
-    os.makedirs(suite_root, exist_ok=True)
-    staging_dir = tempfile.mkdtemp(prefix=".magpie-install-", dir=suite_root)
+    # The writable-path policy probes the concrete MagPie child directory, so
+    # keep staging under that verified directory instead of assuming its parent
+    # accepts new children as well.
+    os.makedirs(install_dir, exist_ok=True)
+    staging_dir = tempfile.mkdtemp(prefix=".magpie-install-", dir=install_dir)
     try:
         archive_path = os.path.join(staging_dir, "MagPie.zip")
         download_request = urllib.request.Request(

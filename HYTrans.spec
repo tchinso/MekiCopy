@@ -9,14 +9,14 @@ if Path("assets").exists():
 if Path("MekiCopy.ico").exists():
     datas.append(("MekiCopy.ico", "."))
 
-hiddenimports = []
+hiddenimports = ["hytrans_main"]
 hiddenimports += collect_submodules("fastapi")
 hiddenimports += collect_submodules("starlette")
 hiddenimports += collect_submodules("uvicorn")
 hiddenimports += collect_submodules("websockets")
 
 a = Analysis(
-    ["hytrans_main.py"],
+    ["meki_bootstrap.py"],
     pathex=[],
     binaries=[],
     datas=datas,

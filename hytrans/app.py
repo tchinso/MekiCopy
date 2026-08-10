@@ -42,6 +42,7 @@ state = AppState()
 translation_queue = TranslationQueue()
 queue_task: asyncio.Task | None = None
 worker_opener: Callable[[], None] | None = None
+worker_open_task: asyncio.Task[None] | None = None
 shutdown_handler: Callable[[], None] | None = None
 shutdown_token: str | None = None
 
@@ -97,6 +98,23 @@ def _json_response(ok: bool, text: str = "") -> dict[str, object]:
 def configure_worker_opener(opener: Callable[[], None] | None) -> None:
     global worker_opener
     worker_opener = opener
+
+
+async def _open_worker_singleflight() -> None:
+    """Coalesce concurrent timeout recovery and explicit reopen requests."""
+    global worker_open_task
+    if state.worker_connected:
+        return
+    if worker_opener is None:
+        raise RuntimeError("worker opener is unavailable")
+    if worker_open_task is None or worker_open_task.done():
+        worker_open_task = asyncio.create_task(asyncio.to_thread(worker_opener))
+    task = worker_open_task
+    try:
+        await asyncio.shield(task)
+    finally:
+        if worker_open_task is task and task.done():
+            worker_open_task = None
 
 
 def configure_shutdown_handler(
@@ -194,8 +212,9 @@ async def _translate_text(text: str) -> str:
             state.state = "WORKER_TIMEOUT"
             if worker_opener is not None:
                 try:
-                    await asyncio.to_thread(worker_opener)
-                    state.state = "BROWSER_OPENING"
+                    await _open_worker_singleflight()
+                    if not state.worker_connected:
+                        state.state = "BROWSER_OPENING"
                 except Exception as exc:
                     state.state = "ERROR"
                     state.error = str(exc)
@@ -287,8 +306,12 @@ async def reopen_worker() -> dict[str, object]:
     try:
         state.state = "BROWSER_OPENING"
         state.error = None
-        await asyncio.to_thread(worker_opener)
-        return {"ok": True, "workerConnected": False, "state": state.state}
+        await _open_worker_singleflight()
+        return {
+            "ok": True,
+            "workerConnected": state.worker_connected,
+            "state": state.state,
+        }
     except Exception as exc:
         state.state = "ERROR"
         state.error = str(exc)

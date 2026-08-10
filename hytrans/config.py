@@ -126,9 +126,13 @@ def detect_model_mode() -> str:
 
 def has_local_wasm_files() -> bool:
     wasm_dir = assets_dir() / "wasm"
-    if not wasm_dir.exists():
-        return False
-    return any(path.suffix == ".wasm" for path in wasm_dir.iterdir())
+    return all(
+        (wasm_dir / filename).is_file()
+        for filename in (
+            "ort-wasm-simd-threaded.asyncify.mjs",
+            "ort-wasm-simd-threaded.asyncify.wasm",
+        )
+    )
 
 
 def runtime_config() -> RuntimeConfig:

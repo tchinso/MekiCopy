@@ -5,13 +5,16 @@ import ctypes
 import datetime as dt
 import json
 import queue
+import re
+import shutil
 import sys
 import threading
+import time
 import traceback
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import soundcard as sc
@@ -25,7 +28,7 @@ from audio_capture_core import (
     collect_vad_intervals,
     create_recognizer,
     ensure_models,
-    ensure_ascii_model_paths,
+    model_paths_are_valid,
     model_root_candidates,
     normalize_precision,
     normalize_preset,
@@ -35,7 +38,7 @@ from audio_capture_core import (
     translate_text,
     wav_to_mono_16k,
 )
-from runtime_paths import prepare_tk_environment, writable_app_data_dir
+from runtime_paths import prepare_tk_environment, writable_app_subdir
 from service_ports import (
     AUDIO_CAPTURE_DEFAULT_PORT,
     HYTRANS_DEFAULT_PORT,
@@ -59,6 +62,15 @@ from tkinter import messagebox
 DEFAULT_PORT = AUDIO_CAPTURE_DEFAULT_PORT
 DEFAULT_SCRIPT_URL = f"http://127.0.0.1:{SCRIPT_DEFAULT_PORT}"
 DEFAULT_HYTRANS_URL = f"http://127.0.0.1:{HYTRANS_DEFAULT_PORT}"
+MAX_REQUEST_BYTES = 1024 * 1024
+MAX_RECORDING_SECONDS = 4 * 60 * 60
+MIN_RECORDING_FREE_BYTES = 2 * 1024 * 1024 * 1024
+AUDIO_TRANSLATION_TIMEOUT_SECONDS = 300
+MAX_TRANSLATION_SESSION_SECONDS = 30 * 60
+MAX_CONSECUTIVE_TRANSLATION_FAILURES = 2
+_SESSION_DIRECTORY_PATTERN = re.compile(r"^\d{8}-\d{6}-\d{6}$")
+_WORK_SWEEP_LOCK = threading.Lock()
+_WORK_SWEEP_DONE = False
 _WINDOW_STREAM = None
 
 
@@ -71,8 +83,26 @@ def resource_dir() -> Path:
 
 
 def work_dir() -> Path:
-    path = writable_app_data_dir("MekiAudioCapture") / "work"
-    path.mkdir(parents=True, exist_ok=True)
+    global _WORK_SWEEP_DONE
+    path = writable_app_subdir("MekiAudioCapture", "work")
+    with _WORK_SWEEP_LOCK:
+        if not _WORK_SWEEP_DONE:
+            _WORK_SWEEP_DONE = True
+            cutoff = time.time() - 7 * 24 * 60 * 60
+            try:
+                children = list(path.iterdir())
+            except OSError:
+                children = []
+            for child in children:
+                try:
+                    if (
+                        child.is_dir()
+                        and _SESSION_DIRECTORY_PATTERN.fullmatch(child.name)
+                        and child.stat().st_mtime < cutoff
+                    ):
+                        cleanup_work_files(child)
+                except OSError:
+                    pass
     return path
 
 
@@ -104,6 +134,13 @@ class CaptureController:
         self.wav_path: Path | None = None
         self.session_work_dir: Path | None = None
         self.session_id = ""
+        self.session_options = (
+            self.precision,
+            self.preset,
+            self.script_url,
+            self.hytrans_url,
+        )
+        self._session_generation = 0
         self.state = "READY"
         self.status = "녹음 준비"
         self.error = ""
@@ -124,18 +161,21 @@ class CaptureController:
             }
 
     def configure(self, payload: dict[str, Any]) -> None:
-        if self.state not in {"READY", "ERROR"}:
-            raise RuntimeError("녹음 또는 처리 중에는 설정을 바꿀 수 없습니다.")
-        previous_precision = self.precision
-        self.precision = normalize_precision(str(payload.get("precision", self.precision)))
-        self.preset = normalize_preset(str(payload.get("preset", self.preset)))
-        self.script_url = str(payload.get("scriptUrl", self.script_url)).rstrip("/")
-        self.hytrans_url = str(payload.get("hytransUrl", self.hytrans_url)).rstrip("/")
+        with self._lock:
+            if self.state not in {"READY", "ERROR"}:
+                raise RuntimeError("녹음 또는 처리 중에는 설정을 바꿀 수 없습니다.")
+            previous_precision = self.precision
+            self.precision = normalize_precision(str(payload.get("precision", self.precision)))
+            self.preset = normalize_preset(str(payload.get("preset", self.preset)))
+            self.script_url = str(payload.get("scriptUrl", self.script_url)).rstrip("/")
+            self.hytrans_url = str(payload.get("hytransUrl", self.hytrans_url)).rstrip("/")
+            precision_changed = self.precision != previous_precision
+            if precision_changed:
+                self.prepared_models = None
+                self.prepared_models_precision = ""
         if "debugLog" in payload:
             set_debug_enabled(bool(payload["debugLog"]))
-        if self.precision != previous_precision:
-            self.prepared_models = None
-            self.prepared_models_precision = ""
+        if precision_changed:
             self.prepare_models()
 
     def _set_state(self, state: str, status: str, error: str = "") -> None:
@@ -148,16 +188,62 @@ class CaptureController:
         if error:
             log_error("state", error)
 
+    def _set_state_for_session(
+        self,
+        generation: int,
+        state: str,
+        status: str,
+        error: str = "",
+        required_state: str | None = None,
+    ) -> bool:
+        """Update state only if the reporting recording session is still current."""
+        with self._lock:
+            if generation != self._session_generation:
+                return False
+            if required_state is not None and self.state != required_state:
+                return False
+            self.state = state
+            self.status = status
+            self.error = error
+        self.events.put(("status", status))
+        log_debug("state", f"state: {state}\nstatus: {status}")
+        if error:
+            log_error("state", error)
+        return True
+
     def prepare_models(self) -> None:
         """Prepare models immediately without blocking the Tk event loop."""
-        if self.model_thread and self.model_thread.is_alive():
-            return
-        self._set_state("DOWNLOADING", "음성인식 모델을 확인하고 있습니다...")
-        self.model_thread = threading.Thread(target=self._prepare_models, daemon=True)
-        self.model_thread.start()
+        with self._lock:
+            if self.model_thread and self.model_thread.is_alive():
+                return
+            if self.state not in {"READY", "ERROR"}:
+                return
+            precision = self.precision
+            self.state = "DOWNLOADING"
+            self.status = "음성인식 모델을 확인하고 있습니다..."
+            self.error = ""
+            model_thread = threading.Thread(
+                target=self._prepare_models,
+                args=(precision,),
+                daemon=True,
+            )
+            self.model_thread = model_thread
+        self.events.put(("status", self.status))
+        log_debug("state", f"state: DOWNLOADING\nstatus: {self.status}")
+        try:
+            model_thread.start()
+        except Exception as exc:
+            log_error("prepare_models_start", exc)
+            with self._lock:
+                if self.model_thread is model_thread:
+                    self.model_thread = None
+            self._set_state(
+                "ERROR",
+                f"음성인식 모델 준비 시작 실패: {exc}",
+                traceback.format_exc(),
+            )
 
-    def _prepare_models(self) -> None:
-        precision = self.precision
+    def _prepare_models(self, precision: str) -> None:
         try:
             models = ensure_models(
                 app_dir(),
@@ -166,63 +252,144 @@ class CaptureController:
                 progress=lambda text: self._set_state("DOWNLOADING", text),
             )
             with self._lock:
+                if precision != self.precision or self.state != "DOWNLOADING":
+                    return
                 self.prepared_models = models
                 self.prepared_models_precision = precision
             self._set_state("READY", "녹음 준비")
         except Exception as exc:
             log_error("prepare_models", exc)
-            self._set_state(
-                "ERROR",
-                f"음성인식 모델 준비 실패: {exc}",
-                traceback.format_exc(),
-            )
+            with self._lock:
+                current = precision == self.precision and self.state == "DOWNLOADING"
+            if current:
+                self._set_state(
+                    "ERROR",
+                    f"음성인식 모델 준비 실패: {exc}",
+                    traceback.format_exc(),
+                )
 
-    def _models_for_processing(self) -> dict[str, Path]:
+    def _models_for_processing(
+        self,
+        precision: str | None = None,
+        progress: Callable[[str], None] | None = None,
+    ) -> dict[str, Path]:
         with self._lock:
-            if self.prepared_models_precision == self.precision and self.prepared_models:
-                if all(path.is_file() and path.stat().st_size > 0 for path in self.prepared_models.values()):
+            precision = normalize_precision(precision or self.precision)
+        with self._lock:
+            if self.prepared_models_precision == precision and self.prepared_models:
+                if model_paths_are_valid(self.prepared_models):
                     return dict(self.prepared_models)
         models = ensure_models(
             app_dir(),
             resource_dir(),
-            self.precision,
-            progress=lambda text: self._set_state("DOWNLOADING", text),
+            precision,
+            progress=progress or (lambda text: self._set_state("DOWNLOADING", text)),
         )
         with self._lock:
             self.prepared_models = models
-            self.prepared_models_precision = self.precision
+            self.prepared_models_precision = precision
         return models
 
     def start(self) -> None:
         with self._lock:
-            if self.state != "READY":
+            if self.state not in {"READY", "ERROR"}:
+                return
+            if self.record_thread and self.record_thread.is_alive():
+                self.status = "이전 녹음 장치가 아직 종료 중입니다. 잠시 후 다시 시도해 주세요."
+                self.events.put(("status", self.status))
                 return
             # Reserve the state before allocating paths so concurrent HTTP
             # requests cannot begin a second recording session.
             self.state = "STARTING"
-        session_root = work_dir()
-        now = dt.datetime.now()
-        self.session_id = f"{now:%Y%m%d-%H%M%S-%f}"
-        self.session_work_dir = session_root / self.session_id
-        self.session_work_dir.mkdir(parents=True, exist_ok=True)
-        self.wav_path = self.session_work_dir / "capture.wav"
-        self.stop_event.clear()
-        self._set_state("RECORDING", "컴퓨터 소리를 녹음하고 있습니다…")
-        self.record_thread = threading.Thread(target=self._record_loop, daemon=True)
-        self.record_thread.start()
+            self._session_generation += 1
+            generation = self._session_generation
+            session_options = (
+                self.precision,
+                self.preset,
+                self.script_url,
+                self.hytrans_url,
+            )
+        session_work_dir: Path | None = None
+        try:
+            session_root = work_dir()
+            if shutil.disk_usage(session_root).free < MIN_RECORDING_FREE_BYTES:
+                raise RuntimeError("녹음을 시작하려면 작업 드라이브에 2GB 이상의 여유 공간이 필요합니다.")
+            now = dt.datetime.now()
+            session_id = f"{now:%Y%m%d-%H%M%S-%f}"
+            session_work_dir = session_root / session_id
+            session_work_dir.mkdir(parents=True, exist_ok=True)
+            wav_path = session_work_dir / "capture.wav"
+            stop_event = threading.Event()
+            record_thread = threading.Thread(
+                target=self._record_loop,
+                args=(generation, stop_event, wav_path, session_work_dir),
+                daemon=True,
+            )
+            with self._lock:
+                if generation != self._session_generation:
+                    cleanup_work_files(session_work_dir)
+                    return
+                self.session_id = session_id
+                self.session_work_dir = session_work_dir
+                self.wav_path = wav_path
+                self.session_options = session_options
+                self.stop_event = stop_event
+                self.record_thread = record_thread
+            record_thread.start()
+            self._set_state_for_session(
+                generation,
+                "RECORDING",
+                "컴퓨터 소리를 녹음하고 있습니다…",
+                required_state="STARTING",
+            )
+        except Exception as exc:
+            log_error("start_recording", exc)
+            if session_work_dir is not None:
+                cleanup_work_files(session_work_dir)
+            self._set_state_for_session(
+                generation,
+                "ERROR",
+                f"녹음 시작 실패: {exc}",
+                traceback.format_exc(),
+            )
 
     def stop(self) -> None:
         with self._lock:
             if self.state != "RECORDING":
                 return
             self.state = "STOPPING"
-        self._set_state("STOPPING", "녹음을 마무리하고 있습니다…")
-        self.stop_event.set()
-        self.process_thread = threading.Thread(target=self._finish_and_process, daemon=True)
-        self.process_thread.start()
+            generation = self._session_generation
+            stop_event = self.stop_event
+            record_thread = self.record_thread
+            wav_path = self.wav_path
+            session_work_dir = self.session_work_dir
+            session_id = self.session_id
+            session_options = self.session_options
+        self._set_state_for_session(generation, "STOPPING", "녹음을 마무리하고 있습니다…")
+        stop_event.set()
+        process_thread = threading.Thread(
+            target=self._finish_and_process,
+            args=(
+                generation,
+                record_thread,
+                wav_path,
+                session_work_dir,
+                session_id,
+                session_options,
+            ),
+            daemon=True,
+        )
+        self.process_thread = process_thread
+        process_thread.start()
 
-    def _record_loop(self) -> None:
-        assert self.wav_path is not None
+    def _record_loop(
+        self,
+        generation: int,
+        stop_event: threading.Event,
+        wav_path: Path,
+        session_work_dir: Path,
+    ) -> None:
+        stop_reason = ""
         try:
             speaker = sc.default_speaker()
             if speaker is None:
@@ -231,7 +398,7 @@ class CaptureController:
             if loopback is None:
                 raise RuntimeError("기본 출력 장치의 WASAPI loopback을 열 수 없습니다.")
             chunk_frames = CAPTURE_SAMPLE_RATE // 10
-            with wave.open(str(self.wav_path), "wb") as output:
+            with wave.open(str(wav_path), "wb") as output:
                 output.setnchannels(2)
                 output.setsampwidth(2)
                 output.setframerate(CAPTURE_SAMPLE_RATE)
@@ -240,74 +407,185 @@ class CaptureController:
                     channels=2,
                     blocksize=chunk_frames,
                 ) as recorder:
-                    while not self.stop_event.is_set():
+                    recorded_frames = 0
+                    while not stop_event.is_set():
                         block = recorder.record(numframes=chunk_frames)
                         pcm = np.clip(block, -1.0, 1.0)
                         output.writeframes((pcm * 32767.0).astype("<i2").tobytes())
+                        recorded_frames += len(block)
+                        if recorded_frames >= MAX_RECORDING_SECONDS * CAPTURE_SAMPLE_RATE:
+                            stop_reason = "최대 녹음 시간 4시간에 도달해 자동으로 종료합니다."
+                            stop_event.set()
+                            break
+                        if recorded_frames % (CAPTURE_SAMPLE_RATE * 10) < chunk_frames:
+                            estimated_raw_bytes = int(recorded_frames * 4 / 3)
+                            required_free = max(
+                                MIN_RECORDING_FREE_BYTES,
+                                estimated_raw_bytes + 512 * 1024 * 1024,
+                            )
+                            if shutil.disk_usage(session_work_dir).free < required_free:
+                                stop_reason = "작업 드라이브의 여유 공간이 부족해 녹음을 자동으로 종료합니다."
+                                stop_event.set()
+                                break
+            if stop_reason and self._set_state_for_session(
+                generation,
+                "RECORDING",
+                stop_reason,
+                required_state="RECORDING",
+            ):
+                self.stop()
         except Exception as exc:
             log_error("record", exc)
-            self._set_state("ERROR", f"녹음 실패: {exc}", traceback.format_exc())
-            self.stop_event.set()
-            if self.session_work_dir is not None:
-                cleanup_work_files(self.session_work_dir)
+            self._set_state_for_session(
+                generation,
+                "ERROR",
+                f"녹음 실패: {exc}",
+                traceback.format_exc(),
+            )
+            stop_event.set()
+            cleanup_work_files(session_work_dir)
 
-    def _finish_and_process(self) -> None:
-        if self.record_thread:
-            self.record_thread.join(timeout=5)
-            if self.record_thread.is_alive():
-                self._set_state("ERROR", "Recording did not stop in time.")
+    def _finish_and_process(
+        self,
+        generation: int | None = None,
+        record_thread: threading.Thread | None = None,
+        wav_path: Path | None = None,
+        session_work_dir: Path | None = None,
+        session_id: str | None = None,
+        session_options: tuple[str, str, str, str] | None = None,
+    ) -> None:
+        # Optional arguments keep direct diagnostic/unit-test calls convenient;
+        # normal recordings always pass an immutable session snapshot.
+        generation = self._session_generation if generation is None else generation
+        record_thread = self.record_thread if record_thread is None else record_thread
+        wav_path = self.wav_path if wav_path is None else wav_path
+        session_work_dir = self.session_work_dir if session_work_dir is None else session_work_dir
+        session_id = self.session_id if session_id is None else session_id
+        session_options = self.session_options if session_options is None else session_options
+        precision, preset, script_url, hytrans_url = session_options
+        if record_thread:
+            record_thread.join(timeout=5)
+            if record_thread.is_alive():
+                self._set_state_for_session(generation, "ERROR", "Recording did not stop in time.")
                 return
-        if self.state == "ERROR":
-            if self.session_work_dir is not None:
-                cleanup_work_files(self.session_work_dir)
+        with self._lock:
+            is_current = generation == self._session_generation
+            current_state = self.state
+        if not is_current:
+            if session_work_dir is not None:
+                cleanup_work_files(session_work_dir)
+            return
+        if current_state == "ERROR":
+            if session_work_dir is not None:
+                cleanup_work_files(session_work_dir)
             return
         final_state = "READY"
         final_status = "완료"
         final_error = ""
         audio = None
         try:
-            assert self.wav_path is not None
-            session_work_dir = self.session_work_dir or work_dir()
-            raw_path = session_work_dir / "capture-16k.f32"
-            self._set_state("PROCESSING", "음성을 16 kHz mono로 변환하고 있습니다…")
-            audio = wav_to_mono_16k(self.wav_path, raw_path)
-            models = self._models_for_processing()
-            models = ensure_ascii_model_paths(
-                models,
-                work_dir() / "models" / self.precision,
+            assert wav_path is not None
+            processing_dir = session_work_dir or work_dir()
+            raw_path = processing_dir / "capture-16k.f32"
+            self._set_state_for_session(generation, "PROCESSING", "음성을 16 kHz mono로 변환하고 있습니다…")
+            audio = wav_to_mono_16k(wav_path, raw_path)
+            if audio.size == 0:
+                final_status = "완료: 녹음된 오디오가 없습니다."
+                return
+            models = self._models_for_processing(
+                precision,
+                progress=lambda text: self._set_state_for_session(
+                    generation,
+                    "DOWNLOADING",
+                    text,
+                ),
             )
-            self._set_state("PROCESSING", f"VAD로 음성 구간을 찾고 있습니다 ({self.preset})…")
-            intervals = collect_vad_intervals(audio, models["vad"], self.preset)
-            segments = build_segments(audio, intervals, self.preset)
-            self._set_state("PROCESSING", f"일본어 음성을 인식하고 있습니다 (0/{len(segments)})…")
+            self._set_state_for_session(generation, "PROCESSING", f"VAD로 음성 구간을 찾고 있습니다 ({preset})…")
+            intervals = collect_vad_intervals(audio, models["vad"], preset)
+            segments = build_segments(audio, intervals, preset)
+            if not segments:
+                final_status = "완료: 인식할 음성이 없습니다."
+                return
+            self._set_state_for_session(generation, "PROCESSING", f"일본어 음성을 인식하고 있습니다 (0/{len(segments)})…")
             recognizer = create_recognizer(models)
             count = 0
+            delivery_failures = 0
+
+            def deliver(stage: str, action) -> bool:
+                for attempt in range(2):
+                    try:
+                        action()
+                        return True
+                    except Exception as exc:
+                        log_error(stage, exc)
+                        if attempt == 0:
+                            time.sleep(0.15)
+                return False
 
             def publish(result) -> None:
-                nonlocal count
-                entry_id = f"{self.session_id}-{result.segment_id}"
-                append_script_text(self.script_url, result, entry_id=entry_id)
+                nonlocal count, delivery_failures
+                entry_id = f"{session_id}-{result.segment_id}"
+                if not deliver(
+                    "script_append",
+                    lambda: append_script_text(script_url, result, entry_id=entry_id),
+                ):
+                    delivery_failures += 1
                 count += 1
-                self._set_state("PROCESSING", f"일본어 음성을 인식하고 있습니다 ({count}/{len(segments)})…")
+                self._set_state_for_session(generation, "PROCESSING", f"일본어 음성을 인식하고 있습니다 ({count}/{len(segments)})…")
 
             results = recognize_segments(recognizer, segments, on_result=publish)
+            translation_deadline = time.monotonic() + MAX_TRANSLATION_SESSION_SECONDS
+            consecutive_translation_failures = 0
+            translation_failures = 0
             for index, result in enumerate(results, 1):
-                self._set_state("TRANSLATING", f"번역하고 있습니다 ({index}/{len(results)})…")
-                try:
-                    translated = translate_text(self.hytrans_url, result.text_ja)
-                except Exception as exc:
-                    log_error("translate", exc)
-                    translated = f"[번역 실패] {exc}"
-                entry_id = f"{self.session_id}-{result.segment_id}"
-                set_script_translation(self.script_url, result, translated, entry_id=entry_id)
+                self._set_state_for_session(generation, "TRANSLATING", f"번역하고 있습니다 ({index}/{len(results)})…")
+                if time.monotonic() >= translation_deadline:
+                    translated = "[번역 건너뜀] 이번 녹음의 전체 번역 제한 시간(30분)을 초과했습니다."
+                    translation_failures += 1
+                elif consecutive_translation_failures >= MAX_CONSECUTIVE_TRANSLATION_FAILURES:
+                    translated = "[번역 건너뜀] HYTrans가 연속으로 응답하지 않아 나머지 요청을 중단했습니다."
+                    translation_failures += 1
+                else:
+                    try:
+                        translated = translate_text(
+                            hytrans_url,
+                            result.text_ja,
+                            timeout=AUDIO_TRANSLATION_TIMEOUT_SECONDS,
+                        )
+                        if not translated:
+                            raise RuntimeError("HYTrans가 빈 번역 결과를 반환했습니다.")
+                        consecutive_translation_failures = 0
+                    except Exception as exc:
+                        log_error("translate", exc)
+                        translated = f"[번역 실패] {exc}"
+                        consecutive_translation_failures += 1
+                        translation_failures += 1
+                entry_id = f"{session_id}-{result.segment_id}"
+                if not deliver(
+                    "script_translation",
+                    lambda: set_script_translation(
+                        script_url,
+                        result,
+                        translated,
+                        entry_id=entry_id,
+                    ),
+                ):
+                    delivery_failures += 1
             if results:
                 final_status = f"완료: 일본어 {len(results)}개를 인식하고 번역했습니다."
+                if translation_failures:
+                    final_status += f" 번역 실패/건너뜀 {translation_failures}건."
+                if delivery_failures:
+                    final_status += f" 대본 전달 실패 {delivery_failures}건은 로그를 확인해 주세요."
             else:
                 final_status = "완료: 인식된 일본어 음성이 없습니다."
         except Exception as exc:
             log_error("process_audio", exc)
             final_state = "ERROR"
-            final_status = f"처리 실패: {exc}"
+            if "invalid unordered_map" in str(exc):
+                final_status = "처리 실패: 음성 모델의 토큰 사전이 손상되었거나 모델과 맞지 않습니다. 모델을 다시 받아 주세요."
+            else:
+                final_status = f"처리 실패: {exc}"
             final_error = traceback.format_exc()
         finally:
             if isinstance(audio, np.memmap):
@@ -315,13 +593,15 @@ class CaptureController:
                     audio._mmap.close()
                 except Exception:
                     pass
-            if self.session_work_dir is not None:
-                cleanup_work_files(self.session_work_dir)
-            self._set_state(final_state, final_status, final_error)
+            if session_work_dir is not None:
+                cleanup_work_files(session_work_dir)
+            self._set_state_for_session(generation, final_state, final_status, final_error)
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     length = int(handler.headers.get("Content-Length", "0") or 0)
+    if length < 0 or length > MAX_REQUEST_BYTES:
+        raise ValueError("요청 본문이 너무 큽니다.")
     return json.loads(handler.rfile.read(length).decode("utf-8")) if length else {}
 
 
@@ -435,10 +715,6 @@ def main() -> int:
     if args.self_test_models:
         models = resolve_models(app_dir(), resource_dir(), args.precision)
         source_test_wav = models["tokens"].parent / "test.wav"
-        models = ensure_ascii_model_paths(
-            models,
-            work_dir() / "models" / args.precision,
-        )
         collect_vad_intervals(np.zeros(16_000, dtype=np.float32), models["vad"], args.preset)
         recognizer = create_recognizer(models, num_threads=1)
         if source_test_wav.is_file():
@@ -466,9 +742,12 @@ def main() -> int:
         apply_tk_icon(root)
         CaptureWindow(root, controller)
         server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(controller))
+        server.daemon_threads = True
+        server.block_on_close = False
         threading.Thread(target=server.serve_forever, daemon=True).start()
         root.mainloop()
         server.shutdown()
+        server.server_close()
         return 0
     except Exception as exc:
         log_error("main", exc)

@@ -22,8 +22,8 @@ MekiAudioCapture.md
 /models
 /dist-full
 /old-versions
-/tests
-/tests
 /error_log
+/.state_migration.lock
+/.state_migration_v2
 dist.zip
 MekiCopy091.zip

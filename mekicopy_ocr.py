@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import configparser
+import hashlib
 import os
 import sys
 import threading
 import tkinter as tk
+from functools import lru_cache
 from typing import Callable
 from tkinter import messagebox
 
@@ -25,7 +27,7 @@ from mekicopy_runtime import (
     _prepare_tk_library_paths,
     _prepare_windowed_streams,
 )
-from mekicopy_settings import SETTINGS_FILE
+import mekicopy_settings
 from system_logging import log_debug as _system_debug
 from system_logging import log_error as _system_error
 
@@ -38,6 +40,20 @@ CUDA_PROVIDER_REQUIRED_DLLS = (
     "cublas64_13.dll",
     "cudnn64_9.dll",
 )
+OCR_MODEL_MANIFEST = {
+    "meiki.text.detect.v0.1.960x544.onnx": (
+        14_503_825,
+        "40b6a016667745cae7d3055929ae3b8b1e7716aac795f5904cd3c2c7c3b8404b",
+    ),
+    "meiki.text.rec.v0.960x32.onnx": (
+        18_593_254,
+        "3e96bc772fbee9717e536a6353032bb944c3382dd2f6960ef4890decda43b000",
+    ),
+    "meiki.text.rec.v0.vertical.32x480.onnx": (
+        12_872_961,
+        "2c2a83a23bc3b7e6c63962175f507ecc6c5e85cc174f17bdec37d9bbd0bf895a",
+    ),
+}
 
 def postprocess_text(text: str) -> str:
     return " ".join(text.split())
@@ -46,7 +62,7 @@ def postprocess_text(text: str) -> str:
 def _is_debug_logging_enabled() -> bool:
     parser = configparser.ConfigParser()
     try:
-        parser.read(SETTINGS_FILE, encoding="utf-8")
+        parser.read(mekicopy_settings.SETTINGS_FILE, encoding="utf-8")
         return parser.getboolean("settings", "debug_logging", fallback=False)
     except (configparser.Error, TypeError, ValueError, OSError):
         return False
@@ -158,6 +174,23 @@ def _preload_onnxruntime_gpu_dlls() -> None:
         _log_runtime_error("preload_onnxruntime_gpu_dlls", exc)
 
 
+@lru_cache(maxsize=16)
+def _valid_bundled_model(path: str, filename: str) -> bool:
+    expected = OCR_MODEL_MANIFEST.get(filename)
+    if expected is None:
+        return False
+    try:
+        if os.path.getsize(path) != expected[0]:
+            return False
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == expected[1]
+    except OSError:
+        return False
+
+
 def _find_bundled_model(filename: str) -> str | None:
     candidate_dirs = [
         os.path.join(_get_app_dir(), "runtime_models"),
@@ -167,7 +200,7 @@ def _find_bundled_model(filename: str) -> str | None:
     ]
     for directory in candidate_dirs:
         candidate = os.path.join(directory, filename)
-        if os.path.exists(candidate):
+        if _valid_bundled_model(candidate, filename):
             return candidate
     return None
 

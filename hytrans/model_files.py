@@ -10,6 +10,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
+from runtime_paths import writable_app_subdir
+
 
 @dataclass(frozen=True)
 class ModelFileSpec:
@@ -203,8 +205,24 @@ def model_file_path(model_root: Path, relative_path: str) -> Path:
     return model_root.joinpath(*relative_path.split("/"))
 
 
-def _manifest_path(model_root: Path) -> Path:
-    return model_root / MANIFEST_FILENAME
+def _manifest_paths(model_root: Path) -> list[Path]:
+    try:
+        identity = os.path.normcase(str(model_root.resolve()))
+    except OSError:
+        identity = os.path.normcase(os.path.abspath(str(model_root)))
+    cache_key = hashlib.sha256(identity.encode("utf-8", errors="surrogatepass")).hexdigest()
+    candidates = [
+        model_root / MANIFEST_FILENAME,
+        writable_app_subdir("HYTrans", "model-integrity") / f"{cache_key}.json",
+    ]
+    result: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = os.path.normcase(os.path.abspath(str(candidate)))
+        if key not in seen:
+            seen.add(key)
+            result.append(candidate)
+    return result
 
 
 def _empty_manifest(profile: ModelProfile) -> dict[str, object]:
@@ -216,37 +234,62 @@ def _empty_manifest(profile: ModelProfile) -> dict[str, object]:
 
 
 def _read_manifest(model_root: Path, profile: ModelProfile) -> dict[str, object]:
-    path = _manifest_path(model_root)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if payload.get("revision") != profile.revision:
-            return _empty_manifest(profile)
-        manifest_model_id = payload.get("modelId")
-        if manifest_model_id not in {None, profile.model_id}:
-            return _empty_manifest(profile)
-        if not isinstance(payload.get("files"), dict):
-            return _empty_manifest(profile)
-        payload["modelId"] = profile.model_id
-        return payload
-    except (OSError, ValueError, TypeError):
-        return _empty_manifest(profile)
-
-
-def _write_manifest(model_root: Path, payload: dict[str, object]) -> None:
-    model_root.mkdir(parents=True, exist_ok=True)
-    target = _manifest_path(model_root)
-    temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        os.replace(temporary, target)
-    finally:
+    merged = _empty_manifest(profile)
+    merged_files = merged["files"]
+    assert isinstance(merged_files, dict)
+    entry_is_current: dict[str, bool] = {}
+    for path in _manifest_paths(model_root):
         try:
-            temporary.unlink(missing_ok=True)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("revision") != profile.revision:
+                continue
+            manifest_model_id = payload.get("modelId")
+            if manifest_model_id not in {None, profile.model_id}:
+                continue
+            if not isinstance(payload.get("files"), dict):
+                continue
+            for relative_path, entry in payload["files"].items():
+                current = False
+                spec = profile.files.get(relative_path)
+                if isinstance(entry, dict) and spec is not None:
+                    try:
+                        stat = model_file_path(model_root, relative_path).stat()
+                        current = (
+                            entry.get("size") == stat.st_size == spec.size
+                            and entry.get("mtimeNs") == stat.st_mtime_ns
+                            and entry.get("sha256") == spec.sha256
+                        )
+                    except OSError:
+                        current = False
+                # Never let a stale cache entry shadow a current one from a
+                # different writable/read-only manifest location.
+                if relative_path not in merged_files or (
+                    current and not entry_is_current.get(relative_path, False)
+                ):
+                    merged_files[relative_path] = entry
+                    entry_is_current[relative_path] = current
+        except (OSError, ValueError, TypeError):
+            continue
+    return merged
+
+
+def _write_manifest(model_root: Path, payload: dict[str, object]) -> bool:
+    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    for target in _manifest_paths(model_root):
+        temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(text, encoding="utf-8")
+            os.replace(temporary, target)
+            return True
         except OSError:
-            pass
+            continue
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return False
 
 
 def sha256_file(path: Path) -> str:

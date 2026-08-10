@@ -19,16 +19,19 @@ from system_logging import (
     install_exception_hooks,
     install_tk_exception_hook,
     log_debug,
+    log_directory,
     log_error,
     set_debug_enabled,
 )
 
 prepare_tk_environment("MekiCopyRuntime")
 import tkinter as tk
+from tkinter import messagebox
 
 
 DEFAULT_PORT = SCRIPT_DEFAULT_PORT
 DEFAULT_GEOMETRY = "780x560+120+120"
+MAX_REQUEST_BYTES = 1024 * 1024
 _WINDOW_STREAM = None
 
 
@@ -145,7 +148,7 @@ class ScriptWindow:
         self.text.mark_set(end_mark, start_mark)
         self.text.mark_gravity(end_mark, tk.RIGHT)
         self.text.insert(start_mark, translated + "\n", ("translated",))
-        self.text.mark_gravity(end_mark, tk.LEFT)
+        self.text.mark_unset(start_mark, end_mark)
         self.text.see(tk.END)
         self.text.configure(state=tk.DISABLED)
 
@@ -165,6 +168,13 @@ class ScriptWindow:
             elif kind == "clear":
                 self.text.configure(state=tk.NORMAL)
                 self.text.delete("1.0", tk.END)
+                marks = [
+                    name
+                    for name in self.text.mark_names()
+                    if name.startswith(("translation_start_", "translation_end_"))
+                ]
+                if marks:
+                    self.text.mark_unset(*marks)
                 self.text.configure(state=tk.DISABLED)
                 self.entry_ids.clear()
         self.root.after(50, self.drain)
@@ -172,6 +182,8 @@ class ScriptWindow:
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     length = int(handler.headers.get("Content-Length", "0") or 0)
+    if length < 0 or length > MAX_REQUEST_BYTES:
+        raise ValueError("요청 본문이 너무 큽니다.")
     return json.loads(handler.rfile.read(length).decode("utf-8")) if length else {}
 
 
@@ -287,11 +299,26 @@ def main() -> int:
     apply_tk_icon(root)
     window = ScriptWindow(root, config)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(window))
+    server.daemon_threads = True
+    server.block_on_close = False
     threading.Thread(target=server.serve_forever, daemon=True).start()
     root.mainloop()
     server.shutdown()
+    server.server_close()
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        log_error("main", exc)
+        if "--self-test" not in sys.argv[1:]:
+            try:
+                messagebox.showerror(
+                    "MekiScript",
+                    f"예기치 않은 오류로 프로그램을 종료합니다.\n\n{exc}\n\n로그: {log_directory('error_log', 'MekiScript')}",
+                )
+            except Exception:
+                pass
+        raise SystemExit(1) from exc

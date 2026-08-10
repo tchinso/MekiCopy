@@ -1,0 +1,6 @@
+assets/*.html text eol=lf
+assets/*.js text eol=lf
+assets/*.json text eol=lf
+assets/*.txt text eol=lf
+assets/wasm/*.mjs text eol=lf
+assets/wasm/*.wasm -text

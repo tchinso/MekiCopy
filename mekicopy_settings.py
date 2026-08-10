@@ -43,6 +43,7 @@ _STATE_FILENAMES = (
 )
 _STATE_MIGRATION_MARKER = ".state_migration_v2"
 _STATE_MIGRATION_THREAD_LOCK = threading.RLock()
+_STATE_WRITE_LOCK = threading.RLock()
 
 
 def _same_path(first: Path, second: Path) -> bool:
@@ -109,16 +110,27 @@ def _migrate_legacy_state_files(
         with _STATE_MIGRATION_THREAD_LOCK, exclusive_file_lock(
             destination_dir / ".state_migration.lock"
         ):
-            if marker.is_file():
-                return
             for filename in _STATE_FILENAMES:
                 destination = destination_dir / filename
-                if destination.exists():
-                    continue
+                available_sources: list[tuple[int, Path]] = []
                 for legacy_dir in sources:
                     source = legacy_dir / filename
-                    if source.is_file() and _atomic_copy(source, destination):
-                        break
+                    try:
+                        if source.is_file():
+                            available_sources.append((source.stat().st_mtime_ns, source))
+                    except OSError:
+                        continue
+                if not available_sources:
+                    continue
+                source_mtime, source = max(available_sources, key=lambda item: item[0])
+                try:
+                    destination_mtime = (
+                        destination.stat().st_mtime_ns if destination.is_file() else -1
+                    )
+                except OSError:
+                    destination_mtime = -1
+                if source_mtime > destination_mtime:
+                    _atomic_copy(source, destination)
             _write_text_atomic(marker, "migrated\n")
     except OSError:
         # Migration is best effort.  Save APIs below remain safe in restrictive
@@ -127,10 +139,56 @@ def _migrate_legacy_state_files(
 
 
 def _initialize_state_directory() -> Path:
-    destination = state_data_dir("MekiCopy")
     program_dir = Path(_get_app_dir())
-    legacy_dirs = [program_dir, *fallback_app_data_dirs("MekiCopy")]
-    _migrate_legacy_state_files(legacy_dirs, destination)
+    fallback_dirs = fallback_app_data_dirs("MekiCopy")
+    selected = state_data_dir("MekiCopy")
+    force_override = os.environ.get("MEKICOPY_FORCE_DATA_DIR", "").strip().lower()
+    forced = force_override in {"1", "true", "yes", "on"} and bool(
+        os.environ.get("MEKICOPY_DATA_DIR", "")
+    )
+    candidates = (
+        [selected, program_dir, *fallback_dirs]
+        if forced
+        else [program_dir, selected, *fallback_dirs]
+    )
+    destination = candidates[0]
+    seen: list[Path] = []
+    for candidate in candidates:
+        if any(_same_path(candidate, previous) for previous in seen):
+            continue
+        seen.append(candidate)
+        probe = candidate / f".state-write-test-{os.getpid()}-{uuid.uuid4().hex}"
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            if not _write_text_atomic(probe, "first") or not _write_text_atomic(
+                probe,
+                "replace",
+            ):
+                continue
+            blocked = False
+            for filename in _STATE_FILENAMES:
+                existing = candidate / filename
+                if existing.exists():
+                    if not existing.is_file():
+                        blocked = True
+                        break
+                    try:
+                        with existing.open("a", encoding="utf-8"):
+                            pass
+                    except OSError:
+                        blocked = True
+                        break
+            if not blocked:
+                destination = candidate
+                break
+        except OSError:
+            continue
+        finally:
+            try:
+                probe.unlink(missing_ok=True)
+            except OSError:
+                pass
+    _migrate_legacy_state_files(candidates, destination)
     return destination
 
 
@@ -139,6 +197,55 @@ BOOKMARKS_FILE = str(STATE_DIR / "bookmarks.txt")
 SETTINGS_FILE = str(STATE_DIR / "settings.cfg")
 DETACHED_REGION_FILE = str(STATE_DIR / "detached_button_region.json")
 DETACHED_GEOMETRY_FILE = str(STATE_DIR / "detached_button_geometry.json")
+_STATE_ROOT_PINNED = not _same_path(STATE_DIR, Path(_get_app_dir()))
+
+
+def _activate_state_directory(directory: Path) -> None:
+    global STATE_DIR, BOOKMARKS_FILE, SETTINGS_FILE
+    global DETACHED_REGION_FILE, DETACHED_GEOMETRY_FILE
+    STATE_DIR = directory
+    BOOKMARKS_FILE = str(directory / "bookmarks.txt")
+    SETTINGS_FILE = str(directory / "settings.cfg")
+    DETACHED_REGION_FILE = str(directory / "detached_button_region.json")
+    DETACHED_GEOMETRY_FILE = str(directory / "detached_button_geometry.json")
+
+
+def _state_write_candidates() -> list[Path]:
+    program_dir = Path(_get_app_dir())
+    fallbacks = fallback_app_data_dirs("MekiCopy")
+    candidates = (
+        [STATE_DIR, *fallbacks]
+        if _STATE_ROOT_PINNED
+        else [program_dir, STATE_DIR, *fallbacks]
+    )
+    result: list[Path] = []
+    for candidate in candidates:
+        if not any(_same_path(candidate, previous) for previous in result):
+            result.append(candidate)
+    return result
+
+
+def _write_state_text(filename: str, text: str) -> bool:
+    """Write program-folder first and fail over only after the real replace fails."""
+    global _STATE_ROOT_PINNED
+    with _STATE_WRITE_LOCK:
+        candidates = _state_write_candidates()
+        initial_directory = STATE_DIR
+        for directory in candidates:
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
+            _migrate_legacy_state_files(candidates, directory)
+            if _write_text_atomic(directory / filename, text):
+                if not _same_path(directory, initial_directory):
+                    # Keep all state files on one root for the rest of this
+                    # process. Re-probing the program folder on every save can
+                    # otherwise split settings and geometry across two roots.
+                    _STATE_ROOT_PINNED = True
+                _activate_state_directory(directory)
+                return True
+    return False
 
 @dataclass
 class Rect:
@@ -680,20 +787,20 @@ def save_settings(settings: AppSettings) -> bool:
         parser.write(output)
     except (TypeError, ValueError):
         return False
-    return _write_text_atomic(SETTINGS_FILE, output.getvalue())
+    return _write_state_text("settings.cfg", output.getvalue())
 
 
-def _write_json_atomic(path: str, payload: dict) -> bool:
+def _write_json_atomic(filename: str, payload: dict) -> bool:
     try:
         text = json.dumps(payload, ensure_ascii=False, indent=2)
     except (TypeError, ValueError):
         return False
-    return _write_text_atomic(path, text)
+    return _write_state_text(filename, text)
 
 
 def save_detached_region(region: Region) -> bool:
     return _write_json_atomic(
-        DETACHED_REGION_FILE,
+        "detached_button_region.json",
         {
             "version": 1,
             "left": region.left,
@@ -723,7 +830,7 @@ def load_detached_region() -> Region | None:
 
 def save_detached_geometry(geometry: str) -> bool:
     return _write_json_atomic(
-        DETACHED_GEOMETRY_FILE,
+        "detached_button_geometry.json",
         {"version": 1, "geometry": str(geometry)},
     )
 
@@ -786,4 +893,4 @@ def save_bookmarks(bookmarks: dict[str, Bookmark]) -> bool:
             )
     except (AttributeError, TypeError, ValueError):
         return False
-    return _write_text_atomic(BOOKMARKS_FILE, "".join(lines))
+    return _write_state_text("bookmarks.txt", "".join(lines))

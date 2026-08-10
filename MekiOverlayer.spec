@@ -4,6 +4,7 @@ from pathlib import Path
 datas = []
 binaries = []
 hiddenimports = [
+    "meki_overlayer",
     "tkinter",
     "tkinter.constants",
 ]
@@ -12,7 +13,7 @@ if Path("MekiCopy.ico").exists():
     datas.append(("MekiCopy.ico", "."))
 
 a = Analysis(
-    ["meki_overlayer.py"],
+    ["meki_bootstrap.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,

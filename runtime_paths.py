@@ -16,6 +16,7 @@ from typing import Iterator
 DATA_DIR_ENV = "MEKICOPY_DATA_DIR"
 FORCE_DATA_DIR_ENV = "MEKICOPY_FORCE_DATA_DIR"
 _DATA_DIR_CACHE: dict[tuple[str, str, str, str], Path] = {}
+_DATA_SUBDIR_CACHE: dict[tuple[str, str, str, str, str], Path] = {}
 _DATA_DIR_LOCK = threading.RLock()
 _TK_RUNTIME_SYNC_LOCK = threading.RLock()
 
@@ -135,6 +136,18 @@ def fallback_app_data_dirs(app_name: str) -> list[Path]:
     return _dedupe(candidates)
 
 
+def _app_data_candidates(app_name: str) -> list[Path]:
+    override = os.environ.get(DATA_DIR_ENV, "")
+    force_override = os.environ.get(FORCE_DATA_DIR_ENV, "").strip().lower()
+    fallback_candidates = fallback_app_data_dirs(app_name)
+    forced = force_override in {"1", "true", "yes", "on"} and bool(override)
+    return _dedupe(
+        fallback_candidates + [app_root()]
+        if forced
+        else [app_root(), *fallback_candidates]
+    )
+
+
 def writable_app_data_dir(app_name: str) -> Path:
     """Choose one stable writable data root for the lifetime of this process.
 
@@ -152,21 +165,42 @@ def writable_app_data_dir(app_name: str) -> Path:
         if cached:
             return cached
 
-        fallback_candidates = fallback_app_data_dirs(app_name)
-        forced = force_override in {"1", "true", "yes", "on"} and bool(override)
-        candidates = (
-            fallback_candidates + [app_root()]
-            if forced
-            else [app_root(), *fallback_candidates]
-        )
-
-        for candidate in _dedupe(candidates):
+        for candidate in _app_data_candidates(app_name):
             if _can_write_directory(candidate):
                 _DATA_DIR_CACHE[cache_key] = candidate
                 return candidate
 
         fallback = app_root()
         _DATA_DIR_CACHE[cache_key] = fallback
+        return fallback
+
+
+def writable_app_subdir(app_name: str, *relative_parts: str) -> Path:
+    """Choose a writable child directory while preserving portable priority.
+
+    Testing only the executable directory is insufficient when the desired
+    child name is occupied by a file or has a narrower ACL. Probe the actual
+    child at each candidate and fall back only after that concrete write fails.
+    """
+    relative = Path(*relative_parts)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"relative application path required: {relative}")
+
+    override = os.environ.get(DATA_DIR_ENV, "")
+    force_override = os.environ.get(FORCE_DATA_DIR_ENV, "").strip().lower()
+    cache_key = (app_name, str(app_root()), override, force_override, str(relative))
+    with _DATA_DIR_LOCK:
+        cached = _DATA_SUBDIR_CACHE.get(cache_key)
+        if cached:
+            return cached
+        candidates = [root / relative for root in _app_data_candidates(app_name)]
+        for candidate in _dedupe(candidates):
+            if _can_write_directory(candidate):
+                _DATA_SUBDIR_CACHE[cache_key] = candidate
+                return candidate
+
+        fallback = app_root() / relative
+        _DATA_SUBDIR_CACHE[cache_key] = fallback
         return fallback
 
 
@@ -181,9 +215,7 @@ def state_data_dir(app_name: str = "MekiCopy") -> Path:
 
 
 def log_dir(app_name: str, kind: str) -> Path:
-    directory = writable_app_data_dir(app_name) / kind
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
+    return writable_app_subdir(app_name, kind)
 
 
 @contextmanager

@@ -12,7 +12,7 @@ from typing import Callable
 
 import mss
 from PIL import Image, ImageGrab, ImageStat
-from runtime_paths import writable_app_data_dir
+from runtime_paths import writable_app_subdir
 
 MIN_SIZE_PX = 10
 
@@ -798,10 +798,7 @@ def run_capture_diagnostics(region: Region | None = None) -> str:
     manager = get_capture_manager()
     manager.reinitialize("diagnostics")
     timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    directory = str(
-        writable_app_data_dir("MekiCopy") / "diagnostics" / timestamp
-    )
-    os.makedirs(directory, exist_ok=True)
+    directory = str(writable_app_subdir("MekiCopy", "diagnostics", timestamp))
 
     monitors = manager.get_monitors()
     report: dict = {

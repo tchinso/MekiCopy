@@ -503,7 +503,8 @@ function setupTransformersEnv(runtimeConfig) {
   }
 
   if (runtimeConfig.hasLocalWasm && env.backends?.onnx?.wasm) {
-    // Transformers.js 4.2.0 selects the asyncify runtime for Chromium. Keep
+    // Transformers.js 4.2.0 with ONNX Runtime Web 1.27 selects the asyncify
+    // runtime for Chromium. Keep
     // the pair explicit so its preloader/cache never falls back to the CDN.
     env.backends.onnx.wasm.wasmPaths = {
       mjs: "/assets/wasm/ort-wasm-simd-threaded.asyncify.mjs",

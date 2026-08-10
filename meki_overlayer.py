@@ -35,6 +35,7 @@ if getattr(sys, "frozen", False):
                 pass
 prepare_tk_environment(TK_RUNTIME_DIRNAME)
 import tkinter as tk
+from tkinter import messagebox
 
 from app_identity import apply_tk_icon, set_windows_app_id
 from service_ports import OVERLAYER_DEFAULT_PORT
@@ -43,6 +44,7 @@ from system_logging import (
     configure_system_logging,
     install_exception_hooks,
     install_tk_exception_hook,
+    log_directory,
     log_debug as system_debug,
     log_error as system_error,
     set_debug_enabled,
@@ -50,6 +52,7 @@ from system_logging import (
 
 DEFAULT_PORT = OVERLAYER_DEFAULT_PORT
 DEFAULT_GEOMETRY = "780x180+120+120"
+MAX_REQUEST_BYTES = 1024 * 1024
 _WINDOW_STREAM = None
 WDA_NONE = 0x00000000
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
@@ -328,6 +331,8 @@ class OverlayerApp:
 
 def _read_request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     length = int(handler.headers.get("Content-Length", "0") or "0")
+    if length < 0 or length > MAX_REQUEST_BYTES:
+        raise ValueError("요청 본문이 너무 큽니다.")
     raw = handler.rfile.read(length) if length else b"{}"
     if not raw:
         return {}
@@ -390,8 +395,7 @@ def make_handler(app_ref: OverlayerApp):
     return OverlayerHandler
 
 
-def run_server(app_ref: OverlayerApp, port: int) -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app_ref))
+def run_server(server: ThreadingHTTPServer, app_ref: OverlayerApp, port: int) -> None:
     log_debug(app_ref.config.debug_log, "server", f"listening on 127.0.0.1:{port}")
     server.serve_forever()
 
@@ -443,19 +447,49 @@ def main() -> int:
         text_font=args.text_font,
         debug_log=args.debug_log,
     )
+    server: ThreadingHTTPServer | None = None
+    server_started = False
     try:
-        ensure_port_available(args.port)
         root = tk.Tk()
         install_tk_exception_hook(root)
         apply_tk_icon(root)
         app_ref = OverlayerApp(root, config)
-        thread = threading.Thread(target=run_server, args=(app_ref, args.port), daemon=True)
+        try:
+            server = ThreadingHTTPServer(
+                ("127.0.0.1", args.port),
+                make_handler(app_ref),
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"MekiOverlayer를 시작할 수 없습니다. 127.0.0.1:{args.port} 포트가 이미 사용 중입니다."
+            ) from exc
+        server.daemon_threads = True
+        server.block_on_close = False
+        thread = threading.Thread(
+            target=run_server,
+            args=(server, app_ref, args.port),
+            daemon=True,
+        )
         thread.start()
+        server_started = True
         root.mainloop()
         return 0
     except Exception as exc:
         log_error("main", exc)
+        if "--self-test" not in sys.argv[1:]:
+            try:
+                messagebox.showerror(
+                    "MekiOverlayer",
+                    f"예기치 않은 오류로 프로그램을 종료합니다.\n\n{exc}\n\n로그: {log_directory('error_log', 'MekiOverlayer')}",
+                )
+            except Exception:
+                pass
         return 1
+    finally:
+        if server is not None:
+            if server_started:
+                server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

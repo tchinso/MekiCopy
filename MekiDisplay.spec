@@ -4,13 +4,21 @@ from pathlib import Path
 datas = [("MekiCopy.ico", ".")] if Path("MekiCopy.ico").exists() else []
 common = dict(
     pathex=[], binaries=[], datas=datas,
-    hiddenimports=["tkinter", "tkinter.constants"], hookspath=[],
+    hookspath=[],
     hooksconfig={}, runtime_hooks=[], excludes=["PyQt5", "PyQt6", "PySide2", "PySide6"],
     noarchive=False, optimize=0,
 )
 
-overlayer = Analysis(["meki_overlayer.py"], **common)
-script = Analysis(["meki_script.py"], **common)
+overlayer = Analysis(
+    ["meki_bootstrap.py"],
+    hiddenimports=["meki_overlayer", "tkinter", "tkinter.constants"],
+    **common,
+)
+script = Analysis(
+    ["meki_bootstrap.py"],
+    hiddenimports=["meki_script", "tkinter", "tkinter.constants"],
+    **common,
+)
 MERGE((overlayer, "MekiOverlayer", "MekiOverlayer"), (script, "MekiScript", "MekiScript"))
 
 overlayer_pyz = PYZ(overlayer.pure)

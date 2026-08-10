@@ -116,10 +116,7 @@ from mekicopy_runtime import (
 from mekicopy_settings import (
     AppSettings,
     Bookmark,
-    DETACHED_GEOMETRY_FILE,
-    DETACHED_REGION_FILE,
     Rect,
-    SETTINGS_FILE,
     _font_has_character,
     _geometry_size,
     load_bookmarks,
@@ -156,8 +153,10 @@ from system_logging import (
     configure_system_logging,
     install_exception_hooks,
     install_tk_exception_hook,
+    log_directory,
     set_debug_enabled,
 )
+import mekicopy_settings
 EDGE_GRAB_PX = 8
 MAIN_WINDOW_WIDTH = 520
 MAIN_WINDOW_HEIGHT = 440
@@ -1010,6 +1009,9 @@ class MainWindow(tk.Tk):
             messagebox.showerror("MekiCopy", f"캡처 진단 실패:\n{exc}", parent=self)
 
     def _launch_magpie(self, executable: str) -> None:
+        if _is_process_alive(self.magpie_process):
+            messagebox.showinfo("MekiCopy", "MagPie가 이미 실행 중입니다.", parent=self)
+            return
         if not self.settings.suppress_magpie_launch_notice:
             messagebox.showinfo("MagPie 실행 안내", MAGPIE_LAUNCH_NOTICE, parent=self)
         try:
@@ -1205,6 +1207,20 @@ class MainWindow(tk.Tk):
         )
         return True
 
+    def _tracked_process_is_starting(
+        self,
+        app_name: str,
+        process: subprocess.Popen | None,
+    ) -> bool:
+        if not _is_process_alive(process):
+            return False
+        messagebox.showinfo(
+            "MekiCopy",
+            f"{app_name}가 이미 실행 중이거나 시작을 마무리하고 있습니다.",
+            parent=self,
+        )
+        return True
+
     def _watch_started_process(
         self,
         app_name: str,
@@ -1328,6 +1344,8 @@ class MainWindow(tk.Tk):
         except Exception:
             if self._warn_if_port_busy("MekiScript", self.settings.script_port):
                 return
+        if self._tracked_process_is_starting("MekiScript", self.script_process):
+            return
         command = _find_companion_executable("MekiScript", "meki_script.py")
         if not command:
             messagebox.showerror("MekiCopy", "MekiScript 실행 파일을 찾을 수 없습니다.", parent=self)
@@ -1376,6 +1394,11 @@ class MainWindow(tk.Tk):
                 self.settings.audio_capture_port,
             ):
                 return
+        if self._tracked_process_is_starting(
+            "MekiAudioCapture",
+            self.audio_capture_process,
+        ):
+            return
         command = _find_companion_executable("MekiAudioCapture", "meki_audio_capture.py")
         if not command:
             messagebox.showerror("MekiCopy", "MekiAudioCapture 실행 파일을 찾을 수 없습니다.", parent=self)
@@ -1514,6 +1537,8 @@ class MainWindow(tk.Tk):
         self._launch_hytrans()
 
     def _launch_hytrans(self, *, restarted: bool = False) -> bool:
+        if self._tracked_process_is_starting("HYTrans", self.hytrans_process):
+            return False
         command = _find_companion_executable("HYTrans", "hytrans_main.py")
         if not command:
             messagebox.showerror(
@@ -1681,6 +1706,8 @@ class MainWindow(tk.Tk):
             ):
                 return
 
+        if self._tracked_process_is_starting("MekiOverlayer", self.overlayer_process):
+            return
         command = _find_companion_executable("MekiOverlayer", "meki_overlayer.py")
         if not command:
             messagebox.showerror(
@@ -1983,6 +2010,32 @@ class MainWindow(tk.Tk):
             self.after(100, lambda: setattr(self, "_restoring_from_tray", False))
 
     def _on_close(self) -> None:
+        if _is_process_alive(self.audio_capture_process):
+            try:
+                audio_health = _json_request(
+                    f"{self._audio_capture_base_url()}/health",
+                    timeout=1.0,
+                )
+                audio_state = str(audio_health.get("state") or "").upper()
+            except Exception:
+                # A tracked process with an unreachable health endpoint may be
+                # using the port captured at launch or may be hung mid-write.
+                # Treat unknown as active so closing never silently force-kills it.
+                audio_state = "UNKNOWN"
+            if audio_state in {
+                "STARTING",
+                "RECORDING",
+                "STOPPING",
+                "PROCESSING",
+                "TRANSLATING",
+                "DOWNLOADING",
+                "UNKNOWN",
+            } and not messagebox.askyesno(
+                "MekiCopy 종료",
+                "음성 녹음 또는 처리가 진행 중입니다. 지금 종료하면 작업이 중단됩니다.\n\n그래도 종료할까요?",
+                parent=self,
+            ):
+                return
         self._closing = True
         if self._hytrans_restart_after_id is not None:
             try:
@@ -2266,7 +2319,11 @@ def run_ui_self_test() -> None:
     _log_runtime_message("self_test_ui", "starting")
     app: MainWindow | None = None
     runtime_snapshot = _snapshot_runtime_state(
-        (SETTINGS_FILE, DETACHED_REGION_FILE, DETACHED_GEOMETRY_FILE)
+        (
+            mekicopy_settings.SETTINGS_FILE,
+            mekicopy_settings.DETACHED_REGION_FILE,
+            mekicopy_settings.DETACHED_GEOMETRY_FILE,
+        )
     )
     try:
         app = MainWindow()
@@ -2376,7 +2433,7 @@ def run_ui_self_test() -> None:
                 f"tray_roundtrip: {tray_roundtrip}\n"
                 f"tray_message_window_reused: {tray_message_window_reused}\n"
                 f"korean_font_count: {korean_font_count}\n"
-                f"settings_file: {SETTINGS_FILE}\n"
+                f"settings_file: {mekicopy_settings.SETTINGS_FILE}\n"
                 f"icon_path: {_get_icon_path()}"
             ),
         )
@@ -2458,4 +2515,16 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        _log_runtime_error("main", exc)
+        if not any(arg.startswith("--self-test") for arg in sys.argv[1:]):
+            try:
+                messagebox.showerror(
+                    "MekiCopy",
+                    f"예기치 않은 오류로 프로그램을 종료합니다.\n\n{exc}\n\n로그: {log_directory('error_log', 'MekiCopy')}",
+                )
+            except Exception:
+                pass
+        raise SystemExit(1) from exc

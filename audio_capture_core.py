@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -14,7 +15,7 @@ from typing import Callable, Iterable
 
 import numpy as np
 
-from runtime_paths import writable_app_data_dir
+from runtime_paths import exclusive_file_lock, writable_app_subdir
 
 
 INTERNAL_SAMPLE_RATE = 16_000
@@ -35,6 +36,24 @@ REAZONSPEECH_FILES = (
     "encoder-epoch-99-avg-1.int8.onnx",
     "joiner-epoch-99-avg-1.int8.onnx",
 )
+MODEL_FILE_SIZES = {
+    "tokens.txt": 45_754,
+    "encoder-epoch-99-avg-1.onnx": 592_347_848,
+    "decoder-epoch-99-avg-1.onnx": 11_767_836,
+    "joiner-epoch-99-avg-1.onnx": 10_720_115,
+    "encoder-epoch-99-avg-1.int8.onnx": 154_670_139,
+    "joiner-epoch-99-avg-1.int8.onnx": 2_696_970,
+    "silero_vad.onnx": 643_854,
+}
+MODEL_FILE_HASHES = {
+    "tokens.txt": "2c3ac659818a48a0c04010e0593bbc4d7c8a24a054340b01131499c05fd52def",
+    "encoder-epoch-99-avg-1.onnx": "ecdb0b771e16104aaf8e579cb3c1e32fbd589eb641c5946d82b615bd366c5f96",
+    "decoder-epoch-99-avg-1.onnx": "58b18211ae06265466bfa17172dab574df94f76c8bcb61a3640c28ba860e4124",
+    "joiner-epoch-99-avg-1.onnx": "d38a81d1191c9ed6de6a1719503692e07e3e973e2364adde0abae5eaaded1174",
+    "encoder-epoch-99-avg-1.int8.onnx": "2c7bd08a8a99f9ddd0d9e458456577b1f6279214e51426f114f9eced44c54e1d",
+    "joiner-epoch-99-avg-1.int8.onnx": "49cc7ea1d3d35a40a27442db5e89996da64bf0e683a903dce76e99e57a12e4",
+    "silero_vad.onnx": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+}
 
 VAD_PRESETS: dict[str, dict[str, float]] = {
     "FAST": {
@@ -159,7 +178,7 @@ def model_root_candidates(application_dir: Path, resource_dir: Path) -> list[Pat
     # per-user cache for first-run downloads.
     candidates = [
         application_dir / "models",
-        writable_app_data_dir("MekiAudioCapture") / "models",
+        writable_app_subdir("MekiAudioCapture", "models"),
     ]
     seen: set[str] = set()
     result: list[Path] = []
@@ -207,6 +226,102 @@ def _model_paths(root: Path, precision: str) -> dict[str, Path]:
     }
 
 
+def _model_file_is_valid(path: Path) -> bool:
+    expected_size = MODEL_FILE_SIZES.get(path.name)
+    try:
+        return path.is_file() and expected_size is not None and path.stat().st_size == expected_size
+    except OSError:
+        return False
+
+
+def model_paths_are_valid(models: dict[str, Path]) -> bool:
+    if not models or not all(_model_file_is_valid(path) for path in models.values()):
+        return False
+
+    roots = {path.parent.parent for path in models.values()}
+    if len(roots) != 1:
+        return False
+    root = roots.pop()
+    root_key = hashlib.sha256(
+        os.path.normcase(str(root.resolve())).encode("utf-8", errors="surrogatepass")
+    ).hexdigest()
+    cache_paths = [
+        root / ".model-integrity.json",
+        writable_app_subdir("MekiAudioCapture", "model-integrity")
+        / f"{root_key}.json",
+    ]
+    cache: dict = {}
+    cache_sources: list[dict] = []
+    for cache_path in cache_paths:
+        try:
+            candidate = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(candidate, dict):
+                # Merge program-side and writable-fallback records. A valid but
+                # partial read-only manifest must not hide the more complete
+                # fallback written after the last expensive verification.
+                cache.update(candidate)
+                cache_sources.append(candidate)
+        except (OSError, ValueError, TypeError):
+            continue
+
+    changed = False
+    for path in models.values():
+        expected_hash = MODEL_FILE_HASHES.get(path.name)
+        if expected_hash is None:
+            return False
+        try:
+            stat = path.stat()
+        except OSError:
+            return False
+        matching_record = next(
+            (
+                record
+                for source in cache_sources
+                if isinstance((record := source.get(path.name)), dict)
+                and record.get("size") == stat.st_size
+                and record.get("mtimeNs") == stat.st_mtime_ns
+                and record.get("sha256") == expected_hash
+            ),
+            None,
+        )
+        if matching_record is None:
+            digest = hashlib.sha256()
+            try:
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError:
+                return False
+            if digest.hexdigest() != expected_hash:
+                return False
+            cache[path.name] = {
+                "size": stat.st_size,
+                "mtimeNs": stat.st_mtime_ns,
+                "sha256": expected_hash,
+            }
+            changed = True
+
+    if changed:
+        payload = json.dumps(cache, ensure_ascii=False, indent=2) + "\n"
+        for cache_path in cache_paths:
+            temporary = cache_path.with_name(
+                f"{cache_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+            )
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary.write_text(payload, encoding="utf-8")
+                os.replace(temporary, cache_path)
+                break
+            except OSError:
+                continue
+            finally:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    return True
+
+
 def resolve_models(
     application_dir: Path,
     resource_dir: Path,
@@ -215,7 +330,7 @@ def resolve_models(
     precision = normalize_precision(precision)
     for root in model_root_candidates(application_dir, resource_dir):
         paths = _model_paths(root, precision)
-        if all(path.is_file() and path.stat().st_size > 0 for path in paths.values()):
+        if model_paths_are_valid(paths):
             return paths
     expected = model_root_candidates(application_dir, resource_dir)[0]
     raise FileNotFoundError(
@@ -265,7 +380,6 @@ def _download_file(
 
 def _extract_reazonspeech_archive(archive: Path, speech_dir: Path) -> None:
     wanted = set(REAZONSPEECH_FILES) | {"test.wav"}
-    extracted: set[str] = set()
     speech_dir.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "r:bz2") as bundle:
         for member in bundle.getmembers():
@@ -289,9 +403,10 @@ def _extract_reazonspeech_archive(archive: Path, speech_dir: Path) -> None:
                 temporary.unlink(missing_ok=True)
                 raise RuntimeError(f"모델 압축 파일의 {member.name} 항목이 비어 있습니다.")
             os.replace(temporary, target)
-            extracted.add(source_name)
-    missing = set(REAZONSPEECH_FILES) - extracted - {
-        path.name for path in speech_dir.iterdir() if path.is_file() and path.stat().st_size > 0
+    missing = {
+        name
+        for name in REAZONSPEECH_FILES
+        if not _model_file_is_valid(speech_dir / name)
     }
     if missing:
         raise RuntimeError(f"모델 압축 파일에 필요한 파일이 없습니다: {', '.join(sorted(missing))}")
@@ -321,50 +436,34 @@ def ensure_models(
             f"모델 폴더를 만들 수 없습니다: {root}\n쓰기 가능한 위치에서 실행해 주세요."
         ) from exc
 
-    required_speech = [speech_dir / name for name in REAZONSPEECH_FILES]
-    if not all(path.is_file() and path.stat().st_size > 0 for path in required_speech):
-        if progress:
-            progress("ReazonSpeech 모델을 다운로드합니다. 최초 실행에는 시간이 걸릴 수 있습니다.")
-        with tempfile.TemporaryDirectory(
-            prefix=".mekiaudio-model-",
-            dir=root,
-        ) as temporary_dir:
-            archive = Path(temporary_dir) / "reazonspeech.tar.bz2"
-            _download_file(REAZONSPEECH_ARCHIVE_URL, archive, progress)
-            _extract_reazonspeech_archive(archive, speech_dir)
+    # A first launch can race with another companion process. Serialize the
+    # complete model set so no process observes a half-extracted archive or a
+    # shared .part file while it is still being written.
+    with exclusive_file_lock(root / ".model-download.lock", timeout=3_600):
+        required_speech = [speech_dir / name for name in REAZONSPEECH_FILES]
+        speech_models = {path.name: path for path in required_speech}
+        if not model_paths_are_valid(speech_models):
+            if progress:
+                progress("ReazonSpeech 모델을 다운로드합니다. 최초 실행에는 시간이 걸릴 수 있습니다.")
+            with tempfile.TemporaryDirectory(
+                prefix=".mekiaudio-model-",
+                dir=root,
+            ) as temporary_dir:
+                archive = Path(temporary_dir) / "reazonspeech.tar.bz2"
+                _download_file(REAZONSPEECH_ARCHIVE_URL, archive, progress)
+                _extract_reazonspeech_archive(archive, speech_dir)
+            if not model_paths_are_valid(speech_models):
+                raise RuntimeError("다운로드한 ReazonSpeech 모델의 무결성 검증에 실패했습니다.")
 
-    if not vad_file.is_file() or vad_file.stat().st_size <= 0:
-        if progress:
-            progress("Silero VAD 모델을 다운로드합니다...")
-        _download_file(SILERO_VAD_URL, vad_file, progress)
+        vad_models = {"vad": vad_file}
+        if not model_paths_are_valid(vad_models):
+            if progress:
+                progress("Silero VAD 모델을 다운로드합니다...")
+            _download_file(SILERO_VAD_URL, vad_file, progress)
+            if not model_paths_are_valid(vad_models):
+                raise RuntimeError("다운로드한 Silero VAD 모델의 무결성 검증에 실패했습니다.")
 
     return resolve_models(application_dir, resource_dir, precision)
-
-
-def ensure_ascii_model_paths(models: dict[str, Path], cache_dir: Path) -> dict[str, Path]:
-    """Expose models through an ASCII-only path for native Windows runtimes.
-
-    Some sherpa-onnx token/model readers still use narrow Windows paths. Hard
-    links keep this compatibility view from consuming another copy of the large
-    fp32 encoder; copying is only a cross-volume fallback.
-    """
-    if all(str(path).isascii() for path in models.values()):
-        return models
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    output: dict[str, Path] = {}
-    for key, source in models.items():
-        target = cache_dir / source.name
-        if target.is_file() and target.stat().st_size == source.stat().st_size:
-            output[key] = target
-            continue
-        try:
-            if target.exists():
-                target.unlink()
-            os.link(source, target)
-        except OSError:
-            shutil.copy2(source, target)
-        output[key] = target
-    return output
 
 
 def wav_to_mono_16k(wav_path: Path, raw_path: Path) -> np.memmap:
@@ -490,7 +589,10 @@ def build_segments(
                     start_time=cursor / rate,
                     end_time=cut_end / rate,
                     duration=duration,
-                    audio=np.asarray(audio[cursor:cut_end], dtype=np.float32).copy(),
+                    # The source memmap remains open for the whole recognition
+                    # pass, so a contiguous view avoids duplicating long
+                    # recordings in RAM for every segment.
+                    audio=np.asarray(audio[cursor:cut_end], dtype=np.float32),
                     is_forced_cut=forced or previous_overlap > 0,
                     is_short=duration <= short_under,
                     previous_overlap=previous_overlap / rate,
@@ -504,9 +606,39 @@ def build_segments(
     return output
 
 
+def validate_tokens_file(tokens_path: Path) -> int:
+    """Validate the token IDs before handing the table to the native runtime."""
+    seen: set[int] = set()
+    try:
+        lines = tokens_path.read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"음성 모델 토큰 사전을 읽을 수 없습니다: {tokens_path}") from exc
+
+    for line_number, line in enumerate(lines, 1):
+        fields = line.rsplit(maxsplit=1)
+        if len(fields) != 2:
+            raise ValueError(f"음성 모델 토큰 사전 {line_number}행의 형식이 잘못되었습니다.")
+        try:
+            token_id = int(fields[1])
+        except ValueError as exc:
+            raise ValueError(f"음성 모델 토큰 사전 {line_number}행의 ID가 잘못되었습니다.") from exc
+        if token_id < 0 or token_id in seen:
+            raise ValueError(f"음성 모델 토큰 사전 {line_number}행의 ID가 중복되었거나 음수입니다.")
+        seen.add(token_id)
+
+    if not seen:
+        raise ValueError("음성 모델 토큰 사전이 비어 있습니다.")
+    expected = set(range(max(seen) + 1))
+    if seen != expected:
+        missing = min(expected - seen)
+        raise ValueError(f"음성 모델 토큰 사전에 ID {missing}이(가) 없습니다.")
+    return len(seen)
+
+
 def create_recognizer(models: dict[str, Path], num_threads: int = 4):
     import sherpa_onnx
 
+    validate_tokens_file(models["tokens"])
     return sherpa_onnx.OfflineRecognizer.from_transducer(
         encoder=str(models["encoder"]),
         decoder=str(models["decoder"]),
@@ -568,9 +700,21 @@ def recognize_segments(
 
 
 def cleanup_work_files(work_dir: Path) -> None:
-    for path in work_dir.iterdir() if work_dir.exists() else ():
-        if path.is_file() and path.suffix.lower() in {".wav", ".f32"}:
+    try:
+        children = list(work_dir.iterdir()) if work_dir.exists() else []
+    except OSError:
+        children = []
+    for path in children:
+        try:
+            removable = path.is_file() and path.suffix.lower() in {".wav", ".f32"}
+        except OSError:
+            removable = False
+        if removable:
             try:
                 path.unlink()
             except OSError:
                 pass
+    try:
+        work_dir.rmdir()
+    except OSError:
+        pass

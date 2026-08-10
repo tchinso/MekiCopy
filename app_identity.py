@@ -13,11 +13,16 @@ ICON_FILENAME = "MekiCopy.ico"
 
 
 def resource_file(filename: str = ICON_FILENAME) -> Path | None:
-    roots = [
-        Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)),
-        Path(sys.executable).resolve().parent,
-        Path(__file__).resolve().parent,
-    ]
+    source_root = Path(__file__).resolve().parent
+    roots = (
+        [
+            Path(sys.executable).resolve().parent,
+            Path(getattr(sys, "_MEIPASS", source_root)),
+            source_root,
+        ]
+        if getattr(sys, "frozen", False)
+        else [source_root, Path(sys.executable).resolve().parent]
+    )
     for root in roots:
         candidate = root / filename
         if candidate.is_file():

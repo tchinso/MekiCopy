@@ -8,6 +8,7 @@ from PyInstaller.utils.hooks import copy_metadata
 datas = [('runtime_models', 'runtime_models'), ('MekiCopy.ico', '.')]
 binaries = []
 hiddenimports = [
+    'mekicopy',
     'onnxruntime.capi.onnxruntime_pybind11_state',
     'tkinter',
     'tkinter.constants',
@@ -30,7 +31,7 @@ hiddenimports += collect_submodules('onnxruntime.capi')
 
 
 a = Analysis(
-    ['mekicopy.py'],
+    ['meki_bootstrap.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,

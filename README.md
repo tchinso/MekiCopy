@@ -34,10 +34,10 @@ MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일�
 
 ### 소스에서 실행하는 경우
 
-1. Python 3.13 이상을 설치합니다.
+1. Python 3.12~3.14를 설치합니다.
 2. `install_mekiocr.bat`을 실행해 필요한 패키지를 설치합니다.
    ```
-   meikiocr==0.3.4, mss==10.2.0, pillow==12.2.0
+   meikiocr==0.3.4, mss==10.2.0, pillow==12.3.0, numpy==2.5.2
    ```
 3. `run_mekicopy.bat`을 실행하거나, 직접 `python mekicopy.py`를 실행합니다.
 
@@ -154,7 +154,7 @@ OCR로 인식한 텍스트를 자동으로 번역해 화면에 바로 표시하�
 | **MT2 (기본)** | `tchinso/Hy-MT2-1.8B-onnx-q4f16` | q4f16 |
 | MT1.5 | `onnx-community/HY-MT1.5-1.8B-ONNX` | q4 |
 
-HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`과 ONNX Runtime Web/WASM을 Chrome 또는 Edge에서 로컬로 읽습니다. 네트워크는 선택한 번역 모델을 처음 내려받을 때만 필요하며, 이후에는 `HYTrans/models`의 검증된 모델을 재사용합니다.
+HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x 최신)과 `ONNX Runtime Web/WASM 1.27.0`을 Chrome 또는 Edge에서 로컬로 읽습니다. 네트워크는 선택한 번역 모델을 처음 내려받을 때만 필요하며, 이후에는 `HYTrans/models`의 검증된 모델을 재사용합니다.
 
 > **필수 조건:** Google Chrome 또는 Microsoft Edge가 설치되어 있어야 합니다.
 

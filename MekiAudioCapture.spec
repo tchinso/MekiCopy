@@ -8,6 +8,7 @@ if Path("MekiCopy.ico").exists():
 
 binaries = collect_dynamic_libs("sherpa_onnx")
 hiddenimports = [
+    "meki_audio_capture",
     "tkinter",
     "tkinter.constants",
     "numpy",
@@ -16,7 +17,7 @@ hiddenimports = [
 hiddenimports += collect_submodules("sherpa_onnx")
 
 a = Analysis(
-    ["meki_audio_capture.py"],
+    ["meki_bootstrap.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,
