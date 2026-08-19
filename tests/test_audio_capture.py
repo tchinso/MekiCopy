@@ -9,7 +9,7 @@ from unittest import mock
 import numpy as np
 
 import meki_audio_capture
-from audio_capture_core import validate_tokens_file
+from audio_capture_core import VAD_PRESETS, validate_tokens_file
 
 
 class TokenTableTests(unittest.TestCase):
@@ -25,6 +25,21 @@ class TokenTableTests(unittest.TestCase):
             tokens.write_text("<blk> 0\n테스트 2\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "ID 1"):
                 validate_tokens_file(tokens)
+
+
+class VadPresetTests(unittest.TestCase):
+    def test_chunk_boundary_settings(self) -> None:
+        expected = {
+            "FAST": (0.25, 0.15),
+            "BALANCED": (0.60, 0.35),
+            "LONG": (0.95, 0.55),
+        }
+
+        for preset_name, (min_silence_duration, merge_gap) in expected.items():
+            with self.subTest(preset=preset_name):
+                preset = VAD_PRESETS[preset_name]
+                self.assertEqual(preset["min_silence_duration"], min_silence_duration)
+                self.assertEqual(preset["merge_gap"], merge_gap)
 
 
 class CaptureControllerTests(unittest.TestCase):
