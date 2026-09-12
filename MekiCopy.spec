@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files
@@ -7,7 +8,11 @@ from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import copy_metadata
 
-datas = [('runtime_models', 'runtime_models'), ('MekiCopy.ico', '.')]
+# Full carries the OCR files locally. Lite intentionally has no model files;
+# MeikiOCR then uses its ordinary first-run Hugging Face download/cache path.
+datas = [('MekiCopy.ico', '.')]
+if os.environ.get('MEKICOPY_PACKAGE_FLAVOR', 'lite').casefold() == 'full':
+    datas.insert(0, ('runtime_models', 'runtime_models'))
 # Video subtitle generation uses the existing ReazonSubtitle FFmpeg payload,
 # but only model caches are shared at runtime.  Keep this media utility in the
 # MekiCopy bundle so a release does not depend on a developer-side PATH.

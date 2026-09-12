@@ -1,7 +1,11 @@
 param(
     [switch]$SkipDependencyInstall,
     [switch]$SkipSmokeTests,
-    [string]$PythonExe = ""
+    [string]$PythonExe = "",
+    [ValidateSet("Lite", "Full")]
+    [string]$PackageFlavor = "Lite",
+    [string]$FullAssetsRoot = "",
+    [string]$FullMagpieRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -333,6 +337,35 @@ function New-ReleaseZip {
     }
 }
 
+function Copy-ReleaseTree {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$TargetRoot,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
+        throw "Full package source for $Description is missing: $SourceRoot"
+    }
+
+    $source = (Resolve-Path -LiteralPath $SourceRoot).Path.TrimEnd('\', '/')
+    New-Item -ItemType Directory -Path $TargetRoot -Force | Out-Null
+    Get-ChildItem -LiteralPath $source -Recurse -File -Force | ForEach-Object {
+        $relativePath = $_.FullName.Substring($source.Length).TrimStart('\', '/')
+        $destination = Join-Path $TargetRoot $relativePath
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        # The release ZIP receives ordinary file contents. Hard links merely
+        # avoid consuming a second multi-gigabyte working copy while Full is
+        # assembled on the same NTFS volume.
+        try {
+            New-Item -ItemType HardLink -Path $destination -Target $_.FullName -Force | Out-Null
+        }
+        catch {
+            Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
+        }
+    }
+}
+
 function Invoke-ExeSmokeTest {
     param(
         [Parameter(Mandatory = $true)][string]$ExePath,
@@ -567,8 +600,9 @@ Invoke-CheckedPythonScript $dependencyProbe
 Write-Host "Running source regression tests..."
 Invoke-CheckedPython @("-m", "unittest", "discover", "-s", "tests", "-v")
 
-$modelDir = Join-Path $PSScriptRoot "runtime_models\meikiocr"
-New-Item -ItemType Directory -Path $modelDir -Force | Out-Null
+if ($PackageFlavor -eq "Full") {
+    $modelDir = Join-Path $PSScriptRoot "runtime_models\meikiocr"
+    New-Item -ItemType Directory -Path $modelDir -Force | Out-Null
 
 $prepareModels = @'
 from pathlib import Path
@@ -610,11 +644,12 @@ for repo_id, filename in missing_models:
     shutil.copy2(src, target)
     print(f"Prepared model: {target}")
 '@
-Invoke-CheckedPythonScript $prepareModels
+    Invoke-CheckedPythonScript $prepareModels
+}
 
-# VAD/STT models are intentionally not prepared during packaging. The default
-# Parakeet NeMo CTC model (or optional ReazonSpeech) is downloaded into the
-# shared MekiAudioCapture/models location on first use and reused afterwards.
+# Lite packages intentionally omit VAD/STT models. The default Parakeet NeMo
+# CTC model (or optional ReazonSpeech) is downloaded into the shared
+# MekiAudioCapture/models location on first use and reused afterwards.
 # MekiSubtitle points at exactly that cache instead of publishing model copies.
 
 # MekiSubtitle needs only video decoding tools from the former standalone
@@ -628,15 +663,15 @@ foreach ($subtitleTool in @("ffmpeg.exe", "ffprobe.exe")) {
 }
 
 Remove-WorkspaceDirectory "build"
-$distRelativePath = "dist"
+$distRelativePath = "MekiCopy-$PackageFlavor"
 try {
     Remove-WorkspaceDirectory $distRelativePath
 }
 catch {
     # A running copy of an older build can keep a DLL locked on Windows.
     # Preserve that process and publish the new verified build separately.
-    Write-Warning "The existing dist folder is in use; publishing to dist-new instead."
-    $distRelativePath = "dist-new"
+    Write-Warning "The existing release folder is in use; publishing to a timestamped folder instead."
+    $distRelativePath = "MekiCopy-$PackageFlavor-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     Remove-WorkspaceDirectory $distRelativePath
 }
 $distRoot = Join-Path $PSScriptRoot $distRelativePath
@@ -647,12 +682,24 @@ $specs = @(
     ".\MekiDisplay.spec",
     ".\MekiAudioCapture.spec"
 )
-foreach ($spec in $specs) {
-    Invoke-CheckedPython @(
-        "-m", "PyInstaller", "--noconfirm", "--clean",
-        "--distpath", $distRoot,
-        $spec
-    )
+$previousPackageFlavor = $env:MEKICOPY_PACKAGE_FLAVOR
+$env:MEKICOPY_PACKAGE_FLAVOR = $PackageFlavor
+try {
+    foreach ($spec in $specs) {
+        Invoke-CheckedPython @(
+            "-m", "PyInstaller", "--noconfirm", "--clean",
+            "--distpath", $distRoot,
+            $spec
+        )
+    }
+}
+finally {
+    if ($null -eq $previousPackageFlavor) {
+        Remove-Item Env:MEKICOPY_PACKAGE_FLAVOR -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:MEKICOPY_PACKAGE_FLAVOR = $previousPackageFlavor
+    }
 }
 
 $mekiCopyExe = Join-Path $distRoot "MekiCopy\MekiCopy.exe"
@@ -714,15 +761,17 @@ Assert-ArtifactPattern `
     -RelativeDirectory "_internal\sherpa_onnx\lib" `
     -FilePattern "_sherpa_onnx*.pyd" `
     -Description "MekiSubtitle sherpa-onnx Python extension"
-foreach ($ocrModel in @(
-    "meiki.text.detect.v0.1.960x544.onnx",
-    "meiki.text.rec.v0.960x32.onnx",
-    "meiki.text.rec.v0.vertical.32x480.onnx"
-)) {
-    Assert-ArtifactFile `
-        -AppRoot $mekiCopyRoot `
-        -RelativePath (Join-Path "_internal\runtime_models\meikiocr" $ocrModel) `
-        -Description "MekiCopy bundled OCR model"
+if ($PackageFlavor -eq "Full") {
+    foreach ($ocrModel in @(
+        "meiki.text.detect.v0.1.960x544.onnx",
+        "meiki.text.rec.v0.960x32.onnx",
+        "meiki.text.rec.v0.vertical.32x480.onnx"
+    )) {
+        Assert-ArtifactFile `
+            -AppRoot $mekiCopyRoot `
+            -RelativePath (Join-Path "_internal\runtime_models\meikiocr" $ocrModel) `
+            -Description "MekiCopy bundled OCR model"
+    }
 }
 
 Assert-ArtifactFile `
@@ -849,6 +898,103 @@ foreach ($preparedModel in $hyTransPreparedModels) {
     Write-Host "Prepared local HYTrans model: $hyTransModelTarget"
 }
 
+if ($PackageFlavor -eq "Full") {
+    $defaultFullAssetsRoot = Join-Path (Split-Path $PSScriptRoot -Parent) "ReazonSubtitle\assets"
+    $fullModelAssetsRoot = if ($FullAssetsRoot) { $FullAssetsRoot } else { $defaultFullAssetsRoot }
+    if (-not (Test-Path -LiteralPath $fullModelAssetsRoot -PathType Container)) {
+        throw "Full package model assets were not found: $fullModelAssetsRoot"
+    }
+    $fullModelAssetsRoot = (Resolve-Path -LiteralPath $fullModelAssetsRoot).Path
+
+    # MekiSubtitle uses its companion-owned copies below; it never receives
+    # a separate STT/VAD/translation cache inside MekiCopy itself.
+    $fullAssetCopies = @(
+        @{
+            Source = Join-Path $fullModelAssetsRoot "sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8"
+            Target = Join-Path $audioCaptureRoot "models\sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8"
+            Description = "Parakeet NeMo CTC STT model"
+        },
+        @{
+            Source = Join-Path $fullModelAssetsRoot "reazonspeech-ja"
+            Target = Join-Path $audioCaptureRoot "models\reazonspeech-ja"
+            Description = "ReazonSpeech STT model"
+        },
+        @{
+            Source = Join-Path $fullModelAssetsRoot "vad"
+            Target = Join-Path $audioCaptureRoot "models\vad"
+            Description = "Silero VAD model"
+        },
+        @{
+            Source = Join-Path $fullModelAssetsRoot "onnx-community\HY-MT1.5-1.8B-ONNX"
+            Target = Join-Path $hyTransRoot "models\onnx-community\HY-MT1.5-1.8B-ONNX"
+            Description = "HY-MT1.5 translation model"
+        },
+        @{
+            Source = Join-Path $fullModelAssetsRoot "tchinso\Hy-MT2-1.8B-onnx-q4f16"
+            Target = Join-Path $hyTransRoot "models\tchinso\Hy-MT2-1.8B-onnx-q4f16"
+            Description = "HY-MT2 experimental translation model"
+        }
+    )
+    foreach ($asset in $fullAssetCopies) {
+        Copy-ReleaseTree `
+            -SourceRoot $asset.Source `
+            -TargetRoot $asset.Target `
+            -Description $asset.Description
+    }
+
+    $magpieSearchRoots = @()
+    if ($FullMagpieRoot) {
+        $magpieSearchRoots += $FullMagpieRoot
+    }
+    $magpieSearchRoots += @(
+        (Join-Path $PSScriptRoot "MagPie"),
+        (Join-Path $env:LOCALAPPDATA "MekiCopy\MagPie")
+    )
+    $magpieExecutable = $null
+    foreach ($candidateRoot in $magpieSearchRoots) {
+        if (-not $candidateRoot -or -not (Test-Path -LiteralPath $candidateRoot -PathType Container)) {
+            continue
+        }
+        $magpieExecutable = Get-ChildItem `
+            -LiteralPath $candidateRoot `
+            -Filter "MagPie.exe" `
+            -File `
+            -Recurse `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($magpieExecutable) {
+            break
+        }
+    }
+    if (-not $magpieExecutable) {
+        Write-Host "Downloading MagPie for the Full package..."
+        $installMagpie = @'
+from mekicopy_companions import _install_latest_magpie
+print(_install_latest_magpie())
+'@
+        Invoke-CheckedPythonScript $installMagpie
+        $magpieRoot = Join-Path $PSScriptRoot "MagPie"
+        $magpieExecutable = Get-ChildItem `
+            -LiteralPath $magpieRoot `
+            -Filter "MagPie.exe" `
+            -File `
+            -Recurse `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
+    if (-not $magpieExecutable) {
+        throw "Full package MagPie executable could not be prepared."
+    }
+    Copy-ReleaseTree `
+        -SourceRoot (Split-Path -Parent $magpieExecutable.FullName) `
+        -TargetRoot (Join-Path $distRoot "MagPie") `
+        -Description "MagPie"
+    Assert-ArtifactFile `
+        -AppRoot $distRoot `
+        -RelativePath "MagPie\MagPie.exe" `
+        -Description "Full package MagPie"
+}
+
 $smokeStateRoot = Join-Path $distRoot ".smoke-state"
 $smokeStateRelativePath = Join-Path $distRelativePath ".smoke-state"
 $previousSmokeDataDir = $env:MEKICOPY_DATA_DIR
@@ -946,7 +1092,7 @@ start "" "MekiCopy.exe"
 '@
 Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding ASCII
 
-$releaseArchivePath = Join-Path $PSScriptRoot "$distRelativePath.zip"
+$releaseArchivePath = Join-Path $PSScriptRoot "MekiCopy-$PackageFlavor-one-dir.zip"
 $releaseChecksumPath = "$releaseArchivePath.sha256"
 if (Test-Path -LiteralPath $releaseChecksumPath) {
     if (-not (Test-Path -LiteralPath $releaseChecksumPath -PathType Leaf)) {
