@@ -40,7 +40,13 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_MODEL_ID,
     )
     parser.add_argument("--debug-log", action="store_true")
-    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument(
+        "--no-browser",
+        "--no-worker",
+        dest="no_browser",
+        action="store_true",
+        help="start only the loopback server; do not launch the private worker",
+    )
     return parser.parse_args()
 
 
@@ -113,13 +119,13 @@ def main() -> int:
             raise RuntimeError("HYTrans server failed to start")
 
         if not args.no_browser:
-            state.state = "BROWSER_OPENING"
+            state.state = "WORKER_STARTING"
             browser.start(worker_url)
 
         debug("main", f"server running on {args.host}:{args.port}")
         while server_thread.is_alive():
             if shutdown_requested.is_set():
-                # Release the Chrome profile and ONNX resources before the
+                # Release the private worker profile and ONNX resources before the
                 # listening port disappears. MekiCopy waits for that port to
                 # close before launching the replacement HYTrans instance.
                 if browser.stop():

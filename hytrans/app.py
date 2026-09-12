@@ -214,7 +214,7 @@ async def _translate_text(text: str) -> str:
                 try:
                     await _open_worker_singleflight()
                     if not state.worker_connected:
-                        state.state = "BROWSER_OPENING"
+                        state.state = "WORKER_STARTING"
                 except Exception as exc:
                     state.state = "ERROR"
                     state.error = str(exc)
@@ -304,7 +304,7 @@ async def reopen_worker() -> dict[str, object]:
     if worker_opener is None:
         raise HTTPException(status_code=503, detail="worker opener is unavailable")
     try:
-        state.state = "BROWSER_OPENING"
+        state.state = "WORKER_STARTING"
         state.error = None
         await _open_worker_singleflight()
         return {

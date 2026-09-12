@@ -305,7 +305,8 @@ class AppSettings:
     overlayer_text_color: str = "#ffffff"
     overlayer_text_size: int = 28
     overlayer_text_font: str = "Malgun Gothic"
-    audio_stt_precision: str = "fp32"
+    audio_stt_model: str = "parakeet"
+    audio_stt_precision: str = "int8"
     audio_chunk_preset: str = "BALANCED"
     script_always_on_top: bool = True
     script_bg_color: str = "#111111"
@@ -616,6 +617,9 @@ def load_settings() -> AppSettings:
     settings.overlayer_text_font = parser.get(
         section, "overlayer_text_font", fallback=settings.overlayer_text_font
     )
+    settings.audio_stt_model = parser.get(
+        section, "audio_stt_model", fallback=settings.audio_stt_model
+    ).lower()
     settings.audio_stt_precision = parser.get(
         section, "audio_stt_precision", fallback=settings.audio_stt_precision
     ).lower()
@@ -707,8 +711,10 @@ def load_settings() -> AppSettings:
     )
     settings.overlayer_text_size = max(8, min(96, settings.overlayer_text_size))
     settings.overlayer_text_font = _normalize_font_name(settings.overlayer_text_font)
+    if settings.audio_stt_model not in {"parakeet", "reazonspeech"}:
+        settings.audio_stt_model = "parakeet"
     if settings.audio_stt_precision not in {"fp32", "int8"}:
-        settings.audio_stt_precision = "fp32"
+        settings.audio_stt_precision = "int8"
     if settings.audio_chunk_preset not in {"FAST", "BALANCED", "LONG"}:
         settings.audio_chunk_preset = "BALANCED"
     settings.script_bg_opacity = _bounded_float(
@@ -766,6 +772,7 @@ def save_settings(settings: AppSettings) -> bool:
         "overlayer_text_color": settings.overlayer_text_color,
         "overlayer_text_size": str(settings.overlayer_text_size),
         "overlayer_text_font": _normalize_font_name(settings.overlayer_text_font),
+        "audio_stt_model": settings.audio_stt_model,
         "audio_stt_precision": settings.audio_stt_precision,
         "audio_chunk_preset": settings.audio_chunk_preset,
         "script_always_on_top": str(settings.script_always_on_top).lower(),

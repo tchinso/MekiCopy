@@ -129,6 +129,7 @@ from mekicopy_settings import (
     save_settings,
 )
 from mekicopy_settings_window import SettingsWindow
+from meki_subtitle_window import MekiSubtitleWindow
 from hytrans.model_files import get_model_profile
 from mekicopy_theme import (
     BG,
@@ -654,6 +655,7 @@ class MainWindow(tk.Tk):
         self.audio_capture_process: subprocess.Popen | None = None
         self.script_process: subprocess.Popen | None = None
         self.magpie_process: subprocess.Popen | None = None
+        self.subtitle_window: MekiSubtitleWindow | None = None
         self._magpie_install_results: queue.Queue[tuple[bool, str]] = queue.Queue()
         self._magpie_installing = False
         self.tray_icon = WindowsTrayIcon(self, "MekiCopy", self._restore_from_tray)
@@ -698,7 +700,14 @@ class MainWindow(tk.Tk):
         content = tk.Frame(body, bg=BG, highlightthickness=1, highlightbackground=BORDER)
         content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        for tab_name in ("영역", "캡쳐", "음성인식", "도구/설정", "행동"):
+        for tab_name in (
+            "영역",
+            "캡쳐",
+            "음성인식",
+            "새로운 자막 생성",
+            "도구/설정",
+            "행동",
+        ):
             button = RoundedButton(
                 tab_bar,
                 text=tab_name,
@@ -716,6 +725,7 @@ class MainWindow(tk.Tk):
         self._build_region_tab(self.tab_frames["영역"])
         self._build_capture_tab(self.tab_frames["캡쳐"])
         self._build_audio_tab(self.tab_frames["음성인식"])
+        self._build_subtitle_tab(self.tab_frames["새로운 자막 생성"])
         self._build_tools_tab(self.tab_frames["도구/설정"])
         self._build_action_tab(self.tab_frames["행동"])
 
@@ -795,6 +805,51 @@ class MainWindow(tk.Tk):
             "모든 도구 연결 상태 확인",
             self._on_test_audio_connection,
         )
+
+    def _build_subtitle_tab(self, frame: tk.Frame) -> None:
+        tk.Label(
+            frame,
+            text="MekiSubtitle",
+            font=TITLE_FONT,
+            bg=SURFACE,
+            fg=ROSE,
+        ).pack(pady=(4, 4), anchor="w")
+        tk.Label(
+            frame,
+            text=(
+                "영상의 원본 오디오를 FAST VAD와 일본어 STT로 처리한 뒤, "
+                "현재 HYTrans 설정으로 한국어 SRT를 만듭니다.\n\n"
+                "음성·VAD·번역 모델은 MekiAudioCapture와 HYTrans의 공용 "
+                "검증 캐시를 그대로 사용합니다."
+            ),
+            justify="left",
+            wraplength=330,
+            bg=SURFACE,
+            fg=INK,
+        ).pack(pady=(0, 14), fill=tk.X)
+        self._pack_tab_button(frame, "MekiSubtitle 열기", self._on_open_meki_subtitle)
+
+    def _on_open_meki_subtitle(self) -> None:
+        window = self.subtitle_window
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            window.focus_force()
+            return
+
+        def forget_window() -> None:
+            self.subtitle_window = None
+
+        window = MekiSubtitleWindow(
+            self,
+            settings=self.settings,
+            hytrans_url=self._hytrans_base_url,
+            start_hytrans=self._on_start_hytrans,
+            on_destroy=forget_window,
+        )
+        self.subtitle_window = window
+        _set_window_icon(window)
+
 
     def _build_action_tab(self, frame: tk.Frame) -> None:
         self.detach_button = self._pack_tab_button(
@@ -1282,6 +1337,7 @@ class MainWindow(tk.Tk):
 
     def _audio_capture_config_payload(self) -> dict:
         return {
+            "sttModel": self.settings.audio_stt_model,
             "precision": self.settings.audio_stt_precision,
             "preset": self.settings.audio_chunk_preset,
             "scriptUrl": self._script_base_url(),
@@ -1406,6 +1462,7 @@ class MainWindow(tk.Tk):
         cfg = self._audio_capture_config_payload()
         command += [
             "--port", str(self.settings.audio_capture_port),
+            "--stt-model", str(cfg["sttModel"]),
             "--precision", str(cfg["precision"]),
             "--preset", str(cfg["preset"]),
             "--script-url", str(cfg["scriptUrl"]),
@@ -1483,14 +1540,14 @@ class MainWindow(tk.Tk):
                 _log_runtime_error("send_overlayer_config", exc)
             return False
 
-    def _on_start_hytrans(self) -> None:
+    def _on_start_hytrans(self) -> bool:
         if self._hytrans_restart_after_id is not None:
             messagebox.showinfo(
                 "MekiCopy",
                 "변경된 번역 모델로 HYTrans를 재시작하고 있습니다.",
                 parent=self,
             )
-            return
+            return True
         try:
             health = _json_request(f"{self._hytrans_base_url()}/health", timeout=1)
             # A disconnected/fatal worker intentionally reports an ERROR
@@ -1509,7 +1566,7 @@ class MainWindow(tk.Tk):
                     self.settings.hytrans_port,
                     "running-profile-mismatch",
                 ):
-                    return
+                    return True
             self._send_hytrans_logging_config(log_errors=False)
             try:
                 ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=1)
@@ -1522,23 +1579,28 @@ class MainWindow(tk.Tk):
                     )
                     messagebox.showinfo(
                         "MekiCopy",
-                        "HYTrans Worker 창을 다시 열었습니다.",
+                        "HYTrans 비공개 번역 worker를 다시 시작했습니다.",
                         parent=self,
                     )
-                    return
+                    return True
             except Exception as exc:
                 _log_runtime_error("restart_hytrans_worker", exc)
             messagebox.showinfo("MekiCopy", "HYTrans 서버가 이미 실행 중입니다.", parent=self)
-            return
+            return True
         except Exception:
+            if self._tracked_process_is_starting("HYTrans", self.hytrans_process):
+                return True
             if self._warn_if_port_busy("HYTrans", self.settings.hytrans_port):
-                return
+                return False
 
-        self._launch_hytrans()
+        return self._launch_hytrans()
 
     def _launch_hytrans(self, *, restarted: bool = False) -> bool:
         if self._tracked_process_is_starting("HYTrans", self.hytrans_process):
-            return False
+            # A tracked process is an in-flight successful launch, not a
+            # launch failure.  Callers such as MekiSubtitle can safely wait
+            # for its /ready endpoint instead of abandoning their job.
+            return True
         command = _find_companion_executable("HYTrans", "hytrans_main.py")
         if not command:
             messagebox.showerror(
@@ -1668,7 +1730,7 @@ class MainWindow(tk.Tk):
             self._launch_hytrans(restarted=True)
             return
 
-        # Give graceful shutdown time to close the browser and Uvicorn. If a
+        # Give graceful shutdown time to close the private worker and Uvicorn. If a
         # process owned by this MekiCopy instance hangs, fall back to its tree.
         if self._hytrans_restart_attempts == 12 and process_alive:
             try:
@@ -1972,6 +2034,8 @@ class MainWindow(tk.Tk):
         self.settings = settings
         set_debug_enabled(self.settings.debug_logging)
         self.attributes("-topmost", self.settings.main_always_on_top)
+        if self.subtitle_window is not None and self.subtitle_window.winfo_exists():
+            self.subtitle_window.refresh_settings(self.settings)
         self._apply_overlay_mode_ui()
         if self.settings.overlay_translation_mode:
             self._send_overlayer_config(log_errors=False)
@@ -2010,6 +2074,18 @@ class MainWindow(tk.Tk):
             self.after(100, lambda: setattr(self, "_restoring_from_tray", False))
 
     def _on_close(self) -> None:
+        subtitle_window = self.subtitle_window
+        if (
+            subtitle_window is not None
+            and subtitle_window.winfo_exists()
+            and subtitle_window.is_running
+            and not messagebox.askyesno(
+                "MekiCopy 종료",
+                "MekiSubtitle 자막 생성이 진행 중입니다. 지금 종료하면 작업이 중단됩니다.\n\n그래도 종료할까요?",
+                parent=self,
+            )
+        ):
+            return
         if _is_process_alive(self.audio_capture_process):
             try:
                 audio_health = _json_request(
@@ -2037,6 +2113,8 @@ class MainWindow(tk.Tk):
             ):
                 return
         self._closing = True
+        if subtitle_window is not None and subtitle_window.winfo_exists():
+            subtitle_window.cancel_for_parent_shutdown()
         if self._hytrans_restart_after_id is not None:
             try:
                 self.after_cancel(self._hytrans_restart_after_id)
@@ -2332,7 +2410,14 @@ def run_ui_self_test() -> None:
             raise RuntimeError(
                 f"main window height is {app.winfo_height()}, expected {MAIN_WINDOW_HEIGHT}"
             )
-        expected_tabs = {"영역", "캡쳐", "음성인식", "도구/설정", "행동"}
+        expected_tabs = {
+            "영역",
+            "캡쳐",
+            "음성인식",
+            "새로운 자막 생성",
+            "도구/설정",
+            "행동",
+        }
         if set(app.tab_frames) != expected_tabs:
             raise RuntimeError(f"unexpected main tabs: {set(app.tab_frames)}")
         app._select_tab("행동")
@@ -2351,6 +2436,10 @@ def run_ui_self_test() -> None:
             raise RuntimeError("HYTrans button state does not match overlay mode")
         if app.overlayer_button.cget("state") != expected_overlay_state:
             raise RuntimeError("MekiOverlayer button state does not match overlay mode")
+        app._select_tab("새로운 자막 생성")
+        app.update_idletasks()
+        if "MekiSubtitle" not in app.tab_frames["새로운 자막 생성"].winfo_children()[0].cget("text"):
+            raise RuntimeError("MekiSubtitle tab title was not created")
         app._select_tab("영역")
         app.update_idletasks()
 

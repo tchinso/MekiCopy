@@ -1,4 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_all
 from PyInstaller.utils.hooks import collect_dynamic_libs
@@ -6,9 +8,20 @@ from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import copy_metadata
 
 datas = [('runtime_models', 'runtime_models'), ('MekiCopy.ico', '.')]
+# Video subtitle generation uses the existing ReazonSubtitle FFmpeg payload,
+# but only model caches are shared at runtime.  Keep this media utility in the
+# MekiCopy bundle so a release does not depend on a developer-side PATH.
+spec_root = Path(SPECPATH).resolve()
+subtitle_ffmpeg = spec_root.parent / 'ReazonSubtitle' / 'assets' / 'ffmpeg'
+if subtitle_ffmpeg.is_dir():
+    datas.append((str(subtitle_ffmpeg), 'assets/ffmpeg'))
 binaries = []
 hiddenimports = [
     'mekicopy',
+    'audio_capture_core',
+    'meki_subtitle_paths',
+    'meki_subtitle_pipeline',
+    'meki_subtitle_window',
     'onnxruntime.capi.onnxruntime_pybind11_state',
     'tkinter',
     'tkinter.constants',
@@ -28,6 +41,10 @@ hiddenimports += cv2_hiddenimports
 binaries += collect_dynamic_libs('onnxruntime')
 hiddenimports += collect_submodules('meikiocr')
 hiddenimports += collect_submodules('onnxruntime.capi')
+# MekiSubtitle invokes the same native offline recognizers as
+# MekiAudioCapture, including NeMo CTC for the default Parakeet model.
+binaries += collect_dynamic_libs('sherpa_onnx')
+hiddenimports += collect_submodules('sherpa_onnx')
 
 
 a = Analysis(

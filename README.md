@@ -4,6 +4,7 @@
 MekiCopy는 화면의 특정 영역을 지정한 뒤 OCR로 글자를 인식하고, 결과를 클립보드에 복사하는 도구입니다.  
 선택적으로 HYTrans + MekiOverlayer와 연동하면 인식한 텍스트를 자동으로 번역해 화면에 바로 표시할 수 있습니다.
 MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일본어 음성을 녹음한 뒤 일괄 인식·번역할 수 있습니다.
+`새로운 자막 생성` 탭의 MekiSubtitle은 영상 파일에서 한국어 SRT를 만듭니다.
 
 ---
 
@@ -17,8 +18,9 @@ MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일�
 7. [번역 오버레이 모드 (HYTrans + MekiOverlayer)](#번역-오버레이-모드)
 8. [설정](#설정)
 9. [음성인식 (MekiAudioCapture + MekiScript)](#음성인식)
-10. [커맨드라인 사용법](#커맨드라인-사용법)
-11. [주의사항](#주의사항)
+10. [새로운 자막 생성 (MekiSubtitle)](#새로운-자막-생성)
+11. [커맨드라인 사용법](#커맨드라인-사용법)
+12. [주의사항](#주의사항)
 
 ---
 
@@ -151,19 +153,19 @@ OCR로 인식한 텍스트를 자동으로 번역해 화면에 바로 표시하�
 
 | 설정 표시 | 모델 저장소 | 형식 |
 |---|---|---|
-| **MT2 (기본)** | `tchinso/Hy-MT2-1.8B-onnx-q4f16` | q4f16 |
-| MT1.5 | `onnx-community/HY-MT1.5-1.8B-ONNX` | q4 |
+| **MT1.5 (기본)** | `onnx-community/HY-MT1.5-1.8B-ONNX` | q4 |
+| MT2 (실험용) | `tchinso/Hy-MT2-1.8B-onnx-q4f16` | q4f16 |
 
-HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x 최신)과 `ONNX Runtime Web/WASM 1.27.0`을 Chrome 또는 Edge에서 로컬로 읽습니다. 네트워크는 선택한 번역 모델을 처음 내려받을 때만 필요하며, 이후에는 `HYTrans/models`의 검증된 모델을 재사용합니다.
+HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x 최신)과 `ONNX Runtime Web/WASM 1.27.0`을 private headless Chrome 또는 Edge worker에서 로컬로 읽습니다. 네트워크는 선택한 번역 모델을 처음 내려받을 때만 필요하며, 이후에는 `HYTrans/models`의 검증된 모델을 재사용합니다.
 
 > **필수 조건:** Google Chrome 또는 Microsoft Edge가 설치되어 있어야 합니다.
 
 ### 사용 방법
 
-1. `설정` 창을 열고 **번역 오버레이 모드** 섹션에서 `오버레이어 번역 모드 사용`을 체크한 뒤 MT2 또는 MT1.5를 선택합니다.
+1. `설정` 창을 열고 **번역 오버레이 모드** 섹션에서 `오버레이어 번역 모드 사용`을 체크한 뒤 기본 MT1.5 또는 실험용 MT2를 선택합니다.
 2. `저장`을 누릅니다. `도구/설정` 탭의 `HYTrans 서버 실행`과 `MekiOverlayer 실행` 버튼이 활성화됩니다.
 3. `HYTrans 서버 실행` 버튼을 누릅니다.
-   - HYTrans가 실행되면서 브라우저 창이 자동으로 열립니다.
+   - HYTrans는 사용자에게 보이지 않는 private headless worker를 자동으로 시작합니다. 닫을 브라우저 창이 없습니다.
    - HYTrans가 선택한 모델을 `HYTrans/models/<제작자>/<모델명>`에 직접 다운로드한 뒤 Worker가 로컬 모델을 로드합니다. **처음 실행 시 모델 다운로드에 시간이 걸립니다.**
    - 완전한 로컬 모델이 이미 있으면 네트워크에 접속하거나 다시 다운로드하지 않습니다. Worker에는 `다운로드 중`과 `로컬 모델 로드 중`이 구분되어 표시됩니다.
 4. `MekiOverlayer 실행` 버튼을 누릅니다.
@@ -176,7 +178,7 @@ HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x �
 
 ### 주의사항
 
-- HYTrans 서버가 준비되기 전에 `번역 후 표시`를 누르면 오류가 발생합니다. 브라우저에서 모델 로딩이 완료될 때까지 기다리세요.
+- HYTrans 서버가 준비되기 전에 `번역 후 표시`를 누르면 오류가 발생합니다. 비공개 worker의 모델 로딩이 완료될 때까지 기다리세요.
 - MekiCopy를 종료하면 HYTrans와 MekiOverlayer 프로세스도 함께 종료됩니다.
 - HYTrans와 MekiOverlayer 포트가 다른 프로그램과 충돌하면 설정에서 변경할 수 있습니다.
 - 실행 중 번역 모델이나 HYTrans 포트를 변경해 저장하면 기존 HYTrans를 정상 종료하고 포트가 해제된 뒤 새 설정으로 자동 재시작합니다.
@@ -198,11 +200,24 @@ HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x �
 
 | 구성 요소 | 역할 | 기본 포트 |
 |---|---|---|
-| MekiAudioCapture | 시스템 음성 녹음, VAD, ReazonSpeech 일본어 STT | 6998 |
+| MekiAudioCapture | 시스템 음성 녹음, VAD, 기본 Parakeet 또는 선택 ReazonSpeech 일본어 STT | 6998 |
 | HYTrans | 일본어 원문 단위별 한국어 번역 | 6996 |
 | MekiScript | 원문·번역 누적 표시 및 스크롤 | 6999 |
 
-`모든 도구 연결 상태 확인`으로 세 앱의 HTTP 응답과 HYTransWorker/번역 모델 준비 상태를 한 번에 확인할 수 있습니다. 음성 모델은 기본 EXE 배포본에 포함되지 않습니다. MekiAudioCapture를 실행하면 녹음 전에 곧바로 공식 sherpa-onnx 릴리스에서 `MekiAudioCapture/models`로 준비하며, 유효한 모델이 이미 있으면 다운로드하지 않습니다.
+`모든 도구 연결 상태 확인`으로 세 앱의 HTTP 응답과 HYTransWorker/번역 모델 준비 상태를 한 번에 확인할 수 있습니다. 음성 모델은 기본 EXE 배포본에 포함되지 않습니다. MekiAudioCapture 또는 MekiSubtitle를 처음 사용할 때 선택 모델과 VAD를 공식 sherpa-onnx 릴리스에서 공용 `MekiAudioCapture/models` 캐시로 준비하며, 유효한 모델이 이미 있으면 다운로드하지 않습니다.
+
+기본 STT는 `sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8`입니다. Parakeet은 `model.int8.onnx`와 `tokens.txt`를 사용하는 NeMo CTC 모델로 16 kHz mono, feature dimension 80, greedy CPU 인식 경로를 사용합니다. 기존 ReazonSpeech transducer 모델도 선택할 수 있으며 FP32/INT8 옵션을 유지합니다.
+
+---
+
+## 새로운 자막 생성
+
+`새로운 자막 생성` 탭에서 **MekiSubtitle 열기**를 누른 뒤 영상 파일과 저장할 SRT 경로를 선택하세요. MekiSubtitle은 첫 번째 원본 오디오 스트림을 보존된 타임라인으로 추출하고, MekiAudioCapture의 FAST VAD 기준과 일본어 STT를 적용한 뒤 현재 설정의 HYTrans 모델로 한국어 SRT(UTF-8 BOM)를 저장합니다.
+
+- STT/VAD는 MekiAudioCapture의 공용 `models` 캐시를 그대로 사용합니다.
+- 번역은 현재 HYTrans 설정을 사용하며, MekiSubtitle에서 작업을 시작하면 HYTrans도 자동으로 시작하고 준비될 때까지 기다립니다.
+- 따라서 모델은 한 번만 다운로드합니다. STT는 MekiAudioCapture 또는 MekiSubtitle의 첫 사용 시, 번역은 HYTrans 또는 MekiSubtitle의 첫 사용 시 준비됩니다.
+- 영상 오디오 추출에 필요한 FFmpeg/FFprobe는 MekiCopy 배포본에 포함됩니다.
 
 ---
 
@@ -232,7 +247,7 @@ HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x �
 | 옵션 | 설명 |
 |---|---|
 | 오버레이어 번역 모드 사용 | 번역 오버레이 모드를 활성화합니다. |
-| HYTrans 번역 모델 | `MT2`(기본, q4f16) 또는 `MT1.5`(q4)를 선택합니다. 실행 중 변경하면 HYTrans가 자동 재시작됩니다. |
+| HYTrans 번역 모델 | `MT1.5`(기본, q4) 또는 `MT2`(실험용, q4f16)를 선택합니다. 실행 중 변경하면 HYTrans가 자동 재시작됩니다. |
 | HYTrans 포트 | HYTrans 서버 포트 (기본값: 6996) |
 | MekiOverlayer 포트 | 오버레이 서버 포트 (기본값: 6997) |
 | MekiOverlayer를 항상 위로 | 오버레이 창을 항상 위에 표시합니다. |
@@ -248,7 +263,8 @@ HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x �
 
 | 옵션 | 설명 |
 |---|---|
-| 음성인식 모델 | `fp32`(기본) 또는 `int8` 모델을 선택합니다. |
+| STT 모델 | 기본 Parakeet TDT-CTC 0.6B INT8 또는 ReazonSpeech를 선택합니다. |
+| ReazonSpeech 정밀도 | ReazonSpeech를 선택했을 때 `fp32` 또는 `int8`을 선택합니다. Parakeet은 INT8 고정입니다. |
 | 음성 CHUNK 기준 | `FAST`, `BALANCED`(기본), `LONG` VAD 프리셋을 선택합니다. |
 | MekiAudioCapture 포트 | 음성 캡처 서버 포트 (기본값: 6998) |
 | MekiScript 포트 | 누적 대본 서버 포트 (기본값: 6999) |
@@ -292,6 +308,6 @@ MekiCopy.exe --pick-bookmark
 - **한국어 경로 문제:** Windows에서 실행 경로에 한글이 포함되어 Tcl/Tk가 직접 읽지 못하면 먼저 실행 파일 옆 `MekiCopyRuntime`을 사용하고, 그 경로도 사용할 수 없을 때 LocalAppData 또는 임시 폴더로 복사합니다.
 - **시스템 오류 로그:** 오류·미처리 예외·HTTP/IPC 실패·창 없는 EXE의 stderr는 각 실행 파일 옆 `error_log/`에 기록됩니다. 디버그 옵션이 꺼져도 오류 로그는 계속 기록되며, 프로그램 폴더가 읽기 전용일 때만 보조 경로를 사용합니다.
 - **GPU 가속:** CUDA가 지원되는 환경에서는 OCR 엔진이 자동으로 GPU를 사용합니다. 지원되지 않으면 CPU로 동작합니다.
-- **HYTrans 모델 저장소:** MT2와 MT1.5는 각각 `HYTrans/models/tchinso/Hy-MT2-1.8B-onnx-q4f16`, `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX`에 저장됩니다. 고정 리비전의 크기와 SHA-256을 통과한 선택 모델만 로컬로 사용하며, 중단된 `.part` 다운로드는 다음 실행에서 이어받고 체크섬이 틀린 파일은 게시하지 않습니다. 프로그램 폴더가 읽기 전용일 때만 보조 경로를 사용합니다.
+- **HYTrans 모델 저장소:** MT2와 MT1.5는 각각 `HYTrans/models/tchinso/Hy-MT2-1.8B-onnx-q4f16`, `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX`에 저장됩니다. MekiSubtitle도 이 검증된 공용 모델만 사용합니다. 고정 리비전의 크기와 SHA-256을 통과한 선택 모델만 로컬로 사용하며, 중단된 `.part` 다운로드는 다음 실행에서 이어받고 체크섬이 틀린 파일은 게시하지 않습니다. 프로그램 폴더가 읽기 전용일 때만 보조 경로를 사용합니다.
 - **번역 입력 제한:** 한 번에 번역할 수 있는 텍스트는 최대 8,000자입니다.
-- **음성인식 모델 경로:** `MekiAudioCapture.exe` 옆의 `models` 폴더를 사용합니다. 없으면 MekiAudioCapture 실행 직후 백그라운드에서 자동 다운로드하고, 준비가 끝난 뒤 녹음을 활성화합니다.
+- **음성인식 모델 경로:** `MekiAudioCapture.exe` 옆의 `models` 폴더를 사용합니다. MekiSubtitle도 동일한 경로와 읽기 전용 설치용 보조 캐시를 사용하므로 STT/VAD 모델을 중복 저장하지 않습니다.

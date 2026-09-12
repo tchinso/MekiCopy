@@ -12,6 +12,7 @@ from runtime_paths import fallback_app_data_dirs, writable_app_data_dir, writabl
 
 _models_dir_cache: Path | None = None
 _models_dir_lock = threading.RLock()
+_models_dir_override: Path | None = None
 _assets_dir_cache: Path | None = None
 _assets_dir_lock = threading.RLock()
 _REQUIRED_RUNTIME_ASSETS = {
@@ -125,6 +126,58 @@ def _ensure_writable_directory(path: Path) -> bool:
             pass
 
 
+def configure_models_dir(path: str | Path | None) -> None:
+    """Set the shared HYTrans model-cache root for this process.
+
+    Companion applications such as MekiSubtitle run from a different executable
+    directory, but must use the exact same verified model files as HYTrans.
+    Call this before preparing a model to point both the downloader and the
+    local-model checks at the HYTrans cache.  Passing ``None`` restores normal
+    executable-adjacent resolution.  ``HYTRANS_MODELS_DIR`` provides the same
+    override for launchers that cannot call this function directly.
+    """
+
+    global _models_dir_cache, _models_dir_override
+    with _models_dir_lock:
+        if path is None:
+            _models_dir_override = None
+        else:
+            candidate = Path(path).expanduser()
+            try:
+                _models_dir_override = candidate.resolve()
+            except OSError:
+                _models_dir_override = candidate.absolute()
+        _models_dir_cache = None
+
+
+def _configured_models_dir() -> Path | None:
+    if _models_dir_override is not None:
+        return _models_dir_override
+    raw = os.environ.get("HYTRANS_MODELS_DIR", "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    try:
+        return candidate.resolve()
+    except OSError:
+        return candidate.absolute()
+
+
+def _can_reuse_read_only_model_root(path: Path) -> bool:
+    """Whether the selected model is usable even though *path* is read-only."""
+
+    try:
+        from .model_files import active_model_profile, is_complete_model
+
+        profile = active_model_profile()
+        return is_complete_model(
+            path.joinpath(*profile.model_id.split("/")),
+            profile,
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def models_dir() -> Path:
     """Return HYTrans' durable, executable-adjacent model directory.
 
@@ -139,6 +192,18 @@ def models_dir() -> Path:
         if _models_dir_cache is not None:
             return _models_dir_cache
 
+        configured = _configured_models_dir()
+        if configured is not None:
+            if _ensure_writable_directory(configured) or _can_reuse_read_only_model_root(
+                configured
+            ):
+                _models_dir_cache = configured
+                return configured
+            raise RuntimeError(
+                "the configured HYTrans model directory is not writable and "
+                f"does not contain a complete selected model: {configured}"
+            )
+
         external = app_root() / "models"
         if _ensure_writable_directory(external):
             _models_dir_cache = external
@@ -148,16 +213,9 @@ def models_dir() -> Path:
         # read-only. Integrity metadata has its own writable fallback, so do
         # not force a multi-gigabyte re-download merely because the files were
         # copied from read-only media or installed under Program Files.
-        try:
-            from .model_files import active_model_profile, is_complete_model
-
-            profile = active_model_profile()
-            portable_model = external.joinpath(*profile.model_id.split("/"))
-            if is_complete_model(portable_model, profile):
-                _models_dir_cache = external
-                return external
-        except (OSError, RuntimeError, ValueError):
-            pass
+        if _can_reuse_read_only_model_root(external):
+            _models_dir_cache = external
+            return external
 
         # app_data_dir() normally selects the executable root first. If only
         # its child ``models`` is unusable (for example, a regular file with

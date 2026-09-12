@@ -125,12 +125,14 @@ MT15_PROFILE = ModelProfile(
 
 
 # These are stable user-setting/CLI keys, not Hugging Face repository IDs.
-DEFAULT_MODEL_ID = MT2_PROFILE.key
-SUPPORTED_MODEL_IDS = (MT2_PROFILE.key, MT15_PROFILE.key)
+# MT1.5 is the stable/default path.  MT2 remains selectable for people who
+# explicitly opt into the experimental, larger q4f16 runtime.
+DEFAULT_MODEL_ID = MT15_PROFILE.key
+SUPPORTED_MODEL_IDS = (MT15_PROFILE.key, MT2_PROFILE.key)
 MODEL_PROFILES: Mapping[str, ModelProfile] = MappingProxyType(
     {
-        MT2_PROFILE.key: MT2_PROFILE,
         MT15_PROFILE.key: MT15_PROFILE,
+        MT2_PROFILE.key: MT2_PROFILE,
     }
 )
 MODEL_DISPLAY_LABELS: Mapping[str, str] = MappingProxyType(
@@ -418,6 +420,6 @@ def is_complete_model(
 
 # Backward-compatible aliases describe the default profile only. Runtime code
 # must call active_model_profile() rather than importing these static values.
-MODEL_ID = MT2_PROFILE.model_id
-MODEL_REVISION = MT2_PROFILE.revision
-MODEL_FILE_SPECS = MT2_PROFILE.files
+MODEL_ID = MT15_PROFILE.model_id
+MODEL_REVISION = MT15_PROFILE.revision
+MODEL_FILE_SPECS = MT15_PROFILE.files

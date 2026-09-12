@@ -15,11 +15,17 @@ from typing import Callable, Iterable
 
 import numpy as np
 
-from runtime_paths import exclusive_file_lock, writable_app_subdir
+from runtime_paths import exclusive_file_lock, fallback_app_data_dirs
 
 
 INTERNAL_SAMPLE_RATE = 16_000
 CAPTURE_SAMPLE_RATE = 48_000
+PARAKEET_MODEL_DIRECTORY = "sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8"
+REAZONSPEECH_MODEL_DIRECTORY = "reazonspeech-ja"
+PARAKEET_ARCHIVE_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    "sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8.tar.bz2"
+)
 REAZONSPEECH_ARCHIVE_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
     "sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2"
@@ -36,23 +42,77 @@ REAZONSPEECH_FILES = (
     "encoder-epoch-99-avg-1.int8.onnx",
     "joiner-epoch-99-avg-1.int8.onnx",
 )
+PARAKEET_FILES = ("tokens.txt", "model.int8.onnx")
+
+
+@dataclass(frozen=True)
+class SttModel:
+    """Description of an offline Japanese STT model shared by companion apps."""
+
+    key: str
+    label: str
+    status_name: str
+    asset_directory: str
+    architecture: str
+    supports_fp32: bool
+    archive_url: str
+    archive_filename: str
+    required_files: tuple[str, ...]
+    test_wav_suffix: str
+
+
+STT_MODELS: dict[str, SttModel] = {
+    "parakeet": SttModel(
+        key="parakeet",
+        label="Parakeet TDT-CTC 0.6B 일본어 (기본, INT8)",
+        status_name="Parakeet TDT-CTC",
+        asset_directory=PARAKEET_MODEL_DIRECTORY,
+        architecture="nemo_ctc",
+        supports_fp32=False,
+        archive_url=PARAKEET_ARCHIVE_URL,
+        archive_filename="parakeet-tdt-ctc.tar.bz2",
+        required_files=PARAKEET_FILES,
+        test_wav_suffix="test_wavs/test_ja_1.wav",
+    ),
+    "reazonspeech": SttModel(
+        key="reazonspeech",
+        label="ReazonSpeech 일본어 (INT8 / FP32)",
+        status_name="ReazonSpeech",
+        asset_directory=REAZONSPEECH_MODEL_DIRECTORY,
+        architecture="transducer",
+        supports_fp32=True,
+        archive_url=REAZONSPEECH_ARCHIVE_URL,
+        archive_filename="reazonspeech.tar.bz2",
+        required_files=REAZONSPEECH_FILES,
+        test_wav_suffix="test_wavs/1.wav",
+    ),
+}
+DEFAULT_STT_MODEL = "parakeet"
+
+# File metadata is keyed relative to the shared model root.  `tokens.txt`
+# exists in both STT archives, so basename-only integrity entries would let one
+# model incorrectly validate the other model's token table.
 MODEL_FILE_SIZES = {
-    "tokens.txt": 45_754,
-    "encoder-epoch-99-avg-1.onnx": 592_347_848,
-    "decoder-epoch-99-avg-1.onnx": 11_767_836,
-    "joiner-epoch-99-avg-1.onnx": 10_720_115,
-    "encoder-epoch-99-avg-1.int8.onnx": 154_670_139,
-    "joiner-epoch-99-avg-1.int8.onnx": 2_696_970,
-    "silero_vad.onnx": 643_854,
+    f"{PARAKEET_MODEL_DIRECTORY}/tokens.txt": 28_557,
+    f"{PARAKEET_MODEL_DIRECTORY}/model.int8.onnx": 655_542_604,
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/tokens.txt": 45_754,
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/encoder-epoch-99-avg-1.onnx": 592_347_848,
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/decoder-epoch-99-avg-1.onnx": 11_767_836,
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/joiner-epoch-99-avg-1.onnx": 10_720_115,
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/encoder-epoch-99-avg-1.int8.onnx": 154_670_139,
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/joiner-epoch-99-avg-1.int8.onnx": 2_696_970,
+    "vad/silero_vad.onnx": 643_854,
 }
 MODEL_FILE_HASHES = {
-    "tokens.txt": "2c3ac659818a48a0c04010e0593bbc4d7c8a24a054340b01131499c05fd52def",
-    "encoder-epoch-99-avg-1.onnx": "ecdb0b771e16104aaf8e579cb3c1e32fbd589eb641c5946d82b615bd366c5f96",
-    "decoder-epoch-99-avg-1.onnx": "58b18211ae06265466bfa17172dab574df94f76c8bcb61a3640c28ba860e4124",
-    "joiner-epoch-99-avg-1.onnx": "d38a81d1191c9ed6de6a1719503692e07e3e973e2364adde0abae5eaaded1174",
-    "encoder-epoch-99-avg-1.int8.onnx": "2c7bd08a8a99f9ddd0d9e458456577b1f6279214e51426f114f9eced44c54e1d",
-    "joiner-epoch-99-avg-1.int8.onnx": "49cc7ea1d3d35a40a27442db5e89996da64bf0e683a903dce76e99e57a12e4",
-    "silero_vad.onnx": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+    f"{PARAKEET_MODEL_DIRECTORY}/tokens.txt": "732f64c53909f2620c713f4106b487d92e6f54a6915b3cd3d1dbd32f9f4f392a",
+    f"{PARAKEET_MODEL_DIRECTORY}/model.int8.onnx": "3addd00ef5bd1742078389e540b77394e4a508bdf2f4c9ad1b4a76d93e76598e",
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/tokens.txt": "2c3ac659818a48a0c04010e0593bbc4d7c8a24a054340b01131499c05fd52def",
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/encoder-epoch-99-avg-1.onnx": "ecdb0b771e16104aaf8e579cb3c1e32fbd589eb641c5946d82b615bd366c5f96",
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/decoder-epoch-99-avg-1.onnx": "58b18211ae06265466bfa17172dab574df94f76c8bcb61a3640c28ba860e4124",
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/joiner-epoch-99-avg-1.onnx": "d38a81d1191c9ed6de6a1719503692e07e3e973e2364adde0abae5eaaded1174",
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/encoder-epoch-99-avg-1.int8.onnx": "2c7bd08a8a99f9ddd0d9e458456577b1f6279214e51426f114f9eced44c54e1d",
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/joiner-epoch-99-avg-1.int8.onnx": "49cc7ea1d3d35a40a27442db5e89996da64bf0e683a903dce76e99e57a12e4",
+    "vad/silero_vad.onnx": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
 }
 
 VAD_PRESETS: dict[str, dict[str, float]] = {
@@ -120,6 +180,29 @@ def normalize_precision(value: str) -> str:
     return "int8" if str(value).lower() == "int8" else "fp32"
 
 
+def get_stt_model(model_key: str) -> SttModel:
+    """Return a supported STT model or explain the valid model keys."""
+    try:
+        return STT_MODELS[str(model_key).lower()]
+    except KeyError as exc:
+        choices = ", ".join(STT_MODELS)
+        raise ValueError(
+            f"알 수 없는 음성인식 모델입니다: {model_key} (선택 가능: {choices})"
+        ) from exc
+
+
+def normalize_stt_model(value: str) -> str:
+    """Normalize persisted/UI input, falling back to the default STT model."""
+    key = str(value).lower()
+    return key if key in STT_MODELS else DEFAULT_STT_MODEL
+
+
+def effective_stt_precision(model_key: str, precision: str) -> str:
+    """Return the precision the selected model can actually run with."""
+    model = get_stt_model(normalize_stt_model(model_key))
+    return normalize_precision(precision) if model.supports_fp32 else "int8"
+
+
 def normalize_preset(value: str) -> str:
     value = str(value).upper()
     return value if value in VAD_PRESETS else "BALANCED"
@@ -171,15 +254,34 @@ def translate_text(hytrans_url: str, text: str, timeout: float = 650.0) -> str:
     return str(response.get("text", "")).strip()
 
 
-def model_root_candidates(application_dir: Path, resource_dir: Path) -> list[Path]:
+def default_model_root(application_dir: Path) -> Path:
+    """Return the portable model directory used by MekiAudioCapture."""
+    return Path(application_dir) / "models"
+
+
+def _shared_model_cache_candidates() -> list[Path]:
+    """Return durable, caller-independent MekiAudioCapture model caches."""
+    return [root / "models" for root in fallback_app_data_dirs("MekiAudioCapture")]
+
+
+def model_root_candidates(
+    application_dir: Path,
+    resource_dir: Path,
+    *,
+    model_root: Path | None = None,
+) -> list[Path]:
+    """List portable then shared-cache model roots.
+
+    ``model_root`` is intentionally authoritative for portable models.  It
+    lets MekiSubtitle point at MekiAudioCapture's sibling ``models`` directory
+    instead of creating a second copy beside its own executable.
+    """
     del resource_dir
     # Keep portable/prepared models beside the executable first, but never
-    # require write access there. Program Files and protected folders need a
-    # per-user cache for first-run downloads.
-    candidates = [
-        application_dir / "models",
-        writable_app_subdir("MekiAudioCapture", "models"),
-    ]
+    # require write access there. Program Files and protected folders use a
+    # durable MekiAudioCapture cache that is independent of the calling app.
+    candidates = [Path(model_root) if model_root is not None else default_model_root(application_dir)]
+    candidates.extend(_shared_model_cache_candidates())
     seen: set[str] = set()
     result: list[Path] = []
     for root in candidates:
@@ -209,25 +311,52 @@ def _select_writable_model_root(candidates: list[Path]) -> Path:
     raise PermissionError(f"No writable speech-model directory is available.\n{detail}")
 
 
-def _model_paths(root: Path, precision: str) -> dict[str, Path]:
-    speech = root / "reazonspeech-ja"
-    if normalize_precision(precision) == "int8":
-        encoder = speech / "encoder-epoch-99-avg-1.int8.onnx"
-        joiner = speech / "joiner-epoch-99-avg-1.int8.onnx"
-    else:
-        encoder = speech / "encoder-epoch-99-avg-1.onnx"
-        joiner = speech / "joiner-epoch-99-avg-1.onnx"
-    return {
-        "tokens": speech / "tokens.txt",
-        "encoder": encoder,
-        "decoder": speech / "decoder-epoch-99-avg-1.onnx",
-        "joiner": joiner,
-        "vad": root / "vad" / "silero_vad.onnx",
-    }
+def _model_paths(root: Path, model_key: str, precision: str) -> dict[str, Path]:
+    model = get_stt_model(normalize_stt_model(model_key))
+    speech = root / model.asset_directory
+    if model.architecture == "nemo_ctc":
+        return {
+            "tokens": speech / "tokens.txt",
+            "model": speech / "model.int8.onnx",
+            "vad": root / "vad" / "silero_vad.onnx",
+        }
+    if model.architecture == "transducer":
+        if effective_stt_precision(model.key, precision) == "int8":
+            encoder = speech / "encoder-epoch-99-avg-1.int8.onnx"
+            joiner = speech / "joiner-epoch-99-avg-1.int8.onnx"
+        else:
+            encoder = speech / "encoder-epoch-99-avg-1.onnx"
+            joiner = speech / "joiner-epoch-99-avg-1.onnx"
+        return {
+            "tokens": speech / "tokens.txt",
+            "encoder": encoder,
+            "decoder": speech / "decoder-epoch-99-avg-1.onnx",
+            "joiner": joiner,
+            "vad": root / "vad" / "silero_vad.onnx",
+        }
+    raise ValueError(f"지원하지 않는 음성인식 모델 형식입니다: {model.architecture}")
 
 
-def _model_file_is_valid(path: Path) -> bool:
-    expected_size = MODEL_FILE_SIZES.get(path.name)
+def _model_root_for_paths(models: dict[str, Path]) -> Path | None:
+    if not models:
+        return None
+    try:
+        roots = {Path(path).parent.parent for path in models.values()}
+    except TypeError:
+        return None
+    return roots.pop() if len(roots) == 1 else None
+
+
+def _model_file_key(path: Path, root: Path) -> str | None:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return None
+
+
+def _model_file_is_valid(path: Path, root: Path) -> bool:
+    key = _model_file_key(path, root)
+    expected_size = MODEL_FILE_SIZES.get(key or "")
     try:
         return path.is_file() and expected_size is not None and path.stat().st_size == expected_size
     except OSError:
@@ -235,24 +364,28 @@ def _model_file_is_valid(path: Path) -> bool:
 
 
 def model_paths_are_valid(models: dict[str, Path]) -> bool:
-    if not models or not all(_model_file_is_valid(path) for path in models.values()):
+    root = _model_root_for_paths(models)
+    if root is None or not all(_model_file_is_valid(path, root) for path in models.values()):
         return False
 
-    roots = {path.parent.parent for path in models.values()}
-    if len(roots) != 1:
-        return False
-    root = roots.pop()
     root_key = hashlib.sha256(
         os.path.normcase(str(root.resolve())).encode("utf-8", errors="surrogatepass")
     ).hexdigest()
-    cache_paths = [
-        root / ".model-integrity.json",
-        writable_app_subdir("MekiAudioCapture", "model-integrity")
-        / f"{root_key}.json",
-    ]
+    cache_paths = [root / ".model-integrity.json"]
+    cache_paths.extend(
+        cache_root.parent / "model-integrity" / f"{root_key}.json"
+        for cache_root in _shared_model_cache_candidates()
+    )
+    unique_cache_paths: list[Path] = []
+    seen_cache_paths: set[str] = set()
+    for cache_path in cache_paths:
+        cache_key = os.path.normcase(str(cache_path))
+        if cache_key not in seen_cache_paths:
+            seen_cache_paths.add(cache_key)
+            unique_cache_paths.append(cache_path)
     cache: dict = {}
     cache_sources: list[dict] = []
-    for cache_path in cache_paths:
+    for cache_path in unique_cache_paths:
         try:
             candidate = json.loads(cache_path.read_text(encoding="utf-8"))
             if isinstance(candidate, dict):
@@ -266,7 +399,8 @@ def model_paths_are_valid(models: dict[str, Path]) -> bool:
 
     changed = False
     for path in models.values():
-        expected_hash = MODEL_FILE_HASHES.get(path.name)
+        file_key = _model_file_key(path, root)
+        expected_hash = MODEL_FILE_HASHES.get(file_key or "")
         if expected_hash is None:
             return False
         try:
@@ -277,7 +411,7 @@ def model_paths_are_valid(models: dict[str, Path]) -> bool:
             (
                 record
                 for source in cache_sources
-                if isinstance((record := source.get(path.name)), dict)
+                if isinstance((record := source.get(file_key)), dict)
                 and record.get("size") == stat.st_size
                 and record.get("mtimeNs") == stat.st_mtime_ns
                 and record.get("sha256") == expected_hash
@@ -294,7 +428,7 @@ def model_paths_are_valid(models: dict[str, Path]) -> bool:
                 return False
             if digest.hexdigest() != expected_hash:
                 return False
-            cache[path.name] = {
+            cache[file_key] = {
                 "size": stat.st_size,
                 "mtimeNs": stat.st_mtime_ns,
                 "sha256": expected_hash,
@@ -303,7 +437,7 @@ def model_paths_are_valid(models: dict[str, Path]) -> bool:
 
     if changed:
         payload = json.dumps(cache, ensure_ascii=False, indent=2) + "\n"
-        for cache_path in cache_paths:
+        for cache_path in unique_cache_paths:
             temporary = cache_path.with_name(
                 f"{cache_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
             )
@@ -325,16 +459,21 @@ def model_paths_are_valid(models: dict[str, Path]) -> bool:
 def resolve_models(
     application_dir: Path,
     resource_dir: Path,
-    precision: str,
+    model_key: str = DEFAULT_STT_MODEL,
+    precision: str = "int8",
+    *,
+    model_root: Path | None = None,
 ) -> dict[str, Path]:
-    precision = normalize_precision(precision)
-    for root in model_root_candidates(application_dir, resource_dir):
-        paths = _model_paths(root, precision)
+    model_key = normalize_stt_model(model_key)
+    precision = effective_stt_precision(model_key, precision)
+    for root in model_root_candidates(application_dir, resource_dir, model_root=model_root):
+        paths = _model_paths(root, model_key, precision)
         if model_paths_are_valid(paths):
             return paths
-    expected = model_root_candidates(application_dir, resource_dir)[0]
+    expected = model_root_candidates(application_dir, resource_dir, model_root=model_root)[0]
+    model = get_stt_model(model_key)
     raise FileNotFoundError(
-        "음성인식 모델을 찾을 수 없습니다. "
+        f"{model.status_name} 모델을 찾을 수 없습니다. "
         f"{expected} 폴더를 확인하세요."
     )
 
@@ -378,22 +517,22 @@ def _download_file(
         raise
 
 
-def _extract_reazonspeech_archive(archive: Path, speech_dir: Path) -> None:
-    wanted = set(REAZONSPEECH_FILES) | {"test.wav"}
+def _extract_stt_archive(archive: Path, speech_dir: Path, model: SttModel) -> None:
+    wanted = set(model.required_files)
     speech_dir.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "r:bz2") as bundle:
         for member in bundle.getmembers():
             source_name = Path(member.name).name
-            if source_name not in wanted or not member.isfile():
-                continue
-            if source_name == "test.wav" and not member.name.replace("\\", "/").endswith(
-                "test_wavs/1.wav"
-            ):
+            member_name = member.name.replace("\\", "/").lstrip("./")
+            is_test_wav = member_name == model.test_wav_suffix or member_name.endswith(
+                f"/{model.test_wav_suffix}"
+            )
+            if (source_name not in wanted and not is_test_wav) or not member.isfile():
                 continue
             source = bundle.extractfile(member)
             if source is None:
                 continue
-            target = speech_dir / source_name
+            target = speech_dir / ("test.wav" if is_test_wav else source_name)
             temporary = target.with_name(target.name + ".part")
             with source, temporary.open("wb") as output:
                 shutil.copyfileobj(source, output, length=1024 * 1024)
@@ -405,8 +544,8 @@ def _extract_reazonspeech_archive(archive: Path, speech_dir: Path) -> None:
             os.replace(temporary, target)
     missing = {
         name
-        for name in REAZONSPEECH_FILES
-        if not _model_file_is_valid(speech_dir / name)
+        for name in model.required_files
+        if not _model_file_is_valid(speech_dir / name, speech_dir.parent)
     }
     if missing:
         raise RuntimeError(f"모델 압축 파일에 필요한 파일이 없습니다: {', '.join(sorted(missing))}")
@@ -415,19 +554,31 @@ def _extract_reazonspeech_archive(archive: Path, speech_dir: Path) -> None:
 def ensure_models(
     application_dir: Path,
     resource_dir: Path,
-    precision: str,
+    model_key: str = DEFAULT_STT_MODEL,
+    precision: str = "int8",
     progress: Callable[[str], None] | None = None,
+    *,
+    model_root: Path | None = None,
 ) -> dict[str, Path]:
-    """Use MekiAudioCapture/models first and download missing models only."""
+    """Resolve or download one STT model plus the shared Silero VAD model."""
+    model_key = normalize_stt_model(model_key)
+    model = get_stt_model(model_key)
+    precision = effective_stt_precision(model_key, precision)
     try:
-        return resolve_models(application_dir, resource_dir, precision)
+        return resolve_models(
+            application_dir,
+            resource_dir,
+            model_key,
+            precision,
+            model_root=model_root,
+        )
     except FileNotFoundError:
         pass
 
     root = _select_writable_model_root(
-        model_root_candidates(application_dir, resource_dir)
+        model_root_candidates(application_dir, resource_dir, model_root=model_root)
     )
-    speech_dir = root / "reazonspeech-ja"
+    speech_dir = root / model.asset_directory
     vad_file = root / "vad" / "silero_vad.onnx"
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -440,20 +591,22 @@ def ensure_models(
     # complete model set so no process observes a half-extracted archive or a
     # shared .part file while it is still being written.
     with exclusive_file_lock(root / ".model-download.lock", timeout=3_600):
-        required_speech = [speech_dir / name for name in REAZONSPEECH_FILES]
+        required_speech = [speech_dir / name for name in model.required_files]
         speech_models = {path.name: path for path in required_speech}
         if not model_paths_are_valid(speech_models):
             if progress:
-                progress("ReazonSpeech 모델을 다운로드합니다. 최초 실행에는 시간이 걸릴 수 있습니다.")
+                progress(
+                    f"{model.status_name} 모델을 다운로드합니다. 최초 실행에는 시간이 걸릴 수 있습니다."
+                )
             with tempfile.TemporaryDirectory(
                 prefix=".mekiaudio-model-",
                 dir=root,
             ) as temporary_dir:
-                archive = Path(temporary_dir) / "reazonspeech.tar.bz2"
-                _download_file(REAZONSPEECH_ARCHIVE_URL, archive, progress)
-                _extract_reazonspeech_archive(archive, speech_dir)
+                archive = Path(temporary_dir) / model.archive_filename
+                _download_file(model.archive_url, archive, progress)
+                _extract_stt_archive(archive, speech_dir, model)
             if not model_paths_are_valid(speech_models):
-                raise RuntimeError("다운로드한 ReazonSpeech 모델의 무결성 검증에 실패했습니다.")
+                raise RuntimeError(f"다운로드한 {model.status_name} 모델의 무결성 검증에 실패했습니다.")
 
         vad_models = {"vad": vad_file}
         if not model_paths_are_valid(vad_models):
@@ -463,7 +616,13 @@ def ensure_models(
             if not model_paths_are_valid(vad_models):
                 raise RuntimeError("다운로드한 Silero VAD 모델의 무결성 검증에 실패했습니다.")
 
-    return resolve_models(application_dir, resource_dir, precision)
+    return resolve_models(
+        application_dir,
+        resource_dir,
+        model_key,
+        precision,
+        model_root=model_root,
+    )
 
 
 def wav_to_mono_16k(wav_path: Path, raw_path: Path) -> np.memmap:
@@ -635,24 +794,56 @@ def validate_tokens_file(tokens_path: Path) -> int:
     return len(seen)
 
 
-def create_recognizer(models: dict[str, Path], num_threads: int = 4):
+def create_recognizer(
+    models: dict[str, Path],
+    model_key: str = DEFAULT_STT_MODEL,
+    num_threads: int = 4,
+    *,
+    precision: str | None = None,
+):
+    """Create the appropriate CPU offline recognizer for an STT model."""
     import sherpa_onnx
 
+    model = get_stt_model(normalize_stt_model(model_key))
+    # Precision selects the transducer files during model resolution. Keeping
+    # it in this reusable factory's public signature makes callers explicit
+    # while preventing an unsupported FP32 request from changing Parakeet's
+    # fixed INT8 runtime path.
+    if precision is not None:
+        effective_stt_precision(model.key, precision)
     validate_tokens_file(models["tokens"])
-    return sherpa_onnx.OfflineRecognizer.from_transducer(
-        encoder=str(models["encoder"]),
-        decoder=str(models["decoder"]),
-        joiner=str(models["joiner"]),
-        tokens=str(models["tokens"]),
-        num_threads=num_threads,
-        sample_rate=INTERNAL_SAMPLE_RATE,
-        feature_dim=80,
-        decoding_method="greedy_search",
-        provider="cpu",
-        # Let sherpa-onnx inspect the model metadata.  Explicit "transducer"
-        # selects a different token-table path for this ReazonSpeech export.
-        model_type="",
-    )
+    if model.architecture == "nemo_ctc":
+        # Parakeet is a NeMo CTC export, not a ReazonSpeech transducer. Audio
+        # reaches this recognizer as 16 kHz mono from ``wav_to_mono_16k``;
+        # retain the model's 80-bin features, greedy CPU decoding, and the
+        # dedicated NeMo factory instead of treating model.int8.onnx as an
+        # encoder/joiner bundle.
+        return sherpa_onnx.OfflineRecognizer.from_nemo_ctc(
+            model=str(models["model"]),
+            tokens=str(models["tokens"]),
+            num_threads=num_threads,
+            sample_rate=INTERNAL_SAMPLE_RATE,
+            feature_dim=80,
+            decoding_method="greedy_search",
+            provider="cpu",
+        )
+    if model.architecture == "transducer":
+        return sherpa_onnx.OfflineRecognizer.from_transducer(
+            encoder=str(models["encoder"]),
+            decoder=str(models["decoder"]),
+            joiner=str(models["joiner"]),
+            tokens=str(models["tokens"]),
+            num_threads=num_threads,
+            sample_rate=INTERNAL_SAMPLE_RATE,
+            feature_dim=80,
+            decoding_method="greedy_search",
+            provider="cpu",
+            # Let sherpa-onnx inspect the model metadata. Explicit
+            # "transducer" selects a different token-table path for this
+            # ReazonSpeech export.
+            model_type="",
+        )
+    raise ValueError(f"지원하지 않는 음성인식 모델 형식입니다: {model.architecture}")
 
 
 def remove_overlap(previous: str, current: str, limit: int = 40) -> str:

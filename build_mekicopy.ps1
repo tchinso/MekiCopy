@@ -526,6 +526,8 @@ import soundcard
 import typer
 import uvicorn
 import cv2
+if not callable(getattr(sherpa_onnx.OfflineRecognizer, "from_nemo_ctc", None)):
+    raise SystemExit("sherpa-onnx does not provide OfflineRecognizer.from_nemo_ctc")
 root = tk.Tk()
 root.withdraw()
 root.update_idletasks()
@@ -610,9 +612,20 @@ for repo_id, filename in missing_models:
 '@
 Invoke-CheckedPythonScript $prepareModels
 
-# VAD/STT models are intentionally not prepared during packaging. The
-# MekiAudioCapture executable downloads them into MekiAudioCapture/models on
-# first use and reuses existing files on subsequent runs.
+# VAD/STT models are intentionally not prepared during packaging. The default
+# Parakeet NeMo CTC model (or optional ReazonSpeech) is downloaded into the
+# shared MekiAudioCapture/models location on first use and reused afterwards.
+# MekiSubtitle points at exactly that cache instead of publishing model copies.
+
+# MekiSubtitle needs only video decoding tools from the former standalone
+# ReazonSubtitle app. Translation/STT/VAD models remain shared runtime caches.
+$subtitleFfmpegRoot = Join-Path (Split-Path $PSScriptRoot -Parent) "ReazonSubtitle\assets\ffmpeg"
+foreach ($subtitleTool in @("ffmpeg.exe", "ffprobe.exe")) {
+    $subtitleToolPath = Join-Path $subtitleFfmpegRoot $subtitleTool
+    if (-not (Test-Path -LiteralPath $subtitleToolPath -PathType Leaf)) {
+        throw "MekiSubtitle required FFmpeg tool is missing: $subtitleToolPath"
+    }
+}
 
 Remove-WorkspaceDirectory "build"
 $distRelativePath = "dist"
@@ -663,7 +676,7 @@ foreach ($exe in $expectedExecutables) {
 
 # Validate the runtime resources that a successful PyInstaller command alone
 # cannot guarantee: Tk for GUI companions, native OCR, native STT, and the
-# HYTrans browser-worker assets.
+# HYTrans private-worker assets.
 Assert-TkRuntime -AppRoot $mekiCopyRoot -AppName "MekiCopy"
 Assert-TkRuntime -AppRoot $displayRoot -AppName "MekiDisplay"
 Assert-TkRuntime -AppRoot $audioCaptureRoot -AppName "MekiAudioCapture"
@@ -686,6 +699,21 @@ Assert-ArtifactPattern `
     -RelativeDirectory "_internal\onnxruntime\capi" `
     -FilePattern "onnxruntime_pybind11_state*.pyd" `
     -Description "MekiCopy ONNX Runtime Python extension"
+foreach ($subtitleTool in @("ffmpeg.exe", "ffprobe.exe")) {
+    Assert-ArtifactFile `
+        -AppRoot $mekiCopyRoot `
+        -RelativePath (Join-Path "_internal\assets\ffmpeg" $subtitleTool) `
+        -Description "MekiSubtitle FFmpeg tool"
+}
+Assert-ArtifactFile `
+    -AppRoot $mekiCopyRoot `
+    -RelativePath "_internal\sherpa_onnx\lib\sherpa-onnx-c-api.dll" `
+    -Description "MekiSubtitle sherpa-onnx C API"
+Assert-ArtifactPattern `
+    -AppRoot $mekiCopyRoot `
+    -RelativeDirectory "_internal\sherpa_onnx\lib" `
+    -FilePattern "_sherpa_onnx*.pyd" `
+    -Description "MekiSubtitle sherpa-onnx Python extension"
 foreach ($ocrModel in @(
     "meiki.text.detect.v0.1.960x544.onnx",
     "meiki.text.rec.v0.960x32.onnx",
@@ -848,20 +876,20 @@ if (-not $SkipSmokeTests) {
         -Arguments @("--port", "$hyTransPort", "--no-browser") `
         -Port $hyTransPort `
         -ExpectedConfig @{
-            modelId = "tchinso/Hy-MT2-1.8B-onnx-q4f16"
-            dtype = "q4f16"
+            modelId = "onnx-community/HY-MT1.5-1.8B-ONNX"
+            dtype = "q4"
             hasLocalWasm = $true
         } `
         -GracefulShutdown
 
-    $hyTransMt15Port = Get-FreeTcpPort
+    $hyTransMt2Port = Get-FreeTcpPort
     Invoke-HealthSmokeTest `
         -ExePath $hyTransExe `
-        -Arguments @("--port", "$hyTransMt15Port", "--no-browser", "--model", "mt1.5") `
-        -Port $hyTransMt15Port `
+        -Arguments @("--port", "$hyTransMt2Port", "--no-browser", "--model", "mt2") `
+        -Port $hyTransMt2Port `
         -ExpectedConfig @{
-            modelId = "onnx-community/HY-MT1.5-1.8B-ONNX"
-            dtype = "q4"
+            modelId = "tchinso/Hy-MT2-1.8B-onnx-q4f16"
+            dtype = "q4f16"
             hasLocalWasm = $true
         } `
         -GracefulShutdown

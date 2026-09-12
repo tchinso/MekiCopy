@@ -11,7 +11,7 @@ from service_ports import HYTRANS_DEFAULT_PORT, OVERLAYER_DEFAULT_PORT
 
 from .model_files import (
     DEFAULT_MODEL_ID,
-    MT2_PROFILE,
+    MT15_PROFILE,
     ModelProfile,
     active_model_profile,
     configure_model,
@@ -20,8 +20,8 @@ from .model_files import (
 )
 from .paths import assets_dir, models_dir
 
-DTYPE = MT2_PROFILE.dtype
-REQUIRED_MODEL_FILES = tuple(MT2_PROFILE.files)
+DTYPE = MT15_PROFILE.dtype
+REQUIRED_MODEL_FILES = tuple(MT15_PROFILE.files)
 # Compatibility for callers that used the old constant. It describes only the
 # default model; runtime code below always reads the active profile dynamically.
 REQUIRED_Q4_MODEL_FILES = REQUIRED_MODEL_FILES
@@ -34,7 +34,7 @@ DEFAULT_OVERLAY_URL = f"http://127.0.0.1:{OVERLAYER_DEFAULT_PORT}/show"
 # Kept for compatibility with external imports. Runtime requests use
 # translation_timeout_seconds(), which gives the larger MT2 model more time and
 # scales conservatively for long input instead of repeatedly killing a healthy,
-# merely slow browser worker.
+# merely slow private worker.
 TRANSLATE_TIMEOUT_SECONDS = 120
 MT2_TRANSLATE_TIMEOUT_SECONDS = 240
 MAX_TRANSLATE_TIMEOUT_SECONDS = 600

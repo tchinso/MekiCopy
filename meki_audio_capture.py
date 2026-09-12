@@ -22,16 +22,21 @@ import soundcard as sc
 from app_identity import apply_tk_icon, set_windows_app_id
 from audio_capture_core import (
     CAPTURE_SAMPLE_RATE,
+    DEFAULT_STT_MODEL,
+    STT_MODELS,
     append_script_text,
     build_segments,
     cleanup_work_files,
     collect_vad_intervals,
     create_recognizer,
+    effective_stt_precision,
     ensure_models,
+    get_stt_model,
     model_paths_are_valid,
     model_root_candidates,
     normalize_precision,
     normalize_preset,
+    normalize_stt_model,
     recognize_segments,
     resolve_models,
     set_script_translation,
@@ -118,9 +123,11 @@ class CaptureController:
         script_url: str,
         hytrans_url: str,
         *,
+        stt_model: str = DEFAULT_STT_MODEL,
         prepare_models_on_start: bool = True,
     ) -> None:
-        self.precision = normalize_precision(precision)
+        self.stt_model = normalize_stt_model(stt_model)
+        self.precision = effective_stt_precision(self.stt_model, precision)
         self.preset = normalize_preset(preset)
         self.script_url = script_url.rstrip("/")
         self.hytrans_url = hytrans_url.rstrip("/")
@@ -130,11 +137,13 @@ class CaptureController:
         self.process_thread: threading.Thread | None = None
         self.model_thread: threading.Thread | None = None
         self.prepared_models: dict[str, Path] | None = None
+        self.prepared_models_model = ""
         self.prepared_models_precision = ""
         self.wav_path: Path | None = None
         self.session_work_dir: Path | None = None
         self.session_id = ""
         self.session_options = (
+            self.stt_model,
             self.precision,
             self.preset,
             self.script_url,
@@ -155,6 +164,7 @@ class CaptureController:
                 "app": "MekiAudioCapture",
                 "state": self.state,
                 "status": self.status,
+                "sttModel": self.stt_model,
                 "precision": self.precision,
                 "preset": self.preset,
                 "error": self.error or None,
@@ -164,18 +174,27 @@ class CaptureController:
         with self._lock:
             if self.state not in {"READY", "ERROR"}:
                 raise RuntimeError("녹음 또는 처리 중에는 설정을 바꿀 수 없습니다.")
+            previous_model = self.stt_model
             previous_precision = self.precision
-            self.precision = normalize_precision(str(payload.get("precision", self.precision)))
+            self.stt_model = normalize_stt_model(
+                str(payload.get("sttModel", payload.get("stt_model", self.stt_model)))
+            )
+            self.precision = effective_stt_precision(
+                self.stt_model,
+                str(payload.get("precision", self.precision)),
+            )
             self.preset = normalize_preset(str(payload.get("preset", self.preset)))
             self.script_url = str(payload.get("scriptUrl", self.script_url)).rstrip("/")
             self.hytrans_url = str(payload.get("hytransUrl", self.hytrans_url)).rstrip("/")
-            precision_changed = self.precision != previous_precision
-            if precision_changed:
+            model_changed = self.stt_model != previous_model
+            stt_configuration_changed = model_changed or self.precision != previous_precision
+            if stt_configuration_changed:
                 self.prepared_models = None
+                self.prepared_models_model = ""
                 self.prepared_models_precision = ""
         if "debugLog" in payload:
             set_debug_enabled(bool(payload["debugLog"]))
-        if precision_changed:
+        if stt_configuration_changed:
             self.prepare_models()
 
     def _set_state(self, state: str, status: str, error: str = "") -> None:
@@ -218,13 +237,14 @@ class CaptureController:
                 return
             if self.state not in {"READY", "ERROR"}:
                 return
+            stt_model = self.stt_model
             precision = self.precision
             self.state = "DOWNLOADING"
-            self.status = "음성인식 모델을 확인하고 있습니다..."
+            self.status = f"{get_stt_model(stt_model).status_name} 모델을 확인하고 있습니다..."
             self.error = ""
             model_thread = threading.Thread(
                 target=self._prepare_models,
-                args=(precision,),
+                args=(stt_model, precision),
                 daemon=True,
             )
             self.model_thread = model_thread
@@ -243,24 +263,34 @@ class CaptureController:
                 traceback.format_exc(),
             )
 
-    def _prepare_models(self, precision: str) -> None:
+    def _prepare_models(self, stt_model: str, precision: str) -> None:
         try:
             models = ensure_models(
                 app_dir(),
                 resource_dir(),
+                stt_model,
                 precision,
                 progress=lambda text: self._set_state("DOWNLOADING", text),
             )
             with self._lock:
-                if precision != self.precision or self.state != "DOWNLOADING":
+                if (
+                    stt_model != self.stt_model
+                    or precision != self.precision
+                    or self.state != "DOWNLOADING"
+                ):
                     return
                 self.prepared_models = models
+                self.prepared_models_model = stt_model
                 self.prepared_models_precision = precision
             self._set_state("READY", "녹음 준비")
         except Exception as exc:
             log_error("prepare_models", exc)
             with self._lock:
-                current = precision == self.precision and self.state == "DOWNLOADING"
+                current = (
+                    stt_model == self.stt_model
+                    and precision == self.precision
+                    and self.state == "DOWNLOADING"
+                )
             if current:
                 self._set_state(
                     "ERROR",
@@ -270,23 +300,31 @@ class CaptureController:
 
     def _models_for_processing(
         self,
+        stt_model: str | None = None,
         precision: str | None = None,
         progress: Callable[[str], None] | None = None,
     ) -> dict[str, Path]:
         with self._lock:
-            precision = normalize_precision(precision or self.precision)
+            stt_model = normalize_stt_model(stt_model or self.stt_model)
+            precision = effective_stt_precision(stt_model, precision or self.precision)
         with self._lock:
-            if self.prepared_models_precision == precision and self.prepared_models:
+            if (
+                self.prepared_models_model == stt_model
+                and self.prepared_models_precision == precision
+                and self.prepared_models
+            ):
                 if model_paths_are_valid(self.prepared_models):
                     return dict(self.prepared_models)
         models = ensure_models(
             app_dir(),
             resource_dir(),
+            stt_model,
             precision,
             progress=progress or (lambda text: self._set_state("DOWNLOADING", text)),
         )
         with self._lock:
             self.prepared_models = models
+            self.prepared_models_model = stt_model
             self.prepared_models_precision = precision
         return models
 
@@ -304,6 +342,7 @@ class CaptureController:
             self._session_generation += 1
             generation = self._session_generation
             session_options = (
+                self.stt_model,
                 self.precision,
                 self.preset,
                 self.script_url,
@@ -452,7 +491,7 @@ class CaptureController:
         wav_path: Path | None = None,
         session_work_dir: Path | None = None,
         session_id: str | None = None,
-        session_options: tuple[str, str, str, str] | None = None,
+        session_options: tuple[str, str, str, str, str] | None = None,
     ) -> None:
         # Optional arguments keep direct diagnostic/unit-test calls convenient;
         # normal recordings always pass an immutable session snapshot.
@@ -462,7 +501,7 @@ class CaptureController:
         session_work_dir = self.session_work_dir if session_work_dir is None else session_work_dir
         session_id = self.session_id if session_id is None else session_id
         session_options = self.session_options if session_options is None else session_options
-        precision, preset, script_url, hytrans_url = session_options
+        stt_model, precision, preset, script_url, hytrans_url = session_options
         if record_thread:
             record_thread.join(timeout=5)
             if record_thread.is_alive():
@@ -493,6 +532,7 @@ class CaptureController:
                 final_status = "완료: 녹음된 오디오가 없습니다."
                 return
             models = self._models_for_processing(
+                stt_model,
                 precision,
                 progress=lambda text: self._set_state_for_session(
                     generation,
@@ -507,7 +547,7 @@ class CaptureController:
                 final_status = "완료: 인식할 음성이 없습니다."
                 return
             self._set_state_for_session(generation, "PROCESSING", f"일본어 음성을 인식하고 있습니다 (0/{len(segments)})…")
-            recognizer = create_recognizer(models)
+            recognizer = create_recognizer(models, model_key=stt_model)
             count = 0
             delivery_failures = 0
 
@@ -688,7 +728,8 @@ class CaptureWindow:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MekiAudioCapture")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--precision", choices=("fp32", "int8"), default="fp32")
+    parser.add_argument("--stt-model", choices=tuple(STT_MODELS), default=DEFAULT_STT_MODEL)
+    parser.add_argument("--precision", choices=("fp32", "int8"), default="int8")
     parser.add_argument("--preset", choices=("FAST", "BALANCED", "LONG"), default="BALANCED")
     parser.add_argument("--script-url", default=DEFAULT_SCRIPT_URL)
     parser.add_argument("--hytrans-url", default=DEFAULT_HYTRANS_URL)
@@ -705,7 +746,19 @@ def main() -> int:
     install_exception_hooks()
     prepare_streams()
     if args.self_test:
+        assert DEFAULT_STT_MODEL == "parakeet"
+        assert args.stt_model in STT_MODELS
+        assert normalize_stt_model(args.stt_model) == args.stt_model
+        default_model = STT_MODELS[DEFAULT_STT_MODEL]
+        assert default_model.architecture == "nemo_ctc"
+        assert default_model.required_files == ("tokens.txt", "model.int8.onnx")
         assert normalize_precision(args.precision) in {"fp32", "int8"}
+        if args.stt_model == DEFAULT_STT_MODEL:
+            assert effective_stt_precision(args.stt_model, args.precision) == "int8"
+            import sherpa_onnx
+
+            if not callable(getattr(sherpa_onnx.OfflineRecognizer, "from_nemo_ctc", None)):
+                raise RuntimeError("sherpa-onnx NeMo CTC recognizer factory를 찾을 수 없습니다.")
         assert normalize_preset(args.preset) in {"FAST", "BALANCED", "LONG"}
         work_dir()
         model_roots = model_root_candidates(app_dir(), resource_dir())
@@ -713,10 +766,15 @@ def main() -> int:
             raise RuntimeError("모델 경로가 MekiAudioCapture/models가 아닙니다.")
         return 0
     if args.self_test_models:
-        models = resolve_models(app_dir(), resource_dir(), args.precision)
+        models = resolve_models(
+            app_dir(),
+            resource_dir(),
+            args.stt_model,
+            args.precision,
+        )
         source_test_wav = models["tokens"].parent / "test.wav"
         collect_vad_intervals(np.zeros(16_000, dtype=np.float32), models["vad"], args.preset)
-        recognizer = create_recognizer(models, num_threads=1)
+        recognizer = create_recognizer(models, model_key=args.stt_model, num_threads=1)
         if source_test_wav.is_file():
             with wave.open(str(source_test_wav), "rb") as source:
                 if source.getframerate() != 16_000 or source.getnchannels() != 1:
@@ -726,13 +784,16 @@ def main() -> int:
             stream.accept_waveform(16_000, samples.astype(np.float32) / 32768.0)
             recognizer.decode_stream(stream)
             if not str(stream.result.text).strip():
-                raise RuntimeError("ReazonSpeech 테스트 결과가 비어 있습니다.")
+                raise RuntimeError(
+                    f"{get_stt_model(args.stt_model).status_name} 테스트 결과가 비어 있습니다."
+                )
         return 0
     controller = CaptureController(
         args.precision,
         args.preset,
         args.script_url,
         args.hytrans_url,
+        stt_model=args.stt_model,
         prepare_models_on_start=not args.self_test_server,
     )
     try:

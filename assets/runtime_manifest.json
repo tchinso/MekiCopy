@@ -39,13 +39,13 @@
                   },
                   {
                       "path":  "worker.html",
-                      "size":  1421,
-                      "sha256":  "95b683c9fefa42b68d6aaab2cf6e30292ae93ed105e5406983b16e587c593523"
+                      "size":  1035,
+                      "sha256":  "a0d664815233db6c4cbd4c29cc900a478b2263d3338f3eece8e8cc1f9d28cabd"
                   },
                   {
                       "path":  "worker.js",
-                      "size":  20073,
-                      "sha256":  "c90a2863ec4f8d680800157c61e5884846563c7b716a10610e541edf7fa9fc99"
+                      "size":  19653,
+                      "sha256":  "11dc36acc625545b39a2f0f86a4727800fd155b587942214670683644ff9322e"
                   },
                   {
                       "path":  "wasm/ort-wasm-simd-threaded.asyncify.mjs",

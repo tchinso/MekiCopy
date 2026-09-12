@@ -30,11 +30,18 @@ from mekicopy_theme import (
 )
 
 HYTRANS_MODEL_LABELS = {
-    "mt2": "MT2 (기본) · Hy-MT2 1.8B q4f16",
-    "mt1.5": "MT1.5 · Hy-MT1.5 1.8B q4",
+    "mt1.5": "MT1.5 (기본) · Hy-MT1.5 1.8B q4",
+    "mt2": "MT2 (실험용) · Hy-MT2 1.8B q4f16",
 }
 HYTRANS_MODEL_IDS_BY_LABEL = {
     label: model_id for model_id, label in HYTRANS_MODEL_LABELS.items()
+}
+STT_MODEL_LABELS = {
+    "parakeet": "Parakeet TDT-CTC 0.6B 일본어 (기본, INT8)",
+    "reazonspeech": "ReazonSpeech 일본어 (INT8 / FP32)",
+}
+STT_MODEL_IDS_BY_LABEL = {
+    label: model_id for model_id, label in STT_MODEL_LABELS.items()
 }
 
 
@@ -132,7 +139,17 @@ class SettingsWindow(tk.Toplevel):
         self.overlayer_text_color_var = tk.StringVar(value=settings.overlayer_text_color)
         self.overlayer_text_size_var = tk.IntVar(value=settings.overlayer_text_size)
         self.overlayer_text_font_var = tk.StringVar(value=settings.overlayer_text_font)
-        self.audio_stt_precision_var = tk.StringVar(value=settings.audio_stt_precision)
+        selected_stt_model = (
+            settings.audio_stt_model
+            if settings.audio_stt_model in STT_MODEL_LABELS
+            else "parakeet"
+        )
+        self.audio_stt_model_var = tk.StringVar(
+            value=STT_MODEL_LABELS[selected_stt_model]
+        )
+        self.audio_stt_precision_var = tk.StringVar(
+            value=("int8" if selected_stt_model == "parakeet" else settings.audio_stt_precision)
+        )
         self.audio_chunk_preset_var = tk.StringVar(value=settings.audio_chunk_preset)
         self.script_topmost_var = tk.BooleanVar(value=settings.script_always_on_top)
         self.script_bg_color_var = tk.StringVar(value=settings.script_bg_color)
@@ -154,12 +171,27 @@ class SettingsWindow(tk.Toplevel):
         self._color_buttons: list[tuple[tk.Button, tk.StringVar]] = []
 
         self._build_ui()
+        self.audio_stt_model_var.trace_add("write", self._on_audio_stt_model_changed)
+        self._on_audio_stt_model_changed()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.transient(owner)
         self.attributes("-topmost", settings.main_always_on_top)
         self.overlay_mode_var.trace_add("write", lambda *_: self._on_overlay_mode_changed())
         self._update_mode_labels()
         self._update_overlay_controls()
+
+    def _on_audio_stt_model_changed(self, *_args) -> None:
+        is_parakeet = (
+            STT_MODEL_IDS_BY_LABEL.get(self.audio_stt_model_var.get()) == "parakeet"
+        )
+        if is_parakeet:
+            # The packaged Parakeet checkpoint only has model.int8.onnx. Keep
+            # the persisted selection truthful rather than silently accepting
+            # a stale FP32 value left over from the ReazonSpeech-only UI.
+            self.audio_stt_precision_var.set("int8")
+        precision_menu = getattr(self, "audio_stt_precision_menu", None)
+        if precision_menu is not None:
+            precision_menu.config(state=tk.DISABLED if is_parakeet else tk.NORMAL)
 
     def _set_safe_geometry(self, width: int, height: int) -> None:
         safe_height = max(520, min(height, self.winfo_screenheight() - 90))
@@ -377,10 +409,24 @@ class SettingsWindow(tk.Toplevel):
 
         audio_model_frame = tk.LabelFrame(audio_tab, text="음성인식", padx=10, pady=8)
         audio_model_frame.pack(fill=tk.X)
+        model_row = tk.Frame(audio_model_frame)
+        model_row.pack(fill=tk.X, pady=3)
+        tk.Label(model_row, text="STT 모델").pack(side=tk.LEFT)
+        tk.OptionMenu(
+            model_row,
+            self.audio_stt_model_var,
+            *STT_MODEL_IDS_BY_LABEL,
+        ).pack(side=tk.RIGHT)
         precision_row = tk.Frame(audio_model_frame)
         precision_row.pack(fill=tk.X, pady=3)
-        tk.Label(precision_row, text="음성인식 모델").pack(side=tk.LEFT)
-        tk.OptionMenu(precision_row, self.audio_stt_precision_var, "fp32", "int8").pack(side=tk.RIGHT)
+        tk.Label(precision_row, text="ReazonSpeech 정밀도").pack(side=tk.LEFT)
+        self.audio_stt_precision_menu = tk.OptionMenu(
+            precision_row,
+            self.audio_stt_precision_var,
+            "fp32",
+            "int8",
+        )
+        self.audio_stt_precision_menu.pack(side=tk.RIGHT)
         audio_port_row = tk.Frame(audio_model_frame)
         audio_port_row.pack(fill=tk.X, pady=3)
         tk.Label(audio_port_row, text="MekiAudioCapture 포트").pack(side=tk.LEFT)
@@ -601,6 +647,10 @@ class SettingsWindow(tk.Toplevel):
             ),
             overlayer_text_size=text_size,
             overlayer_text_font=_normalize_font_name(self.overlayer_text_font_var.get()),
+            audio_stt_model=STT_MODEL_IDS_BY_LABEL.get(
+                self.audio_stt_model_var.get(),
+                "parakeet",
+            ),
             audio_stt_precision=(
                 self.audio_stt_precision_var.get()
                 if self.audio_stt_precision_var.get() in {"fp32", "int8"}
