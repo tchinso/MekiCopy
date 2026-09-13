@@ -19,6 +19,7 @@ from audio_capture_core import (
     PARAKEET_MODEL_DIRECTORY,
     STT_MODELS,
     VAD_PRESETS,
+    build_segments,
     create_recognizer,
     effective_stt_precision,
     model_root_candidates,
@@ -44,16 +45,61 @@ class TokenTableTests(unittest.TestCase):
 class VadPresetTests(unittest.TestCase):
     def test_chunk_boundary_settings(self) -> None:
         expected = {
-            "FAST": (0.25, 0.15),
-            "BALANCED": (0.60, 0.35),
-            "LONG": (0.95, 0.55),
+            "FAST": {
+                "threshold": 0.60,
+                "min_speech_duration": 0.20,
+                "min_silence_duration": 0.10,
+                "max_segment_duration": 10.0,
+                "pre_padding": 0.05,
+                "post_padding": 0.10,
+                "merge_gap": 0.05,
+                "merge_short_under": 0.60,
+                "forced_cut_overlap": 0.25,
+            },
+            "BALANCED": {
+                "threshold": 0.55,
+                "min_speech_duration": 0.225,
+                "min_silence_duration": 0.525,
+                "max_segment_duration": 18.5,
+                "pre_padding": 0.15,
+                "post_padding": 0.325,
+                "merge_gap": 0.30,
+                "merge_short_under": 1.05,
+                "forced_cut_overlap": 0.425,
+            },
+            "LONG": {
+                "threshold": 0.50,
+                "min_speech_duration": 0.25,
+                "min_silence_duration": 0.95,
+                "max_segment_duration": 27.0,
+                "pre_padding": 0.25,
+                "post_padding": 0.55,
+                "merge_gap": 0.55,
+                "merge_short_under": 1.50,
+                "forced_cut_overlap": 0.60,
+            },
         }
 
-        for preset_name, (min_silence_duration, merge_gap) in expected.items():
+        for preset_name, values in expected.items():
             with self.subTest(preset=preset_name):
-                preset = VAD_PRESETS[preset_name]
-                self.assertEqual(preset["min_silence_duration"], min_silence_duration)
-                self.assertEqual(preset["merge_gap"], merge_gap)
+                self.assertEqual(VAD_PRESETS[preset_name], values)
+
+    def test_balanced_is_the_midpoint_of_fast_and_long(self) -> None:
+        for key, fast_value in VAD_PRESETS["FAST"].items():
+            with self.subTest(setting=key):
+                self.assertAlmostEqual(
+                    VAD_PRESETS["BALANCED"][key],
+                    (fast_value + VAD_PRESETS["LONG"][key]) / 2,
+                )
+
+    def test_fast_keeps_a_short_dialogue_boundary(self) -> None:
+        audio = np.zeros(32_000, dtype=np.float32)
+        # A 0.16-second turn gap survives FAST's short padding but used to be
+        # rejoined by the former 0.50-second combined padding.
+        intervals = [(3_200, 6_400), (8_960, 12_160)]
+        segments = build_segments(audio, intervals, "FAST")
+        self.assertEqual(len(segments), 2)
+        self.assertLess(segments[0].end_time, segments[1].start_time)
 
 
 class SttModelTests(unittest.TestCase):

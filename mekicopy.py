@@ -704,7 +704,7 @@ class MainWindow(tk.Tk):
             "영역",
             "캡쳐",
             "음성인식",
-            "새로운 자막 생성",
+            "자막 생성",
             "도구/설정",
             "행동",
         ):
@@ -725,7 +725,7 @@ class MainWindow(tk.Tk):
         self._build_region_tab(self.tab_frames["영역"])
         self._build_capture_tab(self.tab_frames["캡쳐"])
         self._build_audio_tab(self.tab_frames["음성인식"])
-        self._build_subtitle_tab(self.tab_frames["새로운 자막 생성"])
+        self._build_subtitle_tab(self.tab_frames["자막 생성"])
         self._build_tools_tab(self.tab_frames["도구/설정"])
         self._build_action_tab(self.tab_frames["행동"])
 
@@ -2414,7 +2414,7 @@ def run_ui_self_test() -> None:
             "영역",
             "캡쳐",
             "음성인식",
-            "새로운 자막 생성",
+            "자막 생성",
             "도구/설정",
             "행동",
         }
@@ -2436,9 +2436,9 @@ def run_ui_self_test() -> None:
             raise RuntimeError("HYTrans button state does not match overlay mode")
         if app.overlayer_button.cget("state") != expected_overlay_state:
             raise RuntimeError("MekiOverlayer button state does not match overlay mode")
-        app._select_tab("새로운 자막 생성")
+        app._select_tab("자막 생성")
         app.update_idletasks()
-        if "MekiSubtitle" not in app.tab_frames["새로운 자막 생성"].winfo_children()[0].cget("text"):
+        if "MekiSubtitle" not in app.tab_frames["자막 생성"].winfo_children()[0].cget("text"):
             raise RuntimeError("MekiSubtitle tab title was not created")
         app._select_tab("영역")
         app.update_idletasks()

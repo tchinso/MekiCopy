@@ -4,7 +4,7 @@
 MekiCopy는 화면의 특정 영역을 지정한 뒤 OCR로 글자를 인식하고, 결과를 클립보드에 복사하는 도구입니다.  
 선택적으로 HYTrans + MekiOverlayer와 연동하면 인식한 텍스트를 자동으로 번역해 화면에 바로 표시할 수 있습니다.
 MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일본어 음성을 녹음한 뒤 일괄 인식·번역할 수 있습니다.
-`새로운 자막 생성` 탭의 MekiSubtitle은 영상 파일에서 한국어 SRT를 만듭니다.
+`자막 생성` 탭의 MekiSubtitle은 영상 파일에서 한국어 SRT를 만듭니다.
 
 ---
 
@@ -18,7 +18,7 @@ MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일�
 7. [번역 오버레이 모드 (HYTrans + MekiOverlayer)](#번역-오버레이-모드)
 8. [설정](#설정)
 9. [음성인식 (MekiAudioCapture + MekiScript)](#음성인식)
-10. [새로운 자막 생성 (MekiSubtitle)](#새로운-자막-생성)
+10. [자막 생성 (MekiSubtitle)](#자막-생성-mekisubtitle)
 11. [커맨드라인 사용법](#커맨드라인-사용법)
 12. [주의사항](#주의사항)
 
@@ -210,9 +210,9 @@ HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x �
 
 ---
 
-## 새로운 자막 생성
+## 자막 생성 (MekiSubtitle)
 
-`새로운 자막 생성` 탭에서 **MekiSubtitle 열기**를 누른 뒤 영상 파일과 저장할 SRT 경로를 선택하세요. MekiSubtitle은 첫 번째 원본 오디오 스트림을 보존된 타임라인으로 추출하고, MekiAudioCapture의 FAST VAD 기준과 일본어 STT를 적용한 뒤 현재 설정의 HYTrans 모델로 한국어 SRT(UTF-8 BOM)를 저장합니다.
+`자막 생성` 탭에서 **MekiSubtitle 열기**를 누른 뒤 영상 파일과 저장할 SRT 경로를 선택하세요. MekiSubtitle은 첫 번째 원본 오디오 스트림을 보존된 타임라인으로 추출하고, MekiCopy의 음성 CHUNK 설정과 관계없이 빠른 대화용 FAST VAD를 고정 적용한 뒤 일본어 STT와 현재 HYTrans 설정으로 한국어 SRT(UTF-8 BOM)를 저장합니다.
 
 - STT/VAD는 MekiAudioCapture의 공용 `models` 캐시를 그대로 사용합니다.
 - 번역은 현재 HYTrans 설정을 사용하며, MekiSubtitle에서 작업을 시작하면 HYTrans도 자동으로 시작하고 준비될 때까지 기다립니다.
@@ -265,7 +265,7 @@ HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x �
 |---|---|
 | STT 모델 | 기본 Parakeet TDT-CTC 0.6B INT8 또는 ReazonSpeech를 선택합니다. |
 | ReazonSpeech 정밀도 | ReazonSpeech를 선택했을 때 `fp32` 또는 `int8`을 선택합니다. Parakeet은 INT8 고정입니다. |
-| 음성 CHUNK 기준 | `FAST`, `BALANCED`(기본), `LONG` VAD 프리셋을 선택합니다. |
+| 음성 CHUNK 기준 | `FAST`, `BALANCED`(기본), `LONG` VAD 프리셋을 선택합니다. FAST는 짧은 대화 경계를 우선하고, BALANCED는 새 FAST와 LONG의 중간값이며, LONG은 기존 설정을 유지합니다. |
 | MekiAudioCapture 포트 | 음성 캡처 서버 포트 (기본값: 6998) |
 | MekiScript 포트 | 누적 대본 서버 포트 (기본값: 6999) |
 | MekiScript를 항상 위로 | 누적 대본 창을 다른 창 위에 표시합니다. |

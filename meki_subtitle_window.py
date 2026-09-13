@@ -1,6 +1,6 @@
 """MekiCopy-styled UI for creating Korean SRT files from video.
 
-The window is opened from MekiCopy's ``새로운 자막 생성`` tab.  It deliberately
+The window is opened from MekiCopy's ``자막 생성`` tab.  It deliberately
 does not own any model assets: the job pipeline resolves the MekiAudioCapture
 speech/VAD cache and sends translation requests to the already shared HYTrans
 service.
@@ -282,8 +282,8 @@ class MekiSubtitleWindow(tk.Toplevel):
         tk.Label(
             options,
             text=(
-                "VAD는 MekiAudioCapture FAST 기준: silence 0.25초 · 최대 20초 · "
-                "앞/뒤 여백 0.15/0.35초\n"
+                "VAD는 MekiCopy 음성 CHUNK 설정과 무관하게 FAST 고정: "
+                "무음 0.10초 · 최대 10초 · 앞/뒤 여백 0.05/0.10초\n"
                 "번역 모델은 MekiCopy 설정의 HYTrans 선택을 공유합니다."
             ),
             bg=SURFACE,

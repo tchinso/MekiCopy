@@ -117,26 +117,31 @@ MODEL_FILE_HASHES = {
 
 VAD_PRESETS: dict[str, dict[str, float]] = {
     "FAST": {
-        "threshold": 0.50,
+        # Tuned against ExampleVideos/video.mkv's rapid back-and-forth
+        # dialogue.  The short silence, compact padding, and ten-second
+        # safety cap prevent several turns from becoming one STT request.
+        "threshold": 0.60,
         "min_speech_duration": 0.20,
-        "min_silence_duration": 0.25,
-        "max_segment_duration": 20.0,
-        "pre_padding": 0.15,
-        "post_padding": 0.35,
-        "merge_gap": 0.15,
-        "merge_short_under": 0.80,
-        "forced_cut_overlap": 0.40,
+        "min_silence_duration": 0.10,
+        "max_segment_duration": 10.0,
+        "pre_padding": 0.05,
+        "post_padding": 0.10,
+        "merge_gap": 0.05,
+        "merge_short_under": 0.60,
+        "forced_cut_overlap": 0.25,
     },
     "BALANCED": {
-        "threshold": 0.50,
-        "min_speech_duration": 0.25,
-        "min_silence_duration": 0.60,
-        "max_segment_duration": 25.0,
-        "pre_padding": 0.20,
-        "post_padding": 0.45,
-        "merge_gap": 0.35,
-        "merge_short_under": 1.20,
-        "forced_cut_overlap": 0.50,
+        # Keep this preset exactly halfway between the rapid-dialogue FAST
+        # profile and the unchanged LONG profile below.
+        "threshold": 0.55,
+        "min_speech_duration": 0.225,
+        "min_silence_duration": 0.525,
+        "max_segment_duration": 18.5,
+        "pre_padding": 0.15,
+        "post_padding": 0.325,
+        "merge_gap": 0.30,
+        "merge_short_under": 1.05,
+        "forced_cut_overlap": 0.425,
     },
     "LONG": {
         "threshold": 0.50,
