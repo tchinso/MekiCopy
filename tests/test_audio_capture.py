@@ -5,6 +5,7 @@ import json
 import tempfile
 import sys
 import threading
+import time
 import types
 import unittest
 import wave
@@ -278,8 +279,128 @@ class CaptureControllerTests(unittest.TestCase):
         self.assertEqual(args.stt_model, "parakeet")
         self.assertEqual(args.precision, "int8")
 
+    def test_realtime_start_preparation_does_not_block_the_calling_thread(self) -> None:
+        controller = self._controller()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def hold_start(*_args: object) -> None:
+            entered.set()
+            release.wait(timeout=2)
+
+        with mock.patch.object(controller, "_start_recording", side_effect=hold_start):
+            started = time.monotonic()
+            controller.start(realtime_translation=True)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.25)
+            self.assertTrue(entered.wait(timeout=1))
+            self.assertEqual(controller.state, "STARTING")
+            start_thread = controller.start_thread
+            self.assertIsNotNone(start_thread)
+            release.set()
+            assert start_thread is not None
+            start_thread.join(timeout=1)
+            self.assertFalse(start_thread.is_alive())
+
+    def test_new_start_waits_for_an_aborted_live_session_to_exit(self) -> None:
+        controller = self._controller()
+        previous_session = mock.Mock()
+        previous_session.has_active_workers.return_value = True
+        controller.realtime_session = previous_session
+
+        controller.start(realtime_translation=True)
+
+        self.assertEqual(controller.state, "READY")
+        self.assertIn("이전 실시간 번역 작업", controller.status)
+
+    def test_record_stop_timeout_aborts_and_reaps_live_workers(self) -> None:
+        controller = self._controller()
+        controller._session_generation = 1
+        controller.state = "STOPPING"
+        record_thread = mock.Mock()
+        record_thread.is_alive.return_value = True
+        live_session = mock.Mock()
+        session_options = (
+            controller.stt_model,
+            controller.precision,
+            controller.preset,
+            controller.script_url,
+            controller.hytrans_url,
+            True,
+        )
+        with mock.patch.object(controller, "_reap_unresponsive_recording") as reaper:
+            controller._finish_and_process(
+                generation=1,
+                record_thread=record_thread,
+                wav_path=Path("capture.wav"),
+                session_work_dir=Path("session"),
+                session_id="stalled-live-session",
+                session_options=session_options,
+                realtime_session=live_session,
+            )
+
+        record_thread.join.assert_called_once_with(timeout=5)
+        live_session.abort.assert_called_once_with()
+        reaper.assert_called_once_with(1, record_thread, Path("session"), live_session)
+        self.assertEqual(controller.state, "ERROR")
+
+
+class ModelTestWavTests(unittest.TestCase):
+    def test_model_sample_wav_is_downmixed_and_downsampled_to_16k(self) -> None:
+        raw_samples = np.array([0, 32767, -32768, 3000, -3000, 6000], dtype="<i2")
+        with tempfile.TemporaryDirectory() as temporary:
+            wav_path = Path(temporary) / "sample.wav"
+            with wave.open(str(wav_path), "wb") as output:
+                output.setnchannels(1)
+                output.setsampwidth(2)
+                output.setframerate(48_000)
+                output.writeframes(raw_samples.tobytes())
+            samples = meki_audio_capture._load_model_test_wav(wav_path)
+
+        expected = raw_samples.astype(np.float32).reshape(-1, 3).mean(axis=1) / 32768.0
+        np.testing.assert_allclose(samples, expected)
+
 
 class RealtimeTranslationSessionTests(unittest.TestCase):
+    @staticmethod
+    def _session() -> meki_audio_capture.RealtimeTranslationSession:
+        return meki_audio_capture.RealtimeTranslationSession(
+            {"vad": Path("vad.onnx")},
+            "parakeet",
+            "int8",
+            "BALANCED",
+            "http://script",
+            "http://hytrans",
+            "live-session",
+            lambda _status: None,
+        )
+
+    @staticmethod
+    def _segment(segment_id: int = 1) -> object:
+        return meki_audio_capture.SpeechSegment(
+            id=segment_id,
+            start_time=0.0,
+            end_time=0.032,
+            duration=0.032,
+            audio=np.zeros(512, dtype=np.float32),
+            is_forced_cut=False,
+            is_short=True,
+            previous_overlap=0.0,
+        )
+
+    @staticmethod
+    def _result(segment_id: int = 1) -> object:
+        return meki_audio_capture.STTResult(
+            segment_id=segment_id,
+            start_time=0.0,
+            end_time=0.032,
+            duration=0.032,
+            text_ja="こんにちは",
+            is_forced_cut=False,
+            is_short=True,
+            stt_latency=0.01,
+        )
+
     def test_finalized_live_vad_chunk_is_appended_then_translated_and_flushed(self) -> None:
         class FakeVad:
             def __init__(self) -> None:
@@ -410,6 +531,99 @@ class RealtimeTranslationSessionTests(unittest.TestCase):
         self.assertFalse(session._stt_thread.is_alive())
         self.assertFalse(session._translation_thread.is_alive())
         self.assertTrue(any("번역 1개" in status for status in statuses))
+
+    def test_failed_translator_with_full_queue_cannot_deadlock_stt_shutdown(self) -> None:
+        session = self._session()
+        # Simulate a translator that already died after leaving its bounded
+        # queue full.  The old terminal-item design blocked forever here.
+        session._started = True
+        session._translation_thread = threading.Thread(target=lambda: None, daemon=True)
+        session._translation_thread.start()
+        session._translation_thread.join(timeout=1)
+        for index in range(meki_audio_capture.REALTIME_TRANSLATION_QUEUE_MAX_SEGMENTS):
+            session._translation_queue.put_nowait((self._result(index + 1), f"entry-{index}"))
+        session._stt_input_closed.set()
+        session._stt_thread = threading.Thread(target=session._run_stt, daemon=True)
+
+        with mock.patch.object(meki_audio_capture, "create_recognizer", return_value=object()):
+            started = time.monotonic()
+            session._stt_thread.start()
+            summary = session.wait_for_completion()
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1.0)
+        self.assertFalse(session._stt_thread.is_alive())
+        self.assertFalse(session._translation_thread.is_alive())
+        self.assertEqual(summary.recognized, 0)
+
+    def test_abort_after_decode_suppresses_late_script_publish(self) -> None:
+        class FakeStream:
+            def __init__(self) -> None:
+                self.result = types.SimpleNamespace(text="")
+
+            def accept_waveform(self, _sample_rate: int, _samples: np.ndarray) -> None:
+                return
+
+        decode_entered = threading.Event()
+        release_decode = threading.Event()
+
+        class FakeRecognizer:
+            def create_stream(self) -> FakeStream:
+                return FakeStream()
+
+            @staticmethod
+            def decode_stream(stream: FakeStream) -> None:
+                decode_entered.set()
+                release_decode.wait(timeout=2)
+                stream.result.text = "こんにちは"
+
+        session = self._session()
+        session._started = True
+        session._stt_thread = threading.Thread(target=session._run_stt, daemon=True)
+        session._translation_thread = threading.Thread(target=session._run_translation, daemon=True)
+        with (
+            mock.patch.object(meki_audio_capture, "create_recognizer", return_value=FakeRecognizer()),
+            mock.patch.object(meki_audio_capture, "append_script_text") as append_script_text,
+            mock.patch.object(meki_audio_capture, "set_script_translation") as set_script_translation,
+        ):
+            session._translation_thread.start()
+            session._stt_thread.start()
+            session._stt_queue.put_nowait(self._segment())
+            try:
+                self.assertTrue(decode_entered.wait(timeout=1))
+                session.abort()
+                release_decode.set()
+                session.wait_for_completion()
+            finally:
+                release_decode.set()
+                session.abort()
+                session.wait_for_completion()
+
+        append_script_text.assert_not_called()
+        set_script_translation.assert_not_called()
+
+    def test_live_translation_has_no_pre_stop_aggregate_deadline(self) -> None:
+        session = self._session()
+        session._started = True
+        session._translation_thread = threading.Thread(target=session._run_translation, daemon=True)
+        translated = threading.Event()
+
+        def translate(*_args: object, **_kwargs: object) -> str:
+            translated.set()
+            return "안녕하세요"
+
+        with (
+            mock.patch.object(meki_audio_capture, "translate_text", side_effect=translate) as translate_text,
+            mock.patch.object(meki_audio_capture, "set_script_translation"),
+        ):
+            session._translation_thread.start()
+            session._translation_queue.put_nowait((self._result(), "entry-1"))
+            self.assertTrue(translated.wait(timeout=1))
+            self.assertIsNone(session._translation_deadline)
+            session._translation_input_closed.set()
+            session.wait_for_completion()
+
+        translate_text.assert_called_once()
 
     def test_live_finish_waits_for_session_without_entering_batch_pipeline(self) -> None:
         controller = CaptureControllerTests._controller()

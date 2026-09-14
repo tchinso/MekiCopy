@@ -51,6 +51,20 @@ from audio_capture_core import (
     wav_to_mono_16k,
 )
 from runtime_paths import prepare_tk_environment, writable_app_subdir
+from mekicopy_theme import (
+    BG,
+    BORDER,
+    BUTTON_FONT,
+    DEFAULT_FONT,
+    INK,
+    MUTED,
+    ROSE,
+    SOFT,
+    SURFACE,
+    TITLE_FONT,
+    RoundedButton,
+    configure_window_theme,
+)
 from service_ports import (
     AUDIO_CAPTURE_DEFAULT_PORT,
     HYTRANS_DEFAULT_PORT,
@@ -141,7 +155,7 @@ class RealtimeTranslationSession:
     slow HYTrans responses do not hold up the next recognized utterance.
     """
 
-    _STOP = object()
+    _WORKER_POLL_SECONDS = 0.1
 
     def __init__(
         self,
@@ -178,15 +192,24 @@ class RealtimeTranslationSession:
         self._closed = False
         self._started = False
         self._aborted = threading.Event()
+        # A timed Queue.get plus these two events deliberately replaces a
+        # terminal queue item.  A terminal item can itself block forever when
+        # a failed consumer leaves a bounded queue full.
+        self._stt_input_closed = threading.Event()
+        self._translation_input_closed = threading.Event()
         self._close_lock = threading.Lock()
         self._stats_lock = threading.Lock()
+        self._delivery_lock = threading.Lock()
         self._recognized = 0
         self._delivery_failures = 0
         self._translation_failures = 0
         self._dropped_segments = 0
         self._fatal_error = ""
         self._last_overload_report = 0.0
-        self._translation_deadline = time.monotonic() + MAX_TRANSLATION_SESSION_SECONDS
+        # A live recording may legitimately last hours.  Start the aggregate
+        # translation drain limit only after recording has closed, rather than
+        # silently dropping otherwise healthy live translations after 30 min.
+        self._translation_deadline: float | None = None
         self._consecutive_translation_failures = 0
 
     def start(self) -> None:
@@ -197,7 +220,7 @@ class RealtimeTranslationSession:
         self._started = True
         self._translation_thread.start()
         self._stt_thread.start()
-        self._report_status("실시간 음성 번역이 켜졌습니다. 발화를 기다리고 있습니다…")
+        self._report_live_status("실시간 음성 번역이 켜졌습니다. 발화를 기다리고 있습니다…")
 
     def accept_capture_block(self, block: np.ndarray) -> None:
         """Feed one 48 kHz capture block without doing STT or HTTP work here."""
@@ -222,13 +245,13 @@ class RealtimeTranslationSession:
             self._feed_vad(mono_16k)
 
     def finish_input(self) -> None:
-        """Flush final VAD audio on the recorder thread and close the STT queue."""
+        """Flush final VAD audio on the recorder thread and close STT input."""
         with self._close_lock:
             if self._closed:
                 return
             self._closed = True
             if self._aborted.is_set() or self._vad is None:
-                self._put_stop_after_recording(self._stt_queue)
+                self._stt_input_closed.set()
                 return
             try:
                 if self._capture_remainder.size:
@@ -244,31 +267,25 @@ class RealtimeTranslationSession:
                 self._vad.flush()
                 self._drain_vad()
             finally:
-                # Do not keep the recorder alive behind a slow STT queue: the
-                # helper waits for capacity on a tiny non-recorder thread.
-                self._put_stop_after_recording(self._stt_queue)
+                # The current live translation may continue indefinitely while
+                # recording.  Only its remaining post-recording drain receives
+                # the same 30-minute aggregate limit as batch translation.
+                self._translation_deadline = time.monotonic() + MAX_TRANSLATION_SESSION_SECONDS
+                self._stt_input_closed.set()
 
     def abort(self) -> None:
         """Stop workers after a recorder/VAD failure; normal Stop drains instead."""
         self._aborted.set()
         with self._close_lock:
             self._closed = True
-            if self._started:
-                try:
-                    self._stt_queue.put_nowait(self._STOP)
-                except queue.Full:
-                    pass
-                try:
-                    self._translation_queue.put_nowait(self._STOP)
-                except queue.Full:
-                    # The translator checks ``_aborted`` after its next get,
-                    # so a full queue already guarantees it will wake.
-                    pass
+            self._stt_input_closed.set()
+            self._translation_input_closed.set()
 
     def wait_for_completion(self) -> RealtimeTranslationSummary:
         if self._started:
-            self._stt_thread.join()
-            self._translation_thread.join()
+            for worker in (self._stt_thread, self._translation_thread):
+                if worker.ident is not None:
+                    worker.join()
         with self._stats_lock:
             return RealtimeTranslationSummary(
                 recognized=self._recognized,
@@ -277,6 +294,10 @@ class RealtimeTranslationSession:
                 dropped_segments=self._dropped_segments,
                 fatal_error=self._fatal_error,
             )
+
+    def has_active_workers(self) -> bool:
+        """Return whether a failed session is still draining or cancelling."""
+        return any(worker.is_alive() for worker in (self._stt_thread, self._translation_thread))
 
     def _feed_vad(self, samples: np.ndarray) -> None:
         if self._vad_remainder.size:
@@ -329,21 +350,25 @@ class RealtimeTranslationSession:
                 f"실시간 STT 대기열이 가득 차 발화 {segment.id}을(를) 건너뜁니다.",
             )
             if report_overload:
-                self._report_status("실시간 번역 처리 지연: 일부 발화가 건너뛰어질 수 있습니다.")
+                self._report_live_status("실시간 번역 처리 지연: 일부 발화가 건너뛰어질 수 있습니다.")
 
-    def _put_stop_after_recording(self, target: queue.Queue[Any]) -> None:
-        if not self._started:
-            return
-        try:
-            target.put_nowait(self._STOP)
-        except queue.Full:
-            threading.Thread(target=lambda: target.put(self._STOP), daemon=True).start()
+    def _report_live_status(self, status: str) -> None:
+        if not self._aborted.is_set():
+            self._report_status(status)
 
     def _deliver(self, stage: str, action: Callable[[], None]) -> bool:
         for attempt in range(2):
+            if self._aborted.is_set():
+                return False
             try:
-                action()
-                return True
+                # Do not launch a delayed HTTP delivery after an aborted
+                # session.  An already-running request cannot be cancelled,
+                # but this closes the publish-after-abort race at its source.
+                with self._delivery_lock:
+                    if self._aborted.is_set():
+                        return False
+                    action()
+                    return True
             except Exception as exc:
                 log_error(stage, exc)
                 if attempt == 0:
@@ -364,14 +389,23 @@ class RealtimeTranslationSession:
                 precision=self.precision,
             )
             while True:
-                item = self._stt_queue.get()
-                if item is self._STOP or self._aborted.is_set():
+                if self._aborted.is_set():
+                    break
+                try:
+                    item = self._stt_queue.get(timeout=self._WORKER_POLL_SECONDS)
+                except queue.Empty:
+                    if self._stt_input_closed.is_set():
+                        break
+                    continue
+                if self._aborted.is_set():
                     break
                 assert isinstance(item, SpeechSegment)
                 started = time.perf_counter()
                 stream = recognizer.create_stream()
                 stream.accept_waveform(INTERNAL_SAMPLE_RATE, item.audio)
                 recognizer.decode_stream(stream)
+                if self._aborted.is_set():
+                    break
                 text = str(stream.result.text).strip()
                 if item.previous_overlap:
                     text = remove_overlap(self._previous_text, text)
@@ -393,20 +427,29 @@ class RealtimeTranslationSession:
                     "realtime_script_append",
                     lambda: append_script_text(self.script_url, result, entry_id=entry_id),
                 ):
+                    if self._aborted.is_set():
+                        break
                     with self._stats_lock:
                         self._delivery_failures += 1
+                if self._aborted.is_set():
+                    break
                 with self._stats_lock:
                     self._recognized += 1
                     recognized = self._recognized
-                self._report_status(f"실시간 음성 번역: 일본어 {recognized}개를 인식했습니다…")
+                self._report_live_status(f"실시간 음성 번역: 일본어 {recognized}개를 인식했습니다…")
                 self._enqueue_translation(result, entry_id)
         except Exception as exc:
-            self._set_fatal_error("realtime_stt", exc)
+            if not self._aborted.is_set():
+                self._set_fatal_error("realtime_stt", exc)
         finally:
-            if self._started and not self._aborted.is_set():
-                self._translation_queue.put(self._STOP)
+            # No more producers can enqueue translations after this point.
+            # The consumer polls for this event, so it cannot deadlock behind
+            # a full queue if the translator itself has already failed.
+            self._translation_input_closed.set()
 
     def _enqueue_translation(self, result: STTResult, entry_id: str) -> None:
+        if self._aborted.is_set():
+            return
         try:
             self._translation_queue.put_nowait((result, entry_id))
         except queue.Full:
@@ -424,17 +467,25 @@ class RealtimeTranslationSession:
             ):
                 with self._stats_lock:
                     self._delivery_failures += 1
-            self._report_status("실시간 번역 처리 지연: 일부 번역을 건너뛰었습니다.")
+            self._report_live_status("실시간 번역 처리 지연: 일부 번역을 건너뛰었습니다.")
 
     def _run_translation(self) -> None:
         translated_count = 0
         try:
             while True:
-                item = self._translation_queue.get()
-                if item is self._STOP or self._aborted.is_set():
+                if self._aborted.is_set():
+                    break
+                try:
+                    item = self._translation_queue.get(timeout=self._WORKER_POLL_SECONDS)
+                except queue.Empty:
+                    if self._translation_input_closed.is_set():
+                        break
+                    continue
+                if self._aborted.is_set():
                     break
                 result, entry_id = item
-                if time.monotonic() >= self._translation_deadline:
+                deadline = self._translation_deadline
+                if deadline is not None and time.monotonic() >= deadline:
                     translated = "[번역 건너뜀] 이번 녹음의 전체 번역 제한 시간(30분)을 초과했습니다."
                     failed = True
                 elif self._consecutive_translation_failures >= MAX_CONSECUTIVE_TRANSLATION_FAILURES:
@@ -456,6 +507,8 @@ class RealtimeTranslationSession:
                         translated = f"[번역 실패] {exc}"
                         self._consecutive_translation_failures += 1
                         failed = True
+                if self._aborted.is_set():
+                    break
                 if failed:
                     with self._stats_lock:
                         self._translation_failures += 1
@@ -468,12 +521,17 @@ class RealtimeTranslationSession:
                         entry_id=entry_id,
                     ),
                 ):
+                    if self._aborted.is_set():
+                        break
                     with self._stats_lock:
                         self._delivery_failures += 1
+                if self._aborted.is_set():
+                    break
                 translated_count += 1
-                self._report_status(f"실시간 음성 번역: 번역 {translated_count}개를 처리했습니다…")
+                self._report_live_status(f"실시간 음성 번역: 번역 {translated_count}개를 처리했습니다…")
         except Exception as exc:
-            self._set_fatal_error("realtime_translation", exc)
+            if not self._aborted.is_set():
+                self._set_fatal_error("realtime_translation", exc)
 
 
 class CaptureController:
@@ -497,6 +555,7 @@ class CaptureController:
         self.record_thread: threading.Thread | None = None
         self.process_thread: threading.Thread | None = None
         self.model_thread: threading.Thread | None = None
+        self.start_thread: threading.Thread | None = None
         self.prepared_models: dict[str, Path] | None = None
         self.prepared_models_model = ""
         self.prepared_models_precision = ""
@@ -711,16 +770,29 @@ class CaptureController:
         return models
 
     def start(self, *, realtime_translation: bool = False) -> None:
+        """Reserve a session immediately, then prepare live capture off the UI thread."""
         with self._lock:
             if self.state not in {"READY", "ERROR"}:
+                return
+            if self.start_thread and self.start_thread.is_alive():
+                self.status = "이전 녹음 준비가 아직 진행 중입니다. 잠시 후 다시 시도해 주세요."
+                self.events.put(("status", self.status))
                 return
             if self.record_thread and self.record_thread.is_alive():
                 self.status = "이전 녹음 장치가 아직 종료 중입니다. 잠시 후 다시 시도해 주세요."
                 self.events.put(("status", self.status))
                 return
+            if self.realtime_session is not None:
+                if self.realtime_session.has_active_workers():
+                    self.status = "이전 실시간 번역 작업이 종료 중입니다. 잠시 후 다시 시도해 주세요."
+                    self.events.put(("status", self.status))
+                    return
+                self.realtime_session = None
             # Reserve the state before allocating paths so concurrent HTTP
             # requests cannot begin a second recording session.
             self.state = "STARTING"
+            self.status = "녹음 준비 중입니다…"
+            self.error = ""
             self._session_generation += 1
             generation = self._session_generation
             session_options = (
@@ -731,6 +803,33 @@ class CaptureController:
                 self.hytrans_url,
                 bool(realtime_translation),
             )
+            start_thread = threading.Thread(
+                target=self._start_recording,
+                args=(generation, session_options),
+                daemon=True,
+            )
+            self.start_thread = start_thread
+        self.events.put(("status", self.status))
+        log_debug("state", f"state: STARTING\nstatus: {self.status}")
+        try:
+            start_thread.start()
+        except Exception as exc:
+            log_error("start_recording_thread", exc)
+            with self._lock:
+                if self.start_thread is start_thread:
+                    self.start_thread = None
+            self._set_state_for_session(
+                generation,
+                "ERROR",
+                f"녹음 시작 실패: {exc}",
+                traceback.format_exc(),
+            )
+
+    def _start_recording(
+        self,
+        generation: int,
+        session_options: tuple[str, str, str, str, str, bool],
+    ) -> None:
         session_work_dir: Path | None = None
         realtime_session: RealtimeTranslationSession | None = None
         try:
@@ -761,6 +860,14 @@ class CaptureController:
                     session_id,
                     report_status=lambda text: self._set_status_for_session(generation, text),
                 )
+                # Keep the session reachable before starting native workers.
+                # An initialization failure can then cancel/reap it safely and
+                # prevent a new recording from overlapping old workers.
+                with self._lock:
+                    if generation != self._session_generation or self.state != "STARTING":
+                        cleanup_work_files(session_work_dir)
+                        return
+                    self.realtime_session = realtime_session
                 # VAD initialization happens before the loopback opens.  The
                 # expensive recognizer itself stays on the STT worker.
                 realtime_session.start()
@@ -770,7 +877,9 @@ class CaptureController:
                 daemon=True,
             )
             with self._lock:
-                if generation != self._session_generation:
+                if generation != self._session_generation or self.state != "STARTING":
+                    if realtime_session is not None:
+                        realtime_session.abort()
                     cleanup_work_files(session_work_dir)
                     return
                 self.session_id = session_id
@@ -795,6 +904,9 @@ class CaptureController:
             log_error("start_recording", exc)
             if realtime_session is not None:
                 realtime_session.abort()
+                with self._lock:
+                    if generation == self._session_generation:
+                        self.realtime_session = realtime_session
             if session_work_dir is not None:
                 cleanup_work_files(session_work_dir)
             self._set_state_for_session(
@@ -803,6 +915,10 @@ class CaptureController:
                 f"녹음 시작 실패: {exc}",
                 traceback.format_exc(),
             )
+        finally:
+            with self._lock:
+                if self.start_thread is threading.current_thread():
+                    self.start_thread = None
 
     def stop(self) -> None:
         with self._lock:
@@ -834,6 +950,31 @@ class CaptureController:
         )
         self.process_thread = process_thread
         process_thread.start()
+
+    def _reap_unresponsive_recording(
+        self,
+        generation: int,
+        record_thread: threading.Thread,
+        session_work_dir: Path | None,
+        realtime_session: RealtimeTranslationSession | None,
+    ) -> None:
+        """Clean up only after a recorder that missed its stop deadline exits."""
+
+        def reap() -> None:
+            record_thread.join()
+            if realtime_session is not None:
+                realtime_session.abort()
+                realtime_session.wait_for_completion()
+            if session_work_dir is not None:
+                cleanup_work_files(session_work_dir)
+            with self._lock:
+                if (
+                    generation == self._session_generation
+                    and self.realtime_session is realtime_session
+                ):
+                    self.realtime_session = None
+
+        threading.Thread(target=reap, daemon=True).start()
 
     def _record_loop(
         self,
@@ -936,6 +1077,14 @@ class CaptureController:
         if record_thread:
             record_thread.join(timeout=5)
             if record_thread.is_alive():
+                if realtime_session is not None:
+                    realtime_session.abort()
+                self._reap_unresponsive_recording(
+                    generation,
+                    record_thread,
+                    session_work_dir,
+                    realtime_session,
+                )
                 self._set_state_for_session(generation, "ERROR", "Recording did not stop in time.")
                 return
         with self._lock:
@@ -1145,33 +1294,136 @@ def make_handler(controller: CaptureController):
 
 
 class CaptureWindow:
+    """The intentionally small, local controller for a capture session.
+
+    Unlike the MekiCopy settings window, this dialog does not expose saved
+    audio settings.  Its optional live translation switch only applies to the
+    next recording and is reset as soon as that recording reaches a terminal
+    state.
+    """
+
     def __init__(self, root: tk.Tk, controller: CaptureController) -> None:
         self.root = root
         self.controller = controller
         self._last_state = controller.state
         root.title("MekiAudioCapture")
-        root.geometry("430x260")
+        root.geometry("480x350")
         root.resizable(False, False)
         root.protocol("WM_DELETE_WINDOW", self.close)
-        body = tk.Frame(root, padx=18, pady=18)
+        configure_window_theme(root)
+
+        body = tk.Frame(root, bg=BG, padx=18, pady=16)
         body.pack(fill=tk.BOTH, expand=True)
-        self.status = tk.Label(body, text=controller.status, wraplength=390, justify="center")
-        self.status.pack(fill=tk.X, pady=(4, 12))
+
+        tk.Label(
+            body,
+            text="MekiAudioCapture",
+            bg=BG,
+            fg=ROSE,
+            font=TITLE_FONT,
+            anchor=tk.W,
+        ).pack(fill=tk.X)
+        tk.Label(
+            body,
+            text="시스템 소리를 녹음해 음성 인식 결과를 MekiScript에 보냅니다.",
+            bg=BG,
+            fg=MUTED,
+            font=DEFAULT_FONT,
+            anchor=tk.W,
+        ).pack(fill=tk.X, pady=(2, 12))
+
+        status_card = tk.Frame(
+            body,
+            bg=SURFACE,
+            padx=12,
+            pady=10,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        status_card.pack(fill=tk.X)
+        tk.Label(
+            status_card,
+            text="현재 상태",
+            bg=SURFACE,
+            fg=MUTED,
+            font=DEFAULT_FONT,
+            anchor=tk.W,
+        ).pack(fill=tk.X)
+        self.status = tk.Label(
+            status_card,
+            text=controller.status,
+            wraplength=410,
+            justify=tk.LEFT,
+            bg=SURFACE,
+            fg=INK,
+            font=DEFAULT_FONT,
+            anchor=tk.W,
+        )
+        self.status.pack(fill=tk.X, pady=(3, 0))
+
+        options = tk.LabelFrame(
+            body,
+            text="녹음 옵션",
+            bg=SURFACE,
+            fg=ROSE,
+            font=BUTTON_FONT,
+            padx=10,
+            pady=8,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        options.pack(fill=tk.X, pady=(12, 0))
         # This variable is intentionally local to this window.  It is neither
         # accepted from MekiCopy nor written to any settings file.
         self.realtime_translation_var = tk.BooleanVar(value=False)
         self.realtime_translation_check = tk.Checkbutton(
-            body,
+            options,
             text="실시간 음성 번역(저사양에서 비권장)",
             variable=self.realtime_translation_var,
+            bg=SOFT,
+            fg=INK,
+            activebackground=SOFT,
+            activeforeground=ROSE,
+            selectcolor=SURFACE,
+            font=DEFAULT_FONT,
             anchor="w",
             command=self._on_realtime_translation_changed,
         )
-        self.realtime_translation_check.pack(fill=tk.X, pady=(0, 8))
-        self.start_button = tk.Button(body, text="녹음 시작", height=2, command=self.start)
-        self.start_button.pack(fill=tk.X, pady=4)
-        self.stop_button = tk.Button(body, text="녹음 종료", height=2, command=controller.stop)
-        self.stop_button.pack(fill=tk.X, pady=4)
+        self.realtime_translation_check.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(
+            options,
+            text="선택은 저장되지 않으며, 녹음이 끝나면 자동으로 해제됩니다.",
+            bg=SURFACE,
+            fg=MUTED,
+            font=DEFAULT_FONT,
+            justify=tk.LEFT,
+            anchor=tk.W,
+        ).pack(fill=tk.X)
+
+        actions = tk.Frame(body, bg=BG)
+        actions.pack(fill=tk.X, pady=(14, 0))
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
+        self.start_button = RoundedButton(
+            actions,
+            text="녹음 시작",
+            command=self.start,
+            variant="primary",
+            width=1,
+            height=40,
+            radius=18,
+        )
+        self.start_button.grid(row=0, column=0, sticky=tk.EW, padx=(0, 5))
+        self.stop_button = RoundedButton(
+            actions,
+            text="녹음 종료",
+            command=controller.stop,
+            width=1,
+            height=40,
+            radius=18,
+        )
+        self.stop_button.grid(row=0, column=1, sticky=tk.EW, padx=(5, 0))
+
         root.after(100, self.poll)
 
     def _on_realtime_translation_changed(self) -> None:
@@ -1210,12 +1462,64 @@ class CaptureWindow:
         self.realtime_translation_check.configure(
             state=tk.NORMAL if state in {"READY", "ERROR"} else tk.DISABLED
         )
+        self.status.configure(fg=ROSE if state == "ERROR" else INK)
         if state in {"READY", "ERROR"} and self._last_state not in {"READY", "ERROR"}:
             # Choosing it applies to one recording only.  A later session must
             # be explicitly opted into again.
             self.realtime_translation_var.set(False)
         self._last_state = state
         self.root.after(100, self.poll)
+
+
+def _load_model_test_wav(wav_path: Path) -> np.ndarray:
+    """Load a model-provided PCM16 WAV as 16 kHz mono for a native smoke test."""
+    with wave.open(str(wav_path), "rb") as source:
+        channels = source.getnchannels()
+        sample_width = source.getsampwidth()
+        sample_rate = source.getframerate()
+        if source.getcomptype() != "NONE" or sample_width != 2 or channels < 1:
+            raise RuntimeError("음성인식 테스트 WAV는 PCM16 형식이어야 합니다.")
+        if sample_rate <= 0 or sample_rate % INTERNAL_SAMPLE_RATE:
+            raise RuntimeError(f"지원하지 않는 음성인식 테스트 WAV 샘플레이트입니다: {sample_rate}")
+        raw = source.readframes(source.getnframes())
+    frame_width = sample_width * channels
+    if not raw or len(raw) % frame_width:
+        raise RuntimeError("음성인식 테스트 WAV 데이터가 올바르지 않습니다.")
+    samples = np.frombuffer(raw, dtype="<i2").reshape(-1, channels).astype(np.float32)
+    samples *= 1.0 / 32768.0
+    ratio = sample_rate // INTERNAL_SAMPLE_RATE
+    usable = (len(samples) // ratio) * ratio
+    if not usable:
+        raise RuntimeError("음성인식 테스트 WAV가 너무 짧습니다.")
+    return samples[:usable].mean(axis=1).reshape(-1, ratio).mean(axis=1)
+
+
+def run_capture_window_self_test() -> None:
+    """Exercise the packaged CaptureWindow and its shared MekiCopy theme."""
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        controller = CaptureController(
+            "int8",
+            "BALANCED",
+            DEFAULT_SCRIPT_URL,
+            DEFAULT_HYTRANS_URL,
+            prepare_models_on_start=False,
+        )
+        window = CaptureWindow(root, controller)
+        # Grid-weighted Canvas controls receive their final width only after
+        # Tk maps the window at least once.
+        root.deiconify()
+        root.update_idletasks()
+        root.update()
+        if root.winfo_width() != 480 or root.winfo_height() != 350:
+            raise RuntimeError("MekiAudioCapture 창 레이아웃 크기가 올바르지 않습니다.")
+        if window.realtime_translation_var.get():
+            raise RuntimeError("실시간 음성 번역 옵션의 기본값은 꺼짐이어야 합니다.")
+        if min(window.start_button.winfo_width(), window.stop_button.winfo_width()) < 150:
+            raise RuntimeError("MekiAudioCapture 작업 버튼 레이아웃이 올바르지 않습니다.")
+    finally:
+        root.destroy()
 
 
 def parse_args() -> argparse.Namespace:
@@ -1228,6 +1532,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hytrans-url", default=DEFAULT_HYTRANS_URL)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--self-test-models", action="store_true")
+    parser.add_argument("--self-test-ui", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-server", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--debug-log", action="store_true")
     return parser.parse_args()
@@ -1269,17 +1574,23 @@ def main() -> int:
         collect_vad_intervals(np.zeros(16_000, dtype=np.float32), models["vad"], args.preset)
         recognizer = create_recognizer(models, model_key=args.stt_model, num_threads=1)
         if source_test_wav.is_file():
-            with wave.open(str(source_test_wav), "rb") as source:
-                if source.getframerate() != 16_000 or source.getnchannels() != 1:
-                    raise RuntimeError("음성인식 테스트 WAV 형식이 올바르지 않습니다.")
-                samples = np.frombuffer(source.readframes(source.getnframes()), dtype="<i2")
-            stream = recognizer.create_stream()
-            stream.accept_waveform(16_000, samples.astype(np.float32) / 32768.0)
-            recognizer.decode_stream(stream)
-            if not str(stream.result.text).strip():
-                raise RuntimeError(
-                    f"{get_stt_model(args.stt_model).status_name} 테스트 결과가 비어 있습니다."
-                )
+            samples = _load_model_test_wav(source_test_wav)
+            require_text = True
+        else:
+            # Full carries only runtime model files, not upstream sample WAVs.
+            # Still execute one decode to validate the frozen model factory.
+            samples = np.zeros(INTERNAL_SAMPLE_RATE, dtype=np.float32)
+            require_text = False
+        stream = recognizer.create_stream()
+        stream.accept_waveform(INTERNAL_SAMPLE_RATE, samples)
+        recognizer.decode_stream(stream)
+        if require_text and not str(stream.result.text).strip():
+            raise RuntimeError(
+                f"{get_stt_model(args.stt_model).status_name} 테스트 결과가 비어 있습니다."
+            )
+        return 0
+    if args.self_test_ui:
+        run_capture_window_self_test()
         return 0
     controller = CaptureController(
         args.precision,

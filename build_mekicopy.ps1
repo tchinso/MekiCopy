@@ -1047,6 +1047,7 @@ if (-not $SkipSmokeTests) {
         $overlayerPort
 
     Invoke-ExeSmokeTest $audioCaptureExe @("--self-test")
+    Invoke-ExeSmokeTest $audioCaptureExe @("--self-test-ui")
     if ($PackageFlavor -eq "Full") {
         # Verify the copied, pre-downloaded STT/VAD assets from inside the
         # frozen companion.  Lite intentionally has no model payload and
