@@ -111,7 +111,7 @@ MODEL_FILE_HASHES = {
     f"{REAZONSPEECH_MODEL_DIRECTORY}/decoder-epoch-99-avg-1.onnx": "58b18211ae06265466bfa17172dab574df94f76c8bcb61a3640c28ba860e4124",
     f"{REAZONSPEECH_MODEL_DIRECTORY}/joiner-epoch-99-avg-1.onnx": "d38a81d1191c9ed6de6a1719503692e07e3e973e2364adde0abae5eaaded1174",
     f"{REAZONSPEECH_MODEL_DIRECTORY}/encoder-epoch-99-avg-1.int8.onnx": "2c7bd08a8a99f9ddd0d9e458456577b1f6279214e51426f114f9eced44c54e1d",
-    f"{REAZONSPEECH_MODEL_DIRECTORY}/joiner-epoch-99-avg-1.int8.onnx": "49cc7ea1d3d35a40a27442db5e89996da64bf0e683a903dce76e99e57a12e4",
+    f"{REAZONSPEECH_MODEL_DIRECTORY}/joiner-epoch-99-avg-1.int8.onnx": "49cc7ea1d3d35a40a27442db5e89996da64bf0e683a903dce76e99e57a12e4de",
     "vad/silero_vad.onnx": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
 }
 
@@ -672,20 +672,7 @@ def collect_vad_intervals(
     preset_name: str,
     num_threads: int = 4,
 ) -> list[tuple[int, int]]:
-    import sherpa_onnx
-
-    preset = VAD_PRESETS[normalize_preset(preset_name)]
-    config = sherpa_onnx.VadModelConfig()
-    config.silero_vad.model = str(vad_model)
-    config.silero_vad.threshold = preset["threshold"]
-    config.silero_vad.min_silence_duration = preset["min_silence_duration"]
-    config.silero_vad.min_speech_duration = preset["min_speech_duration"]
-    config.silero_vad.window_size = 512
-    config.silero_vad.max_speech_duration = preset["max_segment_duration"]
-    config.sample_rate = INTERNAL_SAMPLE_RATE
-    config.num_threads = num_threads
-    config.provider = "cpu"
-    vad = sherpa_onnx.VoiceActivityDetector(config, 60.0)
+    vad = create_voice_activity_detector(vad_model, preset_name, num_threads=num_threads)
     intervals: list[tuple[int, int]] = []
 
     def drain() -> None:
@@ -705,6 +692,34 @@ def collect_vad_intervals(
     vad.flush()
     drain()
     return intervals
+
+
+def create_voice_activity_detector(
+    vad_model: Path,
+    preset_name: str,
+    num_threads: int = 4,
+):
+    """Create one CPU Silero VAD instance for batch or live capture.
+
+    Callers that feed a live stream must keep the returned native object on a
+    single thread.  ``VoiceActivityDetector.front`` is only valid until the
+    next detector operation, so live callers also need to copy its samples
+    before calling ``pop``.
+    """
+    import sherpa_onnx
+
+    preset = VAD_PRESETS[normalize_preset(preset_name)]
+    config = sherpa_onnx.VadModelConfig()
+    config.silero_vad.model = str(vad_model)
+    config.silero_vad.threshold = preset["threshold"]
+    config.silero_vad.min_silence_duration = preset["min_silence_duration"]
+    config.silero_vad.min_speech_duration = preset["min_speech_duration"]
+    config.silero_vad.window_size = 512
+    config.silero_vad.max_speech_duration = preset["max_segment_duration"]
+    config.sample_rate = INTERNAL_SAMPLE_RATE
+    config.num_threads = num_threads
+    config.provider = "cpu"
+    return sherpa_onnx.VoiceActivityDetector(config, 60.0)
 
 
 def build_segments(

@@ -3,7 +3,7 @@
 
 MekiCopy는 화면의 특정 영역을 지정한 뒤 OCR로 글자를 인식하고, 결과를 클립보드에 복사하는 도구입니다.  
 선택적으로 HYTrans + MekiOverlayer와 연동하면 인식한 텍스트를 자동으로 번역해 화면에 바로 표시할 수 있습니다.
-MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일본어 음성을 녹음한 뒤 일괄 인식·번역할 수 있습니다.
+MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일본어 음성을 녹음한 뒤 일괄 인식·번역하거나, 선택적으로 발화 단위 처리 결과를 녹음 중 표시할 수 있습니다.
 `자막 생성` 탭의 MekiSubtitle은 영상 파일에서 한국어 SRT를 만듭니다.
 
 ---
@@ -39,7 +39,7 @@ MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일�
 1. Python 3.12~3.14를 설치합니다.
 2. `install_mekiocr.bat`을 실행해 필요한 패키지를 설치합니다.
    ```
-   meikiocr==0.3.4, mss==10.2.0, pillow==12.3.0, numpy==2.5.2
+   meikiocr==0.3.4, mss==10.2.0, pillow==12.3.0, numpy==2.5.3
    ```
 3. `run_mekicopy.bat`을 실행하거나, 직접 `python mekicopy.py`를 실행합니다.
 
@@ -197,6 +197,8 @@ HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x �
 5. `녹음 종료`를 누릅니다.
 
 녹음 중에는 WASAPI loopback 음성을 `MekiAudioCapture.exe` 옆 `work` 폴더에 임시 WAV 파일로 저장합니다. 프로그램 폴더에 쓸 수 없는 설치 환경에서만 LocalAppData 등 쓰기 가능한 보조 경로를 사용합니다. 종료 후에 VAD와 일본어 STT를 실행해 모든 일본어 원문을 MekiScript에 먼저 쌓고, 그 다음 원문 단위별로 HYTrans 번역을 순서대로 채웁니다. 처리가 끝나면 임시 WAV와 변환 파일은 삭제됩니다.
+
+MekiAudioCapture 창의 `실시간 음성 번역(저사양에서 비권장)`은 기본으로 꺼져 있는 일회성 옵션입니다. 켜면 Silero VAD가 확정한 발화 chunk를 녹음 중 바로 STT로 보내고, 원문 표시와 HYTrans 번역을 별도 작업으로 이어서 처리합니다. 음성과 번역을 시간에 맞춰 동기화하는 기능은 아니며, 들어오는 발화를 가능한 대로 먼저 처리하는 방식입니다. 저사양 컴퓨터에서는 지연·일부 실패가 생길 수 있어 경고를 표시하며, 이 체크 값은 MekiCopy 설정이나 파일에 저장되지 않고 녹음이 끝나면 다시 꺼집니다.
 
 | 구성 요소 | 역할 | 기본 포트 |
 |---|---|---|

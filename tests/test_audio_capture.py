@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import http.client
+import json
 import tempfile
 import sys
+import threading
 import types
 import unittest
 import wave
@@ -274,6 +277,251 @@ class CaptureControllerTests(unittest.TestCase):
             args = meki_audio_capture.parse_args()
         self.assertEqual(args.stt_model, "parakeet")
         self.assertEqual(args.precision, "int8")
+
+
+class RealtimeTranslationSessionTests(unittest.TestCase):
+    def test_finalized_live_vad_chunk_is_appended_then_translated_and_flushed(self) -> None:
+        class FakeVad:
+            def __init__(self) -> None:
+                self.accepted_windows: list[np.ndarray] = []
+                self._items: list[object] = []
+                self.flush_calls = 0
+                self._emitted = False
+
+            def accept_waveform(self, samples: np.ndarray) -> None:
+                self.accepted_windows.append(np.array(samples, dtype=np.float32, copy=True))
+                if not self._emitted:
+                    self._emitted = True
+                    self._items.append(
+                        types.SimpleNamespace(
+                            samples=np.full(640, 0.25, dtype=np.float32),
+                            start=320,
+                        )
+                    )
+
+            def flush(self) -> None:
+                self.flush_calls += 1
+
+            def empty(self) -> bool:
+                return not self._items
+
+            @property
+            def front(self) -> object:
+                return self._items[0]
+
+            def pop(self) -> None:
+                self._items.pop(0)
+
+        class FakeStream:
+            def __init__(self) -> None:
+                self.result = types.SimpleNamespace(text="")
+                self.accepted: tuple[int, np.ndarray] | None = None
+
+            def accept_waveform(self, sample_rate: int, samples: np.ndarray) -> None:
+                self.accepted = (sample_rate, np.array(samples, copy=True))
+
+        class FakeRecognizer:
+            def __init__(self) -> None:
+                self.streams: list[FakeStream] = []
+
+            def create_stream(self) -> FakeStream:
+                stream = FakeStream()
+                self.streams.append(stream)
+                return stream
+
+            @staticmethod
+            def decode_stream(stream: FakeStream) -> None:
+                stream.result.text = "こんにちは"
+
+        fake_vad = FakeVad()
+        fake_recognizer = FakeRecognizer()
+        deliveries: list[tuple[str, str, str]] = []
+        statuses: list[str] = []
+        append_seen = threading.Event()
+
+        def append(script_url: str, result: object, *, entry_id: str | None = None) -> None:
+            deliveries.append(("append", str(entry_id), result.text_ja))
+            append_seen.set()
+
+        def translate(hytrans_url: str, text: str, timeout: float) -> str:
+            deliveries.append(("translate", hytrans_url, text))
+            return "안녕하세요"
+
+        def set_translation(
+            script_url: str,
+            result: object,
+            text: str,
+            *,
+            entry_id: str | None = None,
+        ) -> None:
+            deliveries.append(("translation", str(entry_id), text))
+
+        session = meki_audio_capture.RealtimeTranslationSession(
+            {"vad": Path("vad.onnx")},
+            "parakeet",
+            "int8",
+            "BALANCED",
+            "http://script",
+            "http://hytrans",
+            "live-session",
+            statuses.append,
+        )
+        capture_frames = 512 * (audio_capture_core.CAPTURE_SAMPLE_RATE // audio_capture_core.INTERNAL_SAMPLE_RATE) + 1
+        with (
+            mock.patch.object(
+                meki_audio_capture,
+                "create_voice_activity_detector",
+                return_value=fake_vad,
+            ) as create_vad,
+            mock.patch.object(
+                meki_audio_capture,
+                "create_recognizer",
+                return_value=fake_recognizer,
+            ) as create_recognizer,
+            mock.patch.object(meki_audio_capture, "append_script_text", side_effect=append),
+            mock.patch.object(meki_audio_capture, "translate_text", side_effect=translate),
+            mock.patch.object(meki_audio_capture, "set_script_translation", side_effect=set_translation),
+        ):
+            session.start()
+            session.accept_capture_block(np.full((capture_frames, 2), 0.25, dtype=np.float32))
+            self.assertTrue(append_seen.wait(timeout=2), "VAD-finalized speech was not published live")
+            session.finish_input()
+            summary = session.wait_for_completion()
+
+        self.assertEqual(create_vad.call_args.args, (Path("vad.onnx"), "BALANCED"))
+        create_recognizer.assert_called_once_with(
+            {"vad": Path("vad.onnx")},
+            model_key="parakeet",
+            precision="int8",
+        )
+        self.assertEqual([len(window) for window in fake_vad.accepted_windows], [512, 512])
+        self.assertEqual(fake_vad.flush_calls, 1)
+        self.assertEqual(
+            deliveries,
+            [
+                ("append", "live-session-1", "こんにちは"),
+                ("translate", "http://hytrans", "こんにちは"),
+                ("translation", "live-session-1", "안녕하세요"),
+            ],
+        )
+        self.assertEqual(summary.recognized, 1)
+        self.assertEqual(summary.translation_failures, 0)
+        self.assertEqual(summary.delivery_failures, 0)
+        self.assertFalse(session._stt_thread.is_alive())
+        self.assertFalse(session._translation_thread.is_alive())
+        self.assertTrue(any("번역 1개" in status for status in statuses))
+
+    def test_live_finish_waits_for_session_without_entering_batch_pipeline(self) -> None:
+        controller = CaptureControllerTests._controller()
+        controller._session_generation = 1
+        controller.state = "STOPPING"
+        live_session = mock.Mock()
+        live_session.wait_for_completion.return_value = meki_audio_capture.RealtimeTranslationSummary(
+            recognized=2,
+            delivery_failures=0,
+            translation_failures=0,
+            dropped_segments=0,
+        )
+        controller.realtime_session = live_session
+        session_options = (
+            controller.stt_model,
+            controller.precision,
+            controller.preset,
+            controller.script_url,
+            controller.hytrans_url,
+            True,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            session_dir = Path(temporary) / "session"
+            session_dir.mkdir()
+            with (
+                mock.patch.object(
+                    controller,
+                    "_models_for_processing",
+                    side_effect=AssertionError("live finish must not load batch models"),
+                ) as models_for_processing,
+                mock.patch.object(
+                    meki_audio_capture,
+                    "wav_to_mono_16k",
+                    side_effect=AssertionError("live finish must not convert recorded WAV"),
+                ) as wav_to_mono_16k,
+                mock.patch.object(
+                    meki_audio_capture,
+                    "collect_vad_intervals",
+                    side_effect=AssertionError("live finish must not run batch VAD"),
+                ) as collect_intervals,
+                mock.patch.object(
+                    meki_audio_capture,
+                    "build_segments",
+                    side_effect=AssertionError("live finish must not rebuild batch segments"),
+                ) as build_segments,
+                mock.patch.object(
+                    meki_audio_capture,
+                    "create_recognizer",
+                    side_effect=AssertionError("live finish must not create a batch recognizer"),
+                ) as create_recognizer,
+                mock.patch.object(
+                    meki_audio_capture,
+                    "recognize_segments",
+                    side_effect=AssertionError("live finish must not run batch recognition"),
+                ) as recognize_segments,
+            ):
+                controller._finish_and_process(
+                    generation=1,
+                    record_thread=None,
+                    wav_path=session_dir / "capture.wav",
+                    session_work_dir=session_dir,
+                    session_id="live-session",
+                    session_options=session_options,
+                    realtime_session=live_session,
+                )
+
+        live_session.wait_for_completion.assert_called_once_with()
+        for batch_mock in (
+            models_for_processing,
+            wav_to_mono_16k,
+            collect_intervals,
+            build_segments,
+            create_recognizer,
+            recognize_segments,
+        ):
+            batch_mock.assert_not_called()
+        self.assertEqual(controller.state, "READY")
+        self.assertIn("실시간으로 일본어 2개", controller.status)
+        self.assertIsNone(controller.realtime_session)
+
+
+class RealtimeTranslationConfigTests(unittest.TestCase):
+    def test_config_endpoint_rejects_realtime_translation_setting(self) -> None:
+        controller = CaptureControllerTests._controller()
+        before = controller.health()
+        server = meki_audio_capture.ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            meki_audio_capture.make_handler(controller),
+        )
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+            connection.request(
+                "POST",
+                "/config",
+                body=json.dumps({"realtimeTranslation": True}).encode("utf-8"),
+                headers={"Content-Type": "application/json; charset=utf-8"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+            connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+        self.assertEqual(response.status, 409)
+        self.assertFalse(payload["ok"])
+        self.assertIn("MekiAudioCapture 창의 체크박스", payload["error"])
+        self.assertEqual(controller.health(), before)
 
 
 if __name__ == "__main__":

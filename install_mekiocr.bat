@@ -17,7 +17,7 @@ python -m pip install --upgrade pip==26.2.1
 if errorlevel 1 exit /b 1
 python -m pip install --upgrade --upgrade-strategy eager --requirement "%~dp0requirements-build.txt"
 if errorlevel 1 exit /b 1
-python -m pip install --force-reinstall --no-deps onnxruntime-gpu==1.28.0
+python -m pip install --force-reinstall --no-deps onnxruntime-gpu==1.30.0
 if errorlevel 1 exit /b 1
 
 echo 설치가 완료되었습니다.

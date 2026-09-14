@@ -1,16 +1,16 @@
-# Reproducible Windows build/runtime dependencies (verified 2026-08-10).
-pyinstaller==6.22.0
+# Reproducible Windows build/runtime dependencies (verified 2026-09-14).
+pyinstaller==6.22.3
 meikiocr==0.3.4
 mss==10.2.0
 pillow==12.3.0
-numpy==2.5.2
+numpy==2.5.3
 opencv-python-headless==5.0.0.93
 fastapi==0.141.1
-uvicorn[standard]==0.52.1
-pydantic==2.13.4
-typer==0.27.1
-huggingface-hub==1.27.0
-onnxruntime==1.28.0
-onnxruntime-gpu==1.28.0
-sherpa-onnx==1.13.4
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+typer==0.27.2
+huggingface-hub==1.31.0
+onnxruntime==1.30.0
+onnxruntime-gpu==1.30.0
+sherpa-onnx==1.13.8
 soundcard==0.4.6

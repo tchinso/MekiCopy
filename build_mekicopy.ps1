@@ -14,7 +14,7 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $PipVersion = "26.2.1"
 $RequirementsFile = Join-Path $PSScriptRoot "requirements-build.txt"
-$OnnxRuntimeGpuVersion = "1.28.0"
+$OnnxRuntimeGpuVersion = "1.30.0"
 
 function Test-BuildPython {
     param([Parameter(Mandatory = $true)][string]$Candidate)
@@ -567,19 +567,19 @@ root.update_idletasks()
 root.destroy()
 expected = {
     "meikiocr": "0.3.4",
-    "pyinstaller": "6.22.0",
+    "pyinstaller": "6.22.3",
     "mss": "10.2.0",
     "pillow": "12.3.0",
-    "numpy": "2.5.2",
+    "numpy": "2.5.3",
     "opencv-python-headless": "5.0.0.93",
     "fastapi": "0.141.1",
-    "uvicorn": "0.52.1",
-    "pydantic": "2.13.4",
-    "typer": "0.27.1",
-    "huggingface-hub": "1.27.0",
-    "onnxruntime": "1.28.0",
-    "onnxruntime-gpu": "1.28.0",
-    "sherpa-onnx": "1.13.4",
+    "uvicorn": "0.53.0",
+    "pydantic": "2.13.5",
+    "typer": "0.27.2",
+    "huggingface-hub": "1.31.0",
+    "onnxruntime": "1.30.0",
+    "onnxruntime-gpu": "1.30.0",
+    "sherpa-onnx": "1.13.8",
     "SoundCard": "0.4.6",
 }
 for package, wanted in expected.items():
@@ -1047,6 +1047,18 @@ if (-not $SkipSmokeTests) {
         $overlayerPort
 
     Invoke-ExeSmokeTest $audioCaptureExe @("--self-test")
+    if ($PackageFlavor -eq "Full") {
+        # Verify the copied, pre-downloaded STT/VAD assets from inside the
+        # frozen companion.  Lite intentionally has no model payload and
+        # retains its first-use download path instead.
+        Invoke-ExeSmokeTest $audioCaptureExe @("--self-test-models")
+        Invoke-ExeSmokeTest `
+            $audioCaptureExe `
+            @("--self-test-models", "--stt-model", "reazonspeech", "--precision", "int8")
+        Invoke-ExeSmokeTest `
+            $audioCaptureExe `
+            @("--self-test-models", "--stt-model", "reazonspeech", "--precision", "fp32")
+    }
     Invoke-ExeSmokeTest $scriptExe @("--self-test")
 
     $scriptPort = Get-FreeTcpPort
