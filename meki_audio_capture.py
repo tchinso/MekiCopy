@@ -21,6 +21,7 @@ import numpy as np
 import soundcard as sc
 
 from app_identity import apply_tk_icon, set_windows_app_id
+from companion_liveness import UiHeartbeat
 from audio_capture_core import (
     CAPTURE_SAMPLE_RATE,
     DEFAULT_STT_MODEL,
@@ -853,6 +854,14 @@ class CaptureController:
         generation: int,
         session_options: tuple[str, str, str, str, str, bool],
     ) -> None:
+        (
+            stt_model,
+            precision,
+            preset,
+            script_url,
+            hytrans_url,
+            realtime_translation,
+        ) = session_options
         session_work_dir: Path | None = None
         realtime_session: RealtimeTranslationSession | None = None
         try:
@@ -866,7 +875,6 @@ class CaptureController:
             wav_path = session_work_dir / "capture.wav"
             stop_event = threading.Event()
             if realtime_translation:
-                stt_model, precision, preset, script_url, hytrans_url, _ = session_options
                 self._set_status_for_session(generation, "실시간 음성 번역을 준비하고 있습니다…")
                 models = self._models_for_processing(
                     stt_model,
@@ -1312,11 +1320,20 @@ def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str,
     handler.wfile.write(data)
 
 
-def make_handler(controller: CaptureController):
+def make_handler(
+    controller: CaptureController,
+    ui_heartbeat: UiHeartbeat | None = None,
+):
+    def health_payload() -> dict[str, Any]:
+        payload = controller.health()
+        if ui_heartbeat is not None:
+            payload.update(ui_heartbeat.health_payload())
+        return payload
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             if self.path.split("?", 1)[0] == "/health":
-                _write_json(self, 200, controller.health())
+                _write_json(self, 200, health_payload())
             else:
                 _write_json(self, 404, {"ok": False, "error": "not found"})
 
@@ -1331,7 +1348,7 @@ def make_handler(controller: CaptureController):
                 else:
                     _write_json(self, 404, {"ok": False, "error": "not found"})
                     return
-                _write_json(self, 200, controller.health())
+                _write_json(self, 200, health_payload())
             except Exception as exc:
                 log_error("http_request", exc)
                 _write_json(self, 409, {"ok": False, "error": str(exc)})
@@ -1676,7 +1693,12 @@ def main() -> int:
         install_tk_exception_hook(root)
         apply_tk_icon(root)
         CaptureWindow(root, controller)
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(controller))
+        ui_heartbeat = UiHeartbeat()
+        ui_heartbeat.schedule(root)
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", args.port),
+            make_handler(controller, ui_heartbeat),
+        )
         server.daemon_threads = True
         server.block_on_close = False
         threading.Thread(target=server.serve_forever, daemon=True).start()

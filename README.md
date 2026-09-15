@@ -210,6 +210,10 @@ MekiAudioCapture 창의 `실시간 음성 번역(저사양에서 비권장)`은 
 
 `모든 도구 연결 상태 확인`으로 세 앱의 HTTP 응답과 HYTransWorker/번역 모델 준비 상태를 한 번에 확인할 수 있습니다. 음성 모델은 기본 EXE 배포본에 포함되지 않습니다. MekiAudioCapture 또는 MekiSubtitle를 처음 사용할 때 선택 모델과 VAD를 공식 sherpa-onnx 릴리스에서 공용 `MekiAudioCapture/models` 캐시로 준비하며, 유효한 모델이 이미 있으면 다운로드하지 않습니다.
 
+### 자동 복구 및 문제 해결
+
+MekiCopy가 직접 시작한 MekiAudioCapture·MekiScript·HYTrans·MekiOverlayer는 HTTP 응답을 감시하며, GUI 앱은 추가로 event-loop heartbeat도 확인합니다. 연속 실패하면 문제가 있는 프로세스만 종료 후 다시 시작합니다. 이때 진행 중인 녹음 또는 번역은 중단될 수 있으며, 사용자가 별도로 실행한 프로세스는 종료하거나 재시작하지 않습니다.
+
 기본 STT는 `sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8`입니다. Parakeet은 `model.int8.onnx`와 `tokens.txt`를 사용하는 NeMo CTC 모델로 16 kHz mono, feature dimension 80, greedy CPU 인식 경로를 사용합니다. 기존 ReazonSpeech transducer 모델도 선택할 수 있으며 FP32/INT8 옵션을 유지합니다.
 
 ---

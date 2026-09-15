@@ -84,6 +84,11 @@ from mekicopy_companions import (
     _validated_translation_text,
     request_translation_and_show,
 )
+from companion_watchdog import (
+    CompanionWatchdog,
+    RecoveryRequest,
+    default_health_evaluator,
+)
 from mekicopy_ocr import (
     OcrError,
     _get_ocr_engine,
@@ -651,6 +656,7 @@ class MainWindow(tk.Tk):
         self._hytrans_restart_process: subprocess.Popen | None = None
         self._hytrans_restart_old_port: int | None = None
         self._hytrans_restart_attempts = 0
+        self._hytrans_restart_notify = True
         self.overlayer_process: subprocess.Popen | None = None
         self.audio_capture_process: subprocess.Popen | None = None
         self.script_process: subprocess.Popen | None = None
@@ -671,10 +677,44 @@ class MainWindow(tk.Tk):
         self.capture_status_text = "캡처 준비"
         self._closing = False
         self._restoring_from_tray = False
+        # Only processes launched by this window are registered here.  That
+        # ownership boundary prevents one suite instance from killing another
+        # manually launched/external process which happens to share a port.
+        self._companion_watchdog = CompanionWatchdog(
+            interval_seconds=3.0,
+            health_timeout_seconds=0.75,
+            failures_before_recovery=3,
+            cooldown_seconds=20.0,
+            startup_grace_seconds=15.0,
+        )
+        self._companion_health_evaluators = {
+            "MekiAudioCapture": default_health_evaluator(
+                "MekiAudioCapture",
+                require_ui_responsive=True,
+                max_ui_heartbeat_age_seconds=7.0,
+            ),
+            "MekiScript": default_health_evaluator(
+                "MekiScript",
+                require_ui_responsive=True,
+                max_ui_heartbeat_age_seconds=7.0,
+            ),
+            "MekiOverlayer": default_health_evaluator(
+                "MekiOverlayer",
+                require_ui_responsive=True,
+                max_ui_heartbeat_age_seconds=7.0,
+            ),
+            # HYTrans is a headless service.  Its private browser worker has
+            # its own timeout/reopen path, while this monitor owns the server
+            # process and its HTTP responsiveness.
+            "HYTrans": default_health_evaluator("HYTrans"),
+        }
+        self._companion_watchdog_after_id: str | None = None
         self._build_ui()
         self.apply_settings(self.settings, persist=False)
         self.bind("<Unmap>", self._on_unmap)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._companion_watchdog.start()
+        self._schedule_companion_watchdog_poll()
 
     def _build_ui(self) -> None:
         header = tk.Label(
@@ -1281,6 +1321,8 @@ class MainWindow(tk.Tk):
         app_name: str,
         process: subprocess.Popen | None,
         base_url: str | None = None,
+        *,
+        notify: bool = True,
     ) -> None:
         if process is None:
             return
@@ -1294,16 +1336,17 @@ class MainWindow(tk.Tk):
                     "companion_exited_after_start",
                     f"{app_name} exit_code={exit_code}",
                 )
-                messagebox.showerror(
-                    "MekiCopy",
-                    (
-                        f"{app_name}가 시작 직후 종료되었습니다.\n\n"
-                        f"종료 코드: {exit_code}\n"
-                        "포트 충돌, 누락된 런타임, 손상된 설정이 원인일 수 있습니다. "
-                        "디버그 로그를 켜고 다시 실행하면 error_log/debug_log에 더 자세히 남습니다."
-                    ),
-                    parent=self,
-                )
+                if notify:
+                    messagebox.showerror(
+                        "MekiCopy",
+                        (
+                            f"{app_name}가 시작 직후 종료되었습니다.\n\n"
+                            f"종료 코드: {exit_code}\n"
+                            "포트 충돌, 누락된 런타임, 손상된 설정이 원인일 수 있습니다. "
+                            "디버그 로그를 켜고 다시 실행하면 error_log/debug_log에 더 자세히 남습니다."
+                        ),
+                        parent=self,
+                    )
                 return
             if not base_url:
                 return
@@ -1320,6 +1363,127 @@ class MainWindow(tk.Tk):
                 )
 
         self.after(1600, check)
+
+    def _track_owned_companion(
+        self,
+        app_name: str,
+        process: subprocess.Popen,
+        base_url: str,
+    ) -> None:
+        """Register only a child this MekiCopy instance just spawned."""
+
+        evaluator = self._companion_health_evaluators.get(app_name)
+        if evaluator is None:
+            raise ValueError(f"지원하지 않는 감시 대상입니다: {app_name}")
+        self._companion_watchdog.track(
+            app_name,
+            expected_app=app_name,
+            base_url=base_url,
+            process=process,
+            evaluator=evaluator,
+        )
+
+    def _schedule_companion_watchdog_poll(self) -> None:
+        if self._closing:
+            return
+        try:
+            self._companion_watchdog_after_id = self.after(
+                250,
+                self._poll_companion_watchdog,
+            )
+        except tk.TclError:
+            self._companion_watchdog_after_id = None
+
+    def _poll_companion_watchdog(self) -> None:
+        self._companion_watchdog_after_id = None
+        try:
+            if self._closing:
+                return
+            for request in self._companion_watchdog.drain_recovery_requests():
+                # Claiming also drops a queued failure when the companion has
+                # become healthy again before this UI callback runs.
+                if self._companion_watchdog.claim_recovery(request):
+                    self._recover_owned_companion(request)
+        finally:
+            self._schedule_companion_watchdog_poll()
+
+    def _recover_owned_companion(self, request: RecoveryRequest) -> None:
+        """Restart one unresponsive child without blocking the probe thread."""
+
+        process_attribute = {
+            "MekiAudioCapture": "audio_capture_process",
+            "MekiScript": "script_process",
+            "MekiOverlayer": "overlayer_process",
+            "HYTrans": "hytrans_process",
+        }.get(request.name)
+        if process_attribute is None:
+            self._companion_watchdog.acknowledge_recovery(request, succeeded=False)
+            return
+
+        process = getattr(self, process_attribute, None)
+        if not self._companion_watchdog.matches_process(request, process):
+            # Never use a stale window attribute to terminate a process.  This
+            # protects an independently launched replacement from a queued
+            # watchdog request whose original child was already replaced.
+            _log_runtime_message(
+                "companion_watchdog_recovery",
+                f"ignored stale ownership for {request.name}",
+            )
+            self._companion_watchdog.acknowledge_recovery(request, succeeded=False)
+            return
+        _log_runtime_message(
+            "companion_watchdog_recovery",
+            (
+                f"app={request.name}\nreason={request.reason}\n"
+                f"detail={request.detail}\nfailures={request.consecutive_failures}"
+            ),
+        )
+        self._set_capture_status(
+            f"{request.name} 응답 문제를 감지해 해당 프로그램만 자동 복구하고 있습니다…"
+        )
+
+        if request.name == "HYTrans":
+            # Do not call a loopback shutdown endpoint here: a dead child may
+            # have released its port to an unrelated local program.  The
+            # watchdog only ever terminates its own tracked Popen tree.
+            if _is_process_alive(process):
+                try:
+                    _terminate_process_tree(process)
+                except Exception as exc:
+                    _log_runtime_error("companion_watchdog_terminate", exc)
+            if _is_process_alive(process):
+                self._companion_watchdog.acknowledge_recovery(request, succeeded=False)
+                return
+            if getattr(self, process_attribute, None) is process:
+                setattr(self, process_attribute, None)
+            if self._launch_hytrans(restarted=True, notify=False):
+                # The new Popen registration makes this request stale.
+                return
+            self._companion_watchdog.acknowledge_recovery(request, succeeded=False)
+            return
+
+        if _is_process_alive(process):
+            try:
+                _terminate_process_tree(process)
+            except Exception as exc:
+                _log_runtime_error("companion_watchdog_terminate", exc)
+
+        # Do not overwrite a handle which taskkill could not actually stop.
+        if _is_process_alive(process):
+            self._companion_watchdog.acknowledge_recovery(request, succeeded=False)
+            return
+        if getattr(self, process_attribute, None) is process:
+            setattr(self, process_attribute, None)
+
+        restart = {
+            "MekiAudioCapture": self._launch_audio_capture,
+            "MekiScript": self._launch_script,
+            "MekiOverlayer": self._launch_overlayer,
+        }[request.name]
+        if restart(notify=False):
+            # The new Popen registration makes this request stale.
+            return
+        self._companion_watchdog.acknowledge_recovery(request, succeeded=False)
 
     def _script_config_payload(self) -> dict:
         return {
@@ -1402,10 +1566,17 @@ class MainWindow(tk.Tk):
                 return
         if self._tracked_process_is_starting("MekiScript", self.script_process):
             return
+
+        self._launch_script()
+
+    def _launch_script(self, *, notify: bool = True) -> bool:
         command = _find_companion_executable("MekiScript", "meki_script.py")
         if not command:
-            messagebox.showerror("MekiCopy", "MekiScript 실행 파일을 찾을 수 없습니다.", parent=self)
-            return
+            detail = "MekiScript 실행 파일을 찾을 수 없습니다."
+            _log_runtime_message("start_script", detail)
+            if notify:
+                messagebox.showerror("MekiCopy", detail, parent=self)
+            return False
         cfg = self._script_config_payload()
         command += [
             "--port", str(self.settings.script_port),
@@ -1428,11 +1599,21 @@ class MainWindow(tk.Tk):
                 "MekiScript",
                 self.script_process,
                 self._script_base_url(),
+                notify=notify,
             )
-            messagebox.showinfo("MekiCopy", "MekiScript를 실행했습니다.", parent=self)
+            self._track_owned_companion(
+                "MekiScript",
+                self.script_process,
+                self._script_base_url(),
+            )
+            if notify:
+                messagebox.showinfo("MekiCopy", "MekiScript를 실행했습니다.", parent=self)
+            return True
         except Exception as exc:
             _log_runtime_error("start_script", exc)
-            messagebox.showerror("MekiCopy", f"MekiScript 실행 실패:\n{exc}", parent=self)
+            if notify:
+                messagebox.showerror("MekiCopy", f"MekiScript 실행 실패:\n{exc}", parent=self)
+            return False
 
     def _on_start_audio_capture(self) -> None:
         try:
@@ -1455,10 +1636,17 @@ class MainWindow(tk.Tk):
             self.audio_capture_process,
         ):
             return
+
+        self._launch_audio_capture()
+
+    def _launch_audio_capture(self, *, notify: bool = True) -> bool:
         command = _find_companion_executable("MekiAudioCapture", "meki_audio_capture.py")
         if not command:
-            messagebox.showerror("MekiCopy", "MekiAudioCapture 실행 파일을 찾을 수 없습니다.", parent=self)
-            return
+            detail = "MekiAudioCapture 실행 파일을 찾을 수 없습니다."
+            _log_runtime_message("start_audio_capture", detail)
+            if notify:
+                messagebox.showerror("MekiCopy", detail, parent=self)
+            return False
         cfg = self._audio_capture_config_payload()
         command += [
             "--port", str(self.settings.audio_capture_port),
@@ -1477,11 +1665,21 @@ class MainWindow(tk.Tk):
                 "MekiAudioCapture",
                 self.audio_capture_process,
                 self._audio_capture_base_url(),
+                notify=notify,
             )
-            messagebox.showinfo("MekiCopy", "MekiAudioCapture를 실행했습니다.", parent=self)
+            self._track_owned_companion(
+                "MekiAudioCapture",
+                self.audio_capture_process,
+                self._audio_capture_base_url(),
+            )
+            if notify:
+                messagebox.showinfo("MekiCopy", "MekiAudioCapture를 실행했습니다.", parent=self)
+            return True
         except Exception as exc:
             _log_runtime_error("start_audio_capture", exc)
-            messagebox.showerror("MekiCopy", f"MekiAudioCapture 실행 실패:\n{exc}", parent=self)
+            if notify:
+                messagebox.showerror("MekiCopy", f"MekiAudioCapture 실행 실패:\n{exc}", parent=self)
+            return False
 
     def _on_test_audio_connection(self) -> None:
         services = (
@@ -1595,19 +1793,23 @@ class MainWindow(tk.Tk):
 
         return self._launch_hytrans()
 
-    def _launch_hytrans(self, *, restarted: bool = False) -> bool:
-        if self._tracked_process_is_starting("HYTrans", self.hytrans_process):
+    def _launch_hytrans(self, *, restarted: bool = False, notify: bool = True) -> bool:
+        already_starting = (
+            self._tracked_process_is_starting("HYTrans", self.hytrans_process)
+            if notify
+            else _is_process_alive(self.hytrans_process)
+        )
+        if already_starting:
             # A tracked process is an in-flight successful launch, not a
             # launch failure.  Callers such as MekiSubtitle can safely wait
             # for its /ready endpoint instead of abandoning their job.
             return True
         command = _find_companion_executable("HYTrans", "hytrans_main.py")
         if not command:
-            messagebox.showerror(
-                "MekiCopy",
-                "HYTrans 실행 파일을 찾을 수 없습니다.",
-                parent=self,
-            )
+            detail = "HYTrans 실행 파일을 찾을 수 없습니다."
+            _log_runtime_message("start_hytrans", detail)
+            if notify:
+                messagebox.showerror("MekiCopy", detail, parent=self)
             return False
 
         command += [
@@ -1631,20 +1833,34 @@ class MainWindow(tk.Tk):
                 "HYTrans",
                 self.hytrans_process,
                 self._hytrans_base_url(),
+                notify=notify,
+            )
+            self._track_owned_companion(
+                "HYTrans",
+                self.hytrans_process,
+                self._hytrans_base_url(),
             )
             action = "재시작했습니다" if restarted else "실행했습니다"
-            messagebox.showinfo(
-                "MekiCopy",
-                f"HYTrans 서버를 {action}.\n번역 모델: {self.settings.hytrans_model_id}",
-                parent=self,
-            )
+            if notify:
+                messagebox.showinfo(
+                    "MekiCopy",
+                    f"HYTrans 서버를 {action}.\n번역 모델: {self.settings.hytrans_model_id}",
+                    parent=self,
+                )
             return True
         except Exception as exc:
             _log_runtime_error("start_hytrans", exc)
-            messagebox.showerror("MekiCopy", f"HYTrans 실행 실패:\n{exc}", parent=self)
+            if notify:
+                messagebox.showerror("MekiCopy", f"HYTrans 실행 실패:\n{exc}", parent=self)
             return False
 
-    def _begin_hytrans_restart(self, old_port: int, reason: str) -> bool:
+    def _begin_hytrans_restart(
+        self,
+        old_port: int,
+        reason: str,
+        *,
+        notify: bool = True,
+    ) -> bool:
         if self._hytrans_restart_after_id is not None:
             return True
 
@@ -1671,6 +1887,12 @@ class MainWindow(tk.Tk):
         if not service_running and tracked_process is None:
             return False
 
+        # The old child is intentionally being stopped.  Do not let its
+        # expected health failure race the settings-driven replacement.
+        watchdog = getattr(self, "_companion_watchdog", None)
+        if watchdog is not None:
+            watchdog.untrack("HYTrans")
+
         if service_running:
             try:
                 _json_request(
@@ -1687,14 +1909,15 @@ class MainWindow(tk.Tk):
             except Exception as exc:
                 _log_runtime_error("restart_hytrans_shutdown", exc)
                 if tracked_process is None:
-                    messagebox.showerror(
-                        "MekiCopy",
-                        (
-                            "실행 중인 HYTrans에 종료를 요청하지 못해 자동 재시작할 수 "
-                            "없습니다. HYTrans를 닫은 뒤 다시 실행해 주세요."
-                        ),
-                        parent=self,
-                    )
+                    if notify:
+                        messagebox.showerror(
+                            "MekiCopy",
+                            (
+                                "실행 중인 HYTrans에 종료를 요청하지 못해 자동 재시작할 수 "
+                                "없습니다. HYTrans를 닫은 뒤 다시 실행해 주세요."
+                            ),
+                            parent=self,
+                        )
                     return False
                 _terminate_process_tree(tracked_process)
         elif tracked_process is not None:
@@ -1707,6 +1930,7 @@ class MainWindow(tk.Tk):
         self._hytrans_restart_process = tracked_process
         self._hytrans_restart_old_port = old_port
         self._hytrans_restart_attempts = 0
+        self._hytrans_restart_notify = notify
         self._hytrans_restart_after_id = self.after(100, self._poll_hytrans_restart)
         return True
 
@@ -1727,7 +1951,10 @@ class MainWindow(tk.Tk):
             self._hytrans_restart_process = None
             self._hytrans_restart_old_port = None
             self._hytrans_restart_attempts = 0
-            self._launch_hytrans(restarted=True)
+            self._launch_hytrans(
+                restarted=True,
+                notify=getattr(self, "_hytrans_restart_notify", True),
+            )
             return
 
         # Give graceful shutdown time to close the private worker and Uvicorn. If a
@@ -1742,11 +1969,17 @@ class MainWindow(tk.Tk):
             self._hytrans_restart_process = None
             self._hytrans_restart_old_port = None
             self._hytrans_restart_attempts = 0
-            messagebox.showerror(
-                "MekiCopy",
-                "기존 HYTrans가 종료되지 않아 재시작하지 못했습니다.",
-                parent=self,
-            )
+            if getattr(self, "_hytrans_restart_notify", True):
+                messagebox.showerror(
+                    "MekiCopy",
+                    "기존 HYTrans가 종료되지 않아 재시작하지 못했습니다.",
+                    parent=self,
+                )
+            else:
+                _log_runtime_message(
+                    "restart_hytrans",
+                    "watchdog recovery could not stop the previous HYTrans process",
+                )
             return
 
         self._hytrans_restart_after_id = self.after(250, self._poll_hytrans_restart)
@@ -1770,14 +2003,17 @@ class MainWindow(tk.Tk):
 
         if self._tracked_process_is_starting("MekiOverlayer", self.overlayer_process):
             return
+
+        self._launch_overlayer()
+
+    def _launch_overlayer(self, *, notify: bool = True) -> bool:
         command = _find_companion_executable("MekiOverlayer", "meki_overlayer.py")
         if not command:
-            messagebox.showerror(
-                "MekiCopy",
-                "MekiOverlayer 실행 파일을 찾을 수 없습니다.",
-                parent=self,
-            )
-            return
+            detail = "MekiOverlayer 실행 파일을 찾을 수 없습니다."
+            _log_runtime_message("start_overlayer", detail)
+            if notify:
+                messagebox.showerror("MekiCopy", detail, parent=self)
+            return False
 
         cfg = self._overlayer_config_payload()
         command += [
@@ -1815,11 +2051,21 @@ class MainWindow(tk.Tk):
                 "MekiOverlayer",
                 self.overlayer_process,
                 self._overlayer_base_url(),
+                notify=notify,
             )
-            messagebox.showinfo("MekiCopy", "MekiOverlayer를 실행했습니다.", parent=self)
+            self._track_owned_companion(
+                "MekiOverlayer",
+                self.overlayer_process,
+                self._overlayer_base_url(),
+            )
+            if notify:
+                messagebox.showinfo("MekiCopy", "MekiOverlayer를 실행했습니다.", parent=self)
+            return True
         except Exception as exc:
             _log_runtime_error("start_overlayer", exc)
-            messagebox.showerror("MekiCopy", f"MekiOverlayer 실행 실패:\n{exc}", parent=self)
+            if notify:
+                messagebox.showerror("MekiCopy", f"MekiOverlayer 실행 실패:\n{exc}", parent=self)
+            return False
 
     def _on_test_overlay_connection(self, parent: tk.Misc | None = None) -> None:
         owner = parent or self
@@ -2113,6 +2359,13 @@ class MainWindow(tk.Tk):
             ):
                 return
         self._closing = True
+        if self._companion_watchdog_after_id is not None:
+            try:
+                self.after_cancel(self._companion_watchdog_after_id)
+            except tk.TclError:
+                pass
+            self._companion_watchdog_after_id = None
+        self._companion_watchdog.stop()
         if subtitle_window is not None and subtitle_window.winfo_exists():
             subtitle_window.cancel_for_parent_shutdown()
         if self._hytrans_restart_after_id is not None:

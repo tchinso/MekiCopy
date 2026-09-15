@@ -38,6 +38,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from app_identity import apply_tk_icon, set_windows_app_id
+from companion_liveness import UiHeartbeat
 from service_ports import OVERLAYER_DEFAULT_PORT
 from system_logging import (
     capture_windowed_streams,
@@ -348,20 +349,25 @@ def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str,
     handler.wfile.write(data)
 
 
-def make_handler(app_ref: OverlayerApp):
+def make_handler(
+    app_ref: OverlayerApp,
+    ui_heartbeat: UiHeartbeat | None = None,
+):
+    def health_payload() -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": True,
+            "app": "MekiOverlayer",
+            "text": getattr(app_ref, "last_text", ""),
+        }
+        if ui_heartbeat is not None:
+            payload.update(ui_heartbeat.health_payload())
+        return payload
+
     class OverlayerHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/health":
-                _write_json(
-                    self,
-                    200,
-                    {
-                        "ok": True,
-                        "app": "MekiOverlayer",
-                        "text": getattr(app_ref, "last_text", ""),
-                    },
-                )
+                _write_json(self, 200, health_payload())
                 return
             if parsed.path == "/show":
                 query = parse_qs(parsed.query)
@@ -454,10 +460,12 @@ def main() -> int:
         install_tk_exception_hook(root)
         apply_tk_icon(root)
         app_ref = OverlayerApp(root, config)
+        ui_heartbeat = UiHeartbeat()
+        ui_heartbeat.schedule(root)
         try:
             server = ThreadingHTTPServer(
                 ("127.0.0.1", args.port),
-                make_handler(app_ref),
+                make_handler(app_ref, ui_heartbeat),
             )
         except OSError as exc:
             raise RuntimeError(

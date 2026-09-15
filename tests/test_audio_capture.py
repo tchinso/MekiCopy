@@ -324,6 +324,64 @@ class CaptureControllerTests(unittest.TestCase):
             start_thread.join(timeout=1)
             self.assertFalse(start_thread.is_alive())
 
+    def test_default_start_passes_a_disabled_realtime_flag_to_the_worker(self) -> None:
+        controller = self._controller()
+        entered = threading.Event()
+        release = threading.Event()
+        received: list[tuple[int, tuple[str, str, str, str, str, bool]]] = []
+
+        def hold_start(
+            generation: int,
+            session_options: tuple[str, str, str, str, str, bool],
+        ) -> None:
+            received.append((generation, session_options))
+            entered.set()
+            release.wait(timeout=2)
+
+        with mock.patch.object(controller, "_start_recording", side_effect=hold_start):
+            controller.start()
+            self.assertTrue(entered.wait(timeout=1))
+            start_thread = controller.start_thread
+            self.assertIsNotNone(start_thread)
+            release.set()
+            assert start_thread is not None
+            start_thread.join(timeout=1)
+
+        self.assertEqual(len(received), 1)
+        self.assertFalse(received[0][1][-1])
+
+    def test_standard_start_unpacks_the_realtime_flag_before_using_it(self) -> None:
+        controller = self._controller()
+        controller._session_generation = 1
+        controller.state = "STARTING"
+        session_options = (
+            controller.stt_model,
+            controller.precision,
+            controller.preset,
+            controller.script_url,
+            controller.hytrans_url,
+            False,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            record_thread = mock.Mock()
+            with (
+                mock.patch.object(meki_audio_capture, "work_dir", return_value=Path(temporary)),
+                mock.patch.object(
+                    meki_audio_capture.shutil,
+                    "disk_usage",
+                    return_value=types.SimpleNamespace(
+                        free=meki_audio_capture.MIN_RECORDING_FREE_BYTES
+                    ),
+                ),
+                mock.patch.object(meki_audio_capture.threading, "Thread", return_value=record_thread),
+            ):
+                controller._start_recording(1, session_options)
+
+        record_thread.start.assert_called_once_with()
+        self.assertEqual(controller.state, "RECORDING")
+        self.assertIn("컴퓨터 소리를 녹음", controller.status)
+
     def test_new_start_waits_for_an_aborted_live_session_to_exit(self) -> None:
         controller = self._controller()
         previous_session = mock.Mock()
@@ -720,6 +778,53 @@ class RealtimeTranslationSessionTests(unittest.TestCase):
 
         self.assertEqual(delivered, ["entry-1:안녕하세요"])
         self.assertEqual(summary.translation_failures, 0)
+
+    def test_repeated_translation_failures_skip_remaining_items_and_finish(self) -> None:
+        session = self._session()
+        session._started = True
+        deliveries: list[tuple[str, str]] = []
+
+        def set_translation(
+            _script_url: str,
+            _result: object,
+            text: str,
+            *,
+            entry_id: str | None = None,
+        ) -> None:
+            deliveries.append((str(entry_id), text))
+
+        with (
+            mock.patch.object(
+                meki_audio_capture,
+                "translate_text",
+                side_effect=RuntimeError("HYTrans unavailable"),
+            ) as translate_text,
+            mock.patch.object(
+                meki_audio_capture,
+                "set_script_translation",
+                side_effect=set_translation,
+            ),
+        ):
+            for index in range(3):
+                session._translation_queue.put_nowait((self._result(index + 1), f"entry-{index + 1}"))
+            session._translation_input_closed.set()
+            session._translation_thread.start()
+            summary = session.wait_for_completion()
+
+        self.assertEqual(translate_text.call_count, 2)
+        self.assertEqual(
+            deliveries,
+            [
+                ("entry-1", "[번역 실패] HYTrans unavailable"),
+                ("entry-2", "[번역 실패] HYTrans unavailable"),
+                (
+                    "entry-3",
+                    "[번역 건너뜀] HYTrans가 연속으로 응답하지 않아 나머지 요청을 중단했습니다.",
+                ),
+            ],
+        )
+        self.assertEqual(summary.translation_failures, 3)
+        self.assertFalse(session._translation_thread.is_alive())
 
     def test_live_finish_waits_for_session_without_entering_batch_pipeline(self) -> None:
         controller = CaptureControllerTests._controller()

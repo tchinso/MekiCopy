@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from app_identity import apply_tk_icon, set_windows_app_id
+from companion_liveness import UiHeartbeat
 from runtime_paths import prepare_tk_environment
 from service_ports import SCRIPT_DEFAULT_PORT
 from system_logging import (
@@ -196,22 +197,27 @@ def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str,
     handler.wfile.write(data)
 
 
-def make_handler(window: ScriptWindow):
+def make_handler(
+    window: ScriptWindow,
+    ui_heartbeat: UiHeartbeat | None = None,
+):
+    def health_payload() -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": True,
+            "app": "MekiScript",
+            "entries": len(window.entry_ids),
+            "translationCount": window.translation_count,
+            "lastOriginal": window.last_original,
+            "lastTranslation": window.last_translation,
+        }
+        if ui_heartbeat is not None:
+            payload.update(ui_heartbeat.health_payload())
+        return payload
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             if self.path.split("?", 1)[0] == "/health":
-                _write_json(
-                    self,
-                    200,
-                    {
-                        "ok": True,
-                        "app": "MekiScript",
-                        "entries": len(window.entry_ids),
-                        "translationCount": window.translation_count,
-                        "lastOriginal": window.last_original,
-                        "lastTranslation": window.last_translation,
-                    },
-                )
+                _write_json(self, 200, health_payload())
             else:
                 _write_json(self, 404, {"ok": False, "error": "not found"})
 
@@ -298,7 +304,12 @@ def main() -> int:
     install_tk_exception_hook(root)
     apply_tk_icon(root)
     window = ScriptWindow(root, config)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(window))
+    ui_heartbeat = UiHeartbeat()
+    ui_heartbeat.schedule(root)
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", args.port),
+        make_handler(window, ui_heartbeat),
+    )
     server.daemon_threads = True
     server.block_on_close = False
     threading.Thread(target=server.serve_forever, daemon=True).start()
