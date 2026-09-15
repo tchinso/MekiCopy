@@ -804,9 +804,31 @@ Assert-RuntimeAssetManifest `
     -AssetsRoot (Join-Path $hyTransRoot "_internal\assets") `
     -Description "Bundled HYTrans"
 
-# When a complete source-side HYTrans model already exists, publish it beside
-# HYTrans.exe. Neither model is required to build a release: missing models are
-# downloaded directly into the same HYTrans\models path on first launch.
+if ($PackageFlavor -eq "Lite") {
+    # Lite deliberately omits all pre-downloaded model payloads. Check the
+    # companion roots directly so a warmed developer cache cannot leak into it.
+    foreach ($liteModelRoot in @(
+        (Join-Path $mekiCopyRoot "_internal\runtime_models"),
+        (Join-Path $hyTransRoot "models"),
+        (Join-Path $audioCaptureRoot "models")
+    )) {
+        if (Test-Path -LiteralPath $liteModelRoot -PathType Container) {
+            $modelFile = Get-ChildItem `
+                -LiteralPath $liteModelRoot `
+                -Recurse `
+                -File `
+                -ErrorAction Stop |
+                Select-Object -First 1
+            if ($modelFile) {
+                throw "Lite package unexpectedly contains a model file: $($modelFile.FullName)"
+            }
+        }
+    }
+}
+
+# Only Full may receive a prepared source-side HYTrans cache. Lite must remain
+# download-on-first-use even when a developer's source checkout is warmed.
+if ($PackageFlavor -eq "Full") {
 $verifyPreparedHyTransModels = @'
 import json
 from pathlib import Path
@@ -896,6 +918,7 @@ foreach ($preparedModel in $hyTransPreparedModels) {
         }
     }
     Write-Host "Prepared local HYTrans model: $hyTransModelTarget"
+}
 }
 
 if ($PackageFlavor -eq "Full") {
@@ -1016,6 +1039,7 @@ if (-not $SkipSmokeTests) {
     Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-detached-button")
     Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-detached-survival")
 
+    $expectedHyTransModelMode = if ($PackageFlavor -eq "Full") { "local" } else { "remote" }
     $hyTransPort = Get-FreeTcpPort
     Invoke-HealthSmokeTest `
         -ExePath $hyTransExe `
@@ -1025,6 +1049,7 @@ if (-not $SkipSmokeTests) {
             modelId = "onnx-community/HY-MT1.5-1.8B-ONNX"
             dtype = "q4"
             hasLocalWasm = $true
+            modelMode = $expectedHyTransModelMode
         } `
         -GracefulShutdown
 
@@ -1037,6 +1062,7 @@ if (-not $SkipSmokeTests) {
             modelId = "tchinso/Hy-MT2-1.8B-onnx-q4f16"
             dtype = "q4f16"
             hasLocalWasm = $true
+            modelMode = $expectedHyTransModelMode
         } `
         -GracefulShutdown
 

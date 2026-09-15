@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import hytrans_main
+from hytrans import app as hytrans_app
 from hytrans import config, model_files, paths
 from hytrans.browser import BrowserManager
 
@@ -28,6 +29,46 @@ class HytransDefaultsTests(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["HYTrans.exe", "--no-worker"]):
             alias = hytrans_main.parse_args()
         self.assertTrue(alias.no_browser)
+
+
+class RealtimeTranslationTuningTests(unittest.IsolatedAsyncioTestCase):
+    async def test_realtime_uses_a_shorter_per_request_generation_budget(self) -> None:
+        original_ready = hytrans_app.state.worker_ready
+        original_state = hytrans_app.state.state
+        original_error = hytrans_app.state.error
+        hytrans_app.state.worker_ready = True
+        try:
+            with mock.patch.object(
+                hytrans_app.translation_queue,
+                "submit",
+                new=mock.AsyncMock(return_value="번역"),
+            ) as submit:
+                self.assertEqual(
+                    await hytrans_app._translate_text("こんにちは", realtime=True),
+                    "번역",
+                )
+                self.assertEqual(
+                    await hytrans_app._translate_text("こんにちは"),
+                    "번역",
+                )
+        finally:
+            hytrans_app.state.worker_ready = original_ready
+            hytrans_app.state.state = original_state
+            hytrans_app.state.error = original_error
+
+        realtime_kwargs = submit.await_args_list[0].kwargs
+        standard_kwargs = submit.await_args_list[1].kwargs
+        self.assertEqual(
+            realtime_kwargs["max_new_tokens"],
+            config.realtime_max_new_tokens(len("こんにちは")),
+        )
+        self.assertLess(realtime_kwargs["max_new_tokens"], config.MAX_NEW_TOKENS)
+        self.assertEqual(standard_kwargs["max_new_tokens"], config.MAX_NEW_TOKENS)
+
+    def test_realtime_generation_budget_scales_without_reaching_bulk_default(self) -> None:
+        self.assertEqual(config.realtime_max_new_tokens(0), 128)
+        self.assertEqual(config.realtime_max_new_tokens(100), 264)
+        self.assertEqual(config.realtime_max_new_tokens(1_000), 768)
 
 
 class PrivateWorkerTests(unittest.TestCase):

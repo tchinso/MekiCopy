@@ -250,10 +250,23 @@ def set_script_translation(
     )
 
 
-def translate_text(hytrans_url: str, text: str, timeout: float = 650.0) -> str:
+def translate_text(
+    hytrans_url: str,
+    text: str,
+    timeout: float = 650.0,
+    *,
+    realtime: bool = False,
+) -> str:
+    """Translate text through HYTrans, optionally using its live-tuning path."""
+
+    payload = {"text": text}
+    if realtime:
+        # HYTrans uses this hint to keep a short spoken utterance from being
+        # given the same 2,048-token generation budget as a bulk request.
+        payload["realtime"] = True
     response = _post_json(
         f"{hytrans_url.rstrip('/')}/translate?format=json",
-        {"text": text},
+        payload,
         timeout=timeout,
     )
     return str(response.get("text", "")).strip()

@@ -20,6 +20,7 @@ from .config import (
     MAX_INPUT_CHARS,
     MAX_NEW_TOKENS,
     options,
+    realtime_max_new_tokens,
     runtime_config,
     translation_timeout_seconds,
 )
@@ -64,6 +65,7 @@ class ModelFileResponse(FileResponse):
 class TranslateBody(BaseModel):
     text: str
     overlayUrl: str | None = None
+    realtime: bool = False
 
 
 class ClientLogBody(BaseModel):
@@ -181,7 +183,7 @@ async def _send_to_overlay(text: str, overlay_url: str | None = None) -> None:
     await asyncio.to_thread(_post_overlay_text, target, text)
 
 
-async def _translate_text(text: str) -> str:
+async def _translate_text(text: str, *, realtime: bool = False) -> str:
     if not state.worker_ready:
         error(
             "translate_not_ready",
@@ -193,16 +195,26 @@ async def _translate_text(text: str) -> str:
         raise HTTPException(status_code=503, detail="model is not ready")
     try:
         state.state = "BUSY"
+        max_new_tokens = (
+            realtime_max_new_tokens(len(text)) if realtime else MAX_NEW_TOKENS
+        )
         result = await translation_queue.submit(
             text=text,
             timeout=translation_timeout_seconds(len(text)),
+            max_new_tokens=max_new_tokens,
         )
         result = result.strip()
         if not result:
             raise RuntimeError("translation worker returned an empty result")
         state.state = "READY"
         state.error = None
-        debug("translation_success", f"input_chars: {len(text)}\noutput_chars: {len(result)}")
+        debug(
+            "translation_success",
+            (
+                f"input_chars: {len(text)}\noutput_chars: {len(result)}\n"
+                f"max_new_tokens: {max_new_tokens}\nrealtime: {realtime}"
+            ),
+        )
         return result
     except asyncio.TimeoutError:
         state.error = "translation timeout"
@@ -238,7 +250,7 @@ async def on_startup() -> None:
     global queue_task
     state.state = "STARTING"
     queue_task = asyncio.create_task(
-        translation_queue.run(max_new_tokens=MAX_NEW_TOKENS)
+        translation_queue.run(default_max_new_tokens=MAX_NEW_TOKENS)
     )
     profile = active_model_profile()
     debug("startup", f"model: {profile.model_id}\nport: {options.port}")
@@ -414,7 +426,7 @@ async def translate_post(
     format: str = "text",
 ) -> PlainTextResponse | dict[str, object]:
     clean_text = _validate_text(body.text)
-    result = await _translate_text(clean_text)
+    result = await _translate_text(clean_text, realtime=body.realtime)
     if format == "json":
         return _json_response(True, result)
     return PlainTextResponse(result, media_type="text/plain; charset=utf-8")
@@ -423,7 +435,7 @@ async def translate_post(
 @app.post("/translate-and-show")
 async def translate_and_show(body: TranslateBody) -> dict[str, object]:
     clean_text = _validate_text(body.text)
-    result = await _translate_text(clean_text)
+    result = await _translate_text(clean_text, realtime=body.realtime)
     try:
         await _send_to_overlay(result, body.overlayUrl)
     except Exception as exc:

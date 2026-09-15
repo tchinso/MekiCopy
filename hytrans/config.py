@@ -28,6 +28,12 @@ REQUIRED_Q4_MODEL_FILES = REQUIRED_MODEL_FILES
 SOURCE_LANG = "Japanese"
 TARGET_LANG = "Korean"
 MAX_NEW_TOKENS = 2048
+# Live speech arrives as short, frequent utterances. Giving every one the
+# bulk-translation ceiling lets a malformed/non-terminating generation hold
+# the only browser worker far longer than useful. Scale the output budget with
+# the utterance while leaving the normal API's 2,048-token ceiling alone.
+REALTIME_MIN_NEW_TOKENS = 128
+REALTIME_MAX_NEW_TOKENS = 768
 HOST = "127.0.0.1"
 DEFAULT_PORT = HYTRANS_DEFAULT_PORT
 DEFAULT_OVERLAY_URL = f"http://127.0.0.1:{OVERLAYER_DEFAULT_PORT}/show"
@@ -64,6 +70,16 @@ def translation_timeout_seconds(input_chars: int) -> int:
     # minutes so malformed or stuck workers are still eventually recycled.
     input_allowance = min(180, math.ceil(max(0, input_chars) / 50))
     return min(MAX_TRANSLATE_TIMEOUT_SECONDS, base + input_allowance)
+
+
+def realtime_max_new_tokens(input_chars: int) -> int:
+    """Return a generous, bounded generation budget for spoken utterances."""
+
+    estimated = 64 + max(0, int(input_chars)) * 2
+    return min(
+        REALTIME_MAX_NEW_TOKENS,
+        max(REALTIME_MIN_NEW_TOKENS, estimated),
+    )
 
 
 class RuntimeConfig(BaseModel):

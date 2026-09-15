@@ -17,6 +17,7 @@ class TranslationJob:
     text: str
     future: asyncio.Future[str]
     created_at: float
+    max_new_tokens: int | None = None
     abandoned: bool = False
     worker_ws: Any = None
 
@@ -154,7 +155,13 @@ class TranslationQueue:
         except Exception as exc:
             debug("worker_close_after_timeout", str(exc))
 
-    async def submit(self, text: str, timeout: int) -> str:
+    async def submit(
+        self,
+        text: str,
+        timeout: int,
+        *,
+        max_new_tokens: int | None = None,
+    ) -> str:
         if not self.worker_available:
             raise RuntimeError("worker is not connected")
         loop = asyncio.get_running_loop()
@@ -163,9 +170,16 @@ class TranslationQueue:
             text=text,
             future=loop.create_future(),
             created_at=time.time(),
+            max_new_tokens=max_new_tokens,
         )
         await self.queue.put(job)
-        debug("queue_submit", f"id: {job.id}\nchars: {len(text)}")
+        debug(
+            "queue_submit",
+            (
+                f"id: {job.id}\nchars: {len(text)}\n"
+                f"max_new_tokens: {max_new_tokens or 'default'}"
+            ),
+        )
         try:
             # wait_for cancels its awaitable on timeout. Shielding leaves the
             # job future under queue ownership so the timeout path can either
@@ -190,7 +204,7 @@ class TranslationQueue:
             error("translation_timeout", f"id: {job.id}, chars: {len(text)}")
             raise
 
-    async def run(self, max_new_tokens: int) -> None:
+    async def run(self, default_max_new_tokens: int) -> None:
         self.running = True
         try:
             while self.running:
@@ -209,7 +223,7 @@ class TranslationQueue:
                         "type": "translate",
                         "id": job.id,
                         "text": job.text,
-                        "max_new_tokens": max_new_tokens,
+                        "max_new_tokens": job.max_new_tokens or default_max_new_tokens,
                     }
                     await worker.send_text(json.dumps(payload, ensure_ascii=False))
                     await asyncio.shield(job.future)

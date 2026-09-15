@@ -95,7 +95,11 @@ AUDIO_TRANSLATION_TIMEOUT_SECONDS = 300
 MAX_TRANSLATION_SESSION_SECONDS = 30 * 60
 MAX_CONSECUTIVE_TRANSLATION_FAILURES = 2
 REALTIME_STT_QUEUE_MAX_SEGMENTS = 24
-REALTIME_TRANSLATION_QUEUE_MAX_SEGMENTS = 24
+# STT items retain raw PCM, so that queue intentionally stays small. A
+# translation item only holds text and timing metadata; this provides a
+# substantial multi-hour cushion even when FAST produces short turns.
+REALTIME_TRANSLATION_QUEUE_MAX_SEGMENTS = 65_536
+REALTIME_TRANSLATION_QUEUE_WARNING_SEGMENTS = 64
 _SESSION_DIRECTORY_PATTERN = re.compile(r"^\d{8}-\d{6}-\d{6}$")
 _WORK_SWEEP_LOCK = threading.Lock()
 _WORK_SWEEP_DONE = False
@@ -145,6 +149,7 @@ class RealtimeTranslationSummary:
     translation_failures: int
     dropped_segments: int
     fatal_error: str = ""
+    max_translation_backlog: int = 0
 
 
 class RealtimeTranslationSession:
@@ -206,10 +211,11 @@ class RealtimeTranslationSession:
         self._dropped_segments = 0
         self._fatal_error = ""
         self._last_overload_report = 0.0
-        # A live recording may legitimately last hours.  Start the aggregate
-        # translation drain limit only after recording has closed, rather than
-        # silently dropping otherwise healthy live translations after 30 min.
-        self._translation_deadline: float | None = None
+        self._last_backlog_report = 0.0
+        self._max_translation_backlog = 0
+        # A live recording may legitimately last hours. Successful queued
+        # translations drain after Stop; individual request timeouts and the
+        # consecutive-failure guard still stop a broken HYTrans worker.
         self._consecutive_translation_failures = 0
 
     def start(self) -> None:
@@ -267,10 +273,8 @@ class RealtimeTranslationSession:
                 self._vad.flush()
                 self._drain_vad()
             finally:
-                # The current live translation may continue indefinitely while
-                # recording.  Only its remaining post-recording drain receives
-                # the same 30-minute aggregate limit as batch translation.
-                self._translation_deadline = time.monotonic() + MAX_TRANSLATION_SESSION_SECONDS
+                # The translation worker polls this event and drains every
+                # successfully queued live utterance in order.
                 self._stt_input_closed.set()
 
     def abort(self) -> None:
@@ -293,6 +297,7 @@ class RealtimeTranslationSession:
                 translation_failures=self._translation_failures,
                 dropped_segments=self._dropped_segments,
                 fatal_error=self._fatal_error,
+                max_translation_backlog=self._max_translation_backlog,
             )
 
     def has_active_workers(self) -> bool:
@@ -452,6 +457,23 @@ class RealtimeTranslationSession:
             return
         try:
             self._translation_queue.put_nowait((result, entry_id))
+            backlog = self._translation_queue.qsize()
+            with self._stats_lock:
+                self._max_translation_backlog = max(
+                    self._max_translation_backlog,
+                    backlog,
+                )
+                now = time.monotonic()
+                report_backlog = (
+                    backlog >= REALTIME_TRANSLATION_QUEUE_WARNING_SEGMENTS
+                    and now - self._last_backlog_report >= 2.0
+                )
+                if report_backlog:
+                    self._last_backlog_report = now
+            if report_backlog:
+                self._report_live_status(
+                    f"실시간 음성 번역: 번역 대기 {backlog}개를 순서대로 처리하고 있습니다…"
+                )
         except queue.Full:
             with self._stats_lock:
                 self._translation_failures += 1
@@ -484,11 +506,7 @@ class RealtimeTranslationSession:
                 if self._aborted.is_set():
                     break
                 result, entry_id = item
-                deadline = self._translation_deadline
-                if deadline is not None and time.monotonic() >= deadline:
-                    translated = "[번역 건너뜀] 이번 녹음의 전체 번역 제한 시간(30분)을 초과했습니다."
-                    failed = True
-                elif self._consecutive_translation_failures >= MAX_CONSECUTIVE_TRANSLATION_FAILURES:
+                if self._consecutive_translation_failures >= MAX_CONSECUTIVE_TRANSLATION_FAILURES:
                     translated = "[번역 건너뜀] HYTrans가 연속으로 응답하지 않아 나머지 요청을 중단했습니다."
                     failed = True
                 else:
@@ -497,6 +515,7 @@ class RealtimeTranslationSession:
                             self.hytrans_url,
                             result.text_ja,
                             timeout=AUDIO_TRANSLATION_TIMEOUT_SECONDS,
+                            realtime=True,
                         )
                         if not translated:
                             raise RuntimeError("HYTrans가 빈 번역 결과를 반환했습니다.")
@@ -528,7 +547,11 @@ class RealtimeTranslationSession:
                 if self._aborted.is_set():
                     break
                 translated_count += 1
-                self._report_live_status(f"실시간 음성 번역: 번역 {translated_count}개를 처리했습니다…")
+                backlog = self._translation_queue.qsize()
+                backlog_note = f", 대기 {backlog}개" if backlog else ""
+                self._report_live_status(
+                    f"실시간 음성 번역: 번역 {translated_count}개를 처리했습니다{backlog_note}…"
+                )
         except Exception as exc:
             if not self._aborted.is_set():
                 self._set_fatal_error("realtime_translation", exc)
@@ -922,17 +945,39 @@ class CaptureController:
 
     def stop(self) -> None:
         with self._lock:
-            if self.state != "RECORDING":
+            if self.state == "PROCESSING":
+                realtime_session = self.realtime_session
+                if realtime_session is None:
+                    return
+                generation = self._session_generation
+                self.state = "CANCELLING"
+                cancel_status = (
+                    "남은 실시간 번역을 취소하고 있습니다. "
+                    "현재 번역 요청이 끝나면 완료됩니다…"
+                )
+                self.status = cancel_status
+                self.error = ""
+                cancel_live_drain = True
+            elif self.state == "RECORDING":
+                cancel_live_drain = False
+                self.state = "STOPPING"
+                generation = self._session_generation
+                stop_event = self.stop_event
+                record_thread = self.record_thread
+                wav_path = self.wav_path
+                session_work_dir = self.session_work_dir
+                session_id = self.session_id
+                session_options = self.session_options
+                realtime_session = self.realtime_session
+            else:
                 return
-            self.state = "STOPPING"
-            generation = self._session_generation
-            stop_event = self.stop_event
-            record_thread = self.record_thread
-            wav_path = self.wav_path
-            session_work_dir = self.session_work_dir
-            session_id = self.session_id
-            session_options = self.session_options
-            realtime_session = self.realtime_session
+
+        if cancel_live_drain:
+            realtime_session.abort()
+            self.events.put(("status", cancel_status))
+            log_debug("state", f"state: CANCELLING\nstatus: {cancel_status}")
+            return
+
         self._set_state_for_session(generation, "STOPPING", "녹음을 마무리하고 있습니다…")
         stop_event.set()
         process_thread = threading.Thread(
@@ -1126,6 +1171,10 @@ class CaptureController:
                         )
                     if summary.dropped_segments:
                         final_status += f" 처리 지연으로 건너뛴 발화 {summary.dropped_segments}건."
+                    if summary.max_translation_backlog >= REALTIME_TRANSLATION_QUEUE_WARNING_SEGMENTS:
+                        final_status += (
+                            f" 번역 대기열 최대 {summary.max_translation_backlog}개를 모두 처리했습니다."
+                        )
                 else:
                     final_status = "완료: 실시간으로 인식된 일본어 음성이 없습니다."
                 return
@@ -1417,7 +1466,7 @@ class CaptureWindow:
         self.stop_button = RoundedButton(
             actions,
             text="녹음 종료",
-            command=controller.stop,
+            command=self.stop,
             width=1,
             height=40,
             radius=18,
@@ -1439,6 +1488,18 @@ class CaptureWindow:
     def start(self) -> None:
         self.controller.start(realtime_translation=bool(self.realtime_translation_var.get()))
 
+    def stop(self) -> None:
+        if self.controller.state == "PROCESSING":
+            confirmed = messagebox.askyesno(
+                "MekiAudioCapture",
+                "아직 대기 중인 실시간 번역을 취소할까요?\n\n"
+                "현재 진행 중인 번역 요청은 응답 또는 시간 초과 뒤에 종료됩니다.",
+                parent=self.root,
+            )
+            if not confirmed:
+                return
+        self.controller.stop()
+
     def close(self) -> None:
         if self.controller.state not in {"READY", "ERROR"}:
             messagebox.showwarning(
@@ -1458,7 +1519,16 @@ class CaptureWindow:
                 break
         state = self.controller.state
         self.start_button.configure(state=tk.NORMAL if state in {"READY", "ERROR"} else tk.DISABLED)
-        self.stop_button.configure(state=tk.NORMAL if state == "RECORDING" else tk.DISABLED)
+        if state == "PROCESSING":
+            stop_text = "남은 번역 취소"
+        elif state == "CANCELLING":
+            stop_text = "취소 중…"
+        else:
+            stop_text = "녹음 종료"
+        self.stop_button.configure(
+            text=stop_text,
+            state=tk.NORMAL if state in {"RECORDING", "PROCESSING"} else tk.DISABLED,
+        )
         self.realtime_translation_check.configure(
             state=tk.NORMAL if state in {"READY", "ERROR"} else tk.DISABLED
         )
