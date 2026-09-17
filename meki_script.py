@@ -103,8 +103,8 @@ class ScriptWindow:
     # MekiScript is a live companion that can stay open for hours. Keep a
     # useful scrollback without retaining every historical line and ID for an
     # entire play session. The character limit also bounds rare long outputs.
-    MAX_HISTORY_ENTRIES = 500
-    MAX_HISTORY_CHARS = 256 * 1024
+    MAX_HISTORY_ENTRIES = 2048
+    MAX_HISTORY_CHARS = 512 * 1024
     _PENDING_TRANSLATION_TEXT = "번역 대기 중…"
 
     def __init__(

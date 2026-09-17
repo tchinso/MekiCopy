@@ -6,10 +6,14 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from meki_script import make_handler
+from meki_script import ScriptWindow, make_handler
 
 
 class MekiScriptServerTests(unittest.TestCase):
+    def test_transcript_scrollback_keeps_the_requested_bounded_capacity(self) -> None:
+        self.assertEqual(ScriptWindow.MAX_HISTORY_ENTRIES, 2048)
+        self.assertEqual(ScriptWindow.MAX_HISTORY_CHARS, 512 * 1024)
+
     def _post_handler(self, window: SimpleNamespace, payload: dict) -> object:
         handler_type = make_handler(window)
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
