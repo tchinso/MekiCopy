@@ -62,7 +62,10 @@ class WindowsTrayIcon:
     LR_LOADFROMFILE = 0x00000010
     LR_DEFAULTSIZE = 0x00000040
     IDI_APPLICATION = 32512
-    RESTORE_POLL_MS = 25
+    # The native window only needs a Tk-side poll while the tray icon is
+    # visible.  100 ms is still immediate to a person clicking the icon and
+    # avoids a permanent 40 Hz idle timer in the main process.
+    RESTORE_POLL_MS = 100
 
     def __init__(
         self,
@@ -82,13 +85,10 @@ class WindowsTrayIcon:
         self._active = False
         self._restore_requested = threading.Event()
         self._closed = False
-        self._poll_after_id = self.root.after(
-            self.RESTORE_POLL_MS,
-            self._poll_restore_requests,
-        )
+        self._poll_after_id: str | None = None
 
     def show(self) -> bool:
-        if os.name != "nt" or self._active:
+        if os.name != "nt" or self._active or self._closed:
             return False
         try:
             if not self._hwnd:
@@ -100,6 +100,7 @@ class WindowsTrayIcon:
             if not shell32.Shell_NotifyIconW(self.NIM_ADD, ctypes.byref(data)):
                 return False
             self._active = True
+            self._schedule_restore_poll()
             return True
         except Exception as exc:
             _log_runtime_error("tray_show", exc)
@@ -117,6 +118,7 @@ class WindowsTrayIcon:
                 pass
         self._active = False
         self._restore_requested.clear()
+        self._cancel_restore_poll()
 
     def close(self) -> None:
         """Remove the icon and native message window during application shutdown."""
@@ -124,13 +126,27 @@ class WindowsTrayIcon:
             return
         self._closed = True
         self.hide()
-        if self._poll_after_id:
-            try:
-                self.root.after_cancel(self._poll_after_id)
-            except tk.TclError:
-                pass
-            self._poll_after_id = None
         self._destroy_message_window()
+
+    def _schedule_restore_poll(self) -> None:
+        if self._closed or not self._active or self._poll_after_id is not None:
+            return
+        try:
+            self._poll_after_id = self.root.after(
+                self.RESTORE_POLL_MS,
+                self._poll_restore_requests,
+            )
+        except tk.TclError:
+            self._closed = True
+
+    def _cancel_restore_poll(self) -> None:
+        if self._poll_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self._poll_after_id)
+        except tk.TclError:
+            pass
+        self._poll_after_id = None
 
     def _destroy_message_window(self) -> None:
         if os.name != "nt":
@@ -170,13 +186,7 @@ class WindowsTrayIcon:
                     self.on_restore()
                 except Exception as exc:
                     _log_runtime_error("tray_restore", exc)
-        try:
-            self._poll_after_id = self.root.after(
-                self.RESTORE_POLL_MS,
-                self._poll_restore_requests,
-            )
-        except tk.TclError:
-            self._closed = True
+        self._schedule_restore_poll()
 
     def _build_notify_data(self, flags: int) -> _NotifyIconDataW:
         data = _NotifyIconDataW()

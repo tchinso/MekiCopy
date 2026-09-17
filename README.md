@@ -196,19 +196,21 @@ HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x �
 4. MekiAudioCapture에서 `녹음 시작`을 누르고 일본어 음성을 재생합니다.
 5. `녹음 종료`를 누릅니다.
 
-녹음 중에는 WASAPI loopback 음성을 `MekiAudioCapture.exe` 옆 `work` 폴더에 임시 WAV 파일로 저장합니다. 프로그램 폴더에 쓸 수 없는 설치 환경에서만 LocalAppData 등 쓰기 가능한 보조 경로를 사용합니다. 종료 후에 VAD와 일본어 STT를 실행해 모든 일본어 원문을 MekiScript에 먼저 쌓고, 그 다음 원문 단위별로 HYTrans 번역을 순서대로 채웁니다. 처리가 끝나면 임시 WAV와 변환 파일은 삭제됩니다.
+일괄 처리 모드에서는 WASAPI loopback 음성을 `MekiAudioCapture.exe` 옆 `work` 폴더에 임시 WAV 파일로 저장합니다. 프로그램 폴더에 쓸 수 없는 설치 환경에서만 LocalAppData 등 쓰기 가능한 보조 경로를 사용합니다. 종료 후에 VAD와 일본어 STT를 실행해 모든 일본어 원문을 MekiScript에 먼저 쌓고, 그 다음 원문 단위별로 HYTrans 번역을 순서대로 채웁니다. 처리가 끝나면 임시 WAV와 변환 파일은 삭제됩니다.
 
-MekiAudioCapture 창의 `실시간 음성 번역(저사양에서 비권장)`은 기본으로 꺼져 있는 일회성 옵션입니다. 켜면 Silero VAD가 확정한 발화 chunk를 녹음 중 바로 STT로 보내고, 원문 표시와 HYTrans 번역을 별도 작업으로 이어서 처리합니다. 음성과 번역을 시간에 맞춰 동기화하는 기능은 아니며, 들어오는 발화를 가능한 대로 먼저 처리하는 방식입니다. 저사양 컴퓨터에서는 지연·일부 실패가 생길 수 있어 경고를 표시하며, 이 체크 값은 MekiCopy 설정이나 파일에 저장되지 않고 녹음이 끝나면 다시 꺼집니다.
+MekiAudioCapture 창의 `실시간 음성 번역(저사양에서 비권장)`은 기본으로 꺼져 있는 일회성 옵션입니다. 켜면 Silero VAD가 확정한 발화 chunk를 녹음 중 바로 STT로 보내고, 원문 표시와 HYTrans 번역을 별도 작업으로 이어서 처리합니다. 이 모드에서는 임시 WAV를 쓰지 않으며, VAD/STT는 각각 1/2개 native thread만 사용합니다. 음성과 번역을 시간에 맞춰 동기화하는 기능은 아니며, 들어오는 발화를 가능한 대로 먼저 처리하는 방식입니다. 저사양 컴퓨터에서는 지연·일부 실패가 생길 수 있어 경고를 표시하며, 이 체크 값은 MekiCopy 설정이나 파일에 저장되지 않고 녹음이 끝나면 다시 꺼집니다.
 
-실시간 번역은 원문 음성 큐와 분리된 65,536개 번역 버퍼를 사용합니다. 녹음 종료 뒤에도 HYTrans가 정상 응답하는 항목은 시간 제한으로 버리지 않고 순서대로 끝까지 처리하며, 짧은 발화는 출력 토큰 한도를 발화 길이에 맞춰 낮춰 대기열 처리량을 높입니다. 후처리 중 남은 번역을 기다리지 않으려면 `남은 번역 취소`를 눌러 안전하게 중단할 수 있습니다.
+실시간 번역은 원문 음성 큐와 분리된 2,048개 번역 버퍼를 사용합니다. 과부하 시에는 메모리를 계속 늘리는 대신 일부 발화를 명시적으로 건너뜁니다. 녹음 종료 뒤에도 남은 항목은 순서대로 처리하며, 짧은 발화는 출력 토큰 한도를 발화 길이에 맞춰 낮춰 대기열 처리량을 높입니다. 후처리 중 남은 번역을 기다리지 않으려면 `남은 번역 취소`를 눌러 안전하게 중단할 수 있습니다.
 
 | 구성 요소 | 역할 | 기본 포트 |
 |---|---|---|
 | MekiAudioCapture | 시스템 음성 녹음, VAD, 기본 Parakeet 또는 선택 ReazonSpeech 일본어 STT | 6998 |
 | HYTrans | 일본어 원문 단위별 한국어 번역 | 6996 |
-| MekiScript | 원문·번역 누적 표시 및 스크롤 | 6999 |
+| MekiScript | 최근 원문·번역 누적 표시 및 스크롤 | 6999 |
 
 `모든 도구 연결 상태 확인`으로 세 앱의 HTTP 응답과 HYTransWorker/번역 모델 준비 상태를 한 번에 확인할 수 있습니다. 음성 모델은 기본 EXE 배포본에 포함되지 않습니다. MekiAudioCapture 또는 MekiSubtitle를 처음 사용할 때 선택 모델과 VAD를 공식 sherpa-onnx 릴리스에서 공용 `MekiAudioCapture/models` 캐시로 준비하며, 유효한 모델이 이미 있으면 다운로드하지 않습니다.
+
+MekiScript는 장시간 실행에서도 메모리 사용량이 계속 늘지 않도록 최근 500개 항목 또는 약 256 KiB의 대본만 유지하며, 더 오래된 내용은 자동으로 제거합니다.
 
 ### 자동 복구 및 문제 해결
 
@@ -273,7 +275,7 @@ MekiCopy가 직접 시작한 MekiAudioCapture·MekiScript·HYTrans·MekiOverlaye
 |---|---|
 | STT 모델 | 기본 Parakeet TDT-CTC 0.6B INT8 또는 ReazonSpeech를 선택합니다. |
 | ReazonSpeech 정밀도 | ReazonSpeech를 선택했을 때 `fp32` 또는 `int8`을 선택합니다. Parakeet은 INT8 고정입니다. |
-| 음성 CHUNK 기준 | `FAST`, `BALANCED`(기본), `LONG` VAD 프리셋을 선택합니다. FAST는 짧은 대화 경계를 우선하고, BALANCED는 새 FAST와 LONG의 중간값이며, LONG은 기존 설정을 유지합니다. |
+| 음성 CHUNK 기준 | `FAST`, `BALANCED`(기본), `LONG` VAD 프리셋을 선택합니다. FAST는 짧은 대화 경계를 우선하고, BALANCED는 반응성과 문맥 보존의 균형을 맞추며, LONG은 느린 발화의 문맥을 더 오래 유지합니다. |
 | MekiAudioCapture 포트 | 음성 캡처 서버 포트 (기본값: 6998) |
 | MekiScript 포트 | 누적 대본 서버 포트 (기본값: 6999) |
 | MekiScript를 항상 위로 | 누적 대본 창을 다른 창 위에 표시합니다. |
@@ -315,7 +317,7 @@ MekiCopy.exe --pick-bookmark
 - **영역이 너무 작으면** 인식이 실패하거나 오류가 발생할 수 있습니다. 텍스트 주변에 여백을 조금 포함해 잡으세요.
 - **한국어 경로 문제:** Windows에서 실행 경로에 한글이 포함되어 Tcl/Tk가 직접 읽지 못하면 먼저 실행 파일 옆 `MekiCopyRuntime`을 사용하고, 그 경로도 사용할 수 없을 때 LocalAppData 또는 임시 폴더로 복사합니다.
 - **시스템 오류 로그:** 오류·미처리 예외·HTTP/IPC 실패·창 없는 EXE의 stderr는 각 실행 파일 옆 `error_log/`에 기록됩니다. 디버그 옵션이 꺼져도 오류 로그는 계속 기록되며, 프로그램 폴더가 읽기 전용일 때만 보조 경로를 사용합니다.
-- **GPU 가속:** CUDA가 지원되는 환경에서는 OCR 엔진이 자동으로 GPU를 사용합니다. 지원되지 않으면 CPU로 동작합니다.
+- **GPU 가속:** NVIDIA CUDA 환경에서는 OCR이 CUDA 세션으로 실제 생성됐는지 확인한 뒤 GPU를 사용하며, 사용할 수 없으면 진단 로그에 상태를 남기고 CPU로 전환합니다. CUDA 요청이 완전히 CPU로 폴백된 경우에는 이미 만든 CPU 엔진을 재사용해 OCR 세션을 중복 생성하지 않습니다. HYTrans는 Chromium WebGPU의 고성능 하드웨어 어댑터를 우선 요청하며, 사용할 수 없으면 CPU/WASM으로 동작합니다.
 - **HYTrans 모델 저장소:** MT2와 MT1.5는 각각 `HYTrans/models/tchinso/Hy-MT2-1.8B-onnx-q4f16`, `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX`에 저장됩니다. MekiSubtitle도 이 검증된 공용 모델만 사용합니다. 고정 리비전의 크기와 SHA-256을 통과한 선택 모델만 로컬로 사용하며, 중단된 `.part` 다운로드는 다음 실행에서 이어받고 체크섬이 틀린 파일은 게시하지 않습니다. 프로그램 폴더가 읽기 전용일 때만 보조 경로를 사용합니다.
 - **번역 입력 제한:** 한 번에 번역할 수 있는 텍스트는 최대 8,000자입니다.
 - **음성인식 모델 경로:** `MekiAudioCapture.exe` 옆의 `models` 폴더를 사용합니다. MekiSubtitle도 동일한 경로와 읽기 전용 설치용 보조 캐시를 사용하므로 STT/VAD 모델을 중복 저장하지 않습니다.

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import configparser
 import hashlib
 import os
-import sys
 import threading
 import tkinter as tk
 from functools import lru_cache
@@ -27,19 +25,14 @@ from mekicopy_runtime import (
     _prepare_tk_library_paths,
     _prepare_windowed_streams,
 )
-import mekicopy_settings
 from system_logging import log_debug as _system_debug
 from system_logging import log_error as _system_error
+from system_logging import is_debug_enabled as _system_debug_enabled
 
 _OCR_ENGINE = None
 _ORT_PRELOAD_READY = False
 _OCR_ENGINE_LOCK = threading.Lock()
 _OCR_RUN_LOCK = threading.Lock()
-CUDA_PROVIDER_REQUIRED_DLLS = (
-    "cublasLt64_13.dll",
-    "cublas64_13.dll",
-    "cudnn64_9.dll",
-)
 OCR_MODEL_MANIFEST = {
     "meiki.text.detect.v0.1.960x544.onnx": (
         14_503_825,
@@ -59,15 +52,6 @@ def postprocess_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def _is_debug_logging_enabled() -> bool:
-    parser = configparser.ConfigParser()
-    try:
-        parser.read(mekicopy_settings.SETTINGS_FILE, encoding="utf-8")
-        return parser.getboolean("settings", "debug_logging", fallback=False)
-    except (configparser.Error, TypeError, ValueError, OSError):
-        return False
-
-
 def _log_runtime_error(stage: str, exc: Exception) -> None:
     _system_error(stage, exc, component="MekiCopy")
 
@@ -77,7 +61,10 @@ def _log_runtime_message(stage: str, message: str) -> None:
         stage,
         message,
         component="MekiCopy",
-        enabled=_is_debug_logging_enabled(),
+        # Logging configuration is loaded once at startup and updated when
+        # settings are saved.  Re-parsing settings.cfg on every diagnostic
+        # would add needless disk work to capture/OCR paths.
+        enabled=_system_debug_enabled(),
     )
 
 
@@ -102,62 +89,21 @@ def _patch_onnxruntime_compat() -> None:
         ort.set_default_logger_severity = _noop_set_default_logger_severity
 
 
-def _runtime_dll_search_dirs() -> list[str]:
-    directories = [
-        os.path.dirname(sys.executable),
-        _get_app_dir(),
-        _get_resource_dir(),
-    ]
-    if getattr(sys, "frozen", False):
-        meipass = getattr(sys, "_MEIPASS", "")
-        if meipass:
-            directories.append(meipass)
-    directories.extend(os.environ.get("PATH", "").split(os.pathsep))
-    seen: set[str] = set()
-    result: list[str] = []
-    for directory in directories:
-        if not directory:
-            continue
-        normalized = os.path.normcase(os.path.abspath(directory))
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        result.append(directory)
-    return result
-
-
-def _has_runtime_dll(filename: str) -> bool:
-    return any(
-        os.path.exists(os.path.join(directory, filename))
-        for directory in _runtime_dll_search_dirs()
-    )
-
-
-def _cuda_provider_looks_usable() -> bool:
-    if os.name != "nt":
-        return True
-    missing = [
-        filename
-        for filename in CUDA_PROVIDER_REQUIRED_DLLS
-        if not _has_runtime_dll(filename)
-    ]
-    if missing:
-        _log_runtime_message(
-            "cuda_provider_skipped",
-            "missing DLLs: " + ", ".join(missing),
-        )
-        return False
-    return True
-
-
 def _preload_onnxruntime_gpu_dlls() -> None:
+    """Load bundled/system CUDA dependencies before creating an ORT session.
+
+    ``get_available_providers()`` only confirms that the CUDA provider binary
+    was packaged.  It does not prove its CUDA/cuDNN dependencies can be
+    loaded.  Let ONNX Runtime's supported preloader resolve those dependencies
+    instead of rejecting GPU use based on a fragile, version-specific PATH
+    check.  Session creation below remains the definitive capability test.
+    """
+
     global _ORT_PRELOAD_READY
     if _ORT_PRELOAD_READY:
         return
 
     _ORT_PRELOAD_READY = True
-    if not _cuda_provider_looks_usable():
-        return
     try:
         import onnxruntime as ort
     except Exception as exc:
@@ -166,10 +112,18 @@ def _preload_onnxruntime_gpu_dlls() -> None:
 
     preload_dlls = getattr(ort, "preload_dlls", None)
     if not callable(preload_dlls):
+        _log_runtime_message(
+            "preload_onnxruntime_gpu_dlls",
+            "onnxruntime.preload_dlls is unavailable",
+        )
         return
 
     try:
         preload_dlls(cuda=True, cudnn=True, msvc=True)
+        _log_runtime_message(
+            "preload_onnxruntime_gpu_dlls",
+            "requested CUDA, cuDNN, and MSVC runtime preloading",
+        )
     except Exception as exc:
         _log_runtime_error("preload_onnxruntime_gpu_dlls", exc)
 
@@ -234,13 +188,73 @@ def _get_available_ort_providers() -> list[str]:
         return []
 
 
+def _engine_session_providers(engine) -> dict[str, list[str]]:
+    """Return each MeikiOCR session's actual provider list when available."""
+
+    result: dict[str, list[str]] = {}
+    for name in ("det_session", "rec_session", "vrec_session"):
+        session = getattr(engine, name, None)
+        get_providers = getattr(session, "get_providers", None)
+        if not callable(get_providers):
+            continue
+        try:
+            result[name] = list(get_providers())
+        except Exception as exc:
+            _log_runtime_error(f"get_meikiocr_{name}_providers", exc)
+    return result
+
+
 def _create_meikiocr_engine(meikiocr_ocr, provider: str):
     engine = meikiocr_ocr.MeikiOCR(provider=provider)
     active_provider = getattr(engine, "active_provider", provider)
+    session_providers = _engine_session_providers(engine)
+    session_details = "\n".join(
+        f"{name}: {', '.join(providers)}"
+        for name, providers in session_providers.items()
+    )
     _log_runtime_message(
         "create_meikiocr_engine",
-        f"requested_provider: {provider}\nactive_provider: {active_provider}",
+        (
+            f"requested_provider: {provider}\n"
+            f"active_provider: {active_provider}\n"
+            f"{session_details or 'session providers: unavailable'}"
+        ),
     )
+
+    if provider == "CUDAExecutionProvider":
+        missing_cuda_sessions = [
+            name
+            for name, providers in session_providers.items()
+            if "CUDAExecutionProvider" not in providers
+        ]
+        if active_provider != "CUDAExecutionProvider" or missing_cuda_sessions:
+            # ONNX Runtime can accept the CUDA request, then consistently
+            # create every session on CPU when a driver or a dependent DLL is
+            # unavailable.  That engine is already a valid CPU engine.  Do
+            # not discard it and create the three sessions a second time:
+            # the duplicate allocation is especially costly alongside a game.
+            complete_cpu_fallback = (
+                active_provider == "CPUExecutionProvider"
+                and all(
+                    providers
+                    and providers[0] == "CPUExecutionProvider"
+                    and "CUDAExecutionProvider" not in providers
+                    for providers in session_providers.values()
+                )
+            )
+            if complete_cpu_fallback:
+                _log_runtime_message(
+                    "cuda_meikiocr_cpu_fallback",
+                    "CUDA session creation fell back to CPU; reusing the verified CPU engine",
+                )
+                return engine
+
+            detail = (
+                "ONNX Runtime created the OCR engine without CUDA; "
+                f"active_provider={active_provider}; "
+                f"sessions_without_cuda={', '.join(missing_cuda_sessions) or 'none'}"
+            )
+            raise RuntimeError(detail)
     return engine
 
 
@@ -251,11 +265,16 @@ def _create_best_meikiocr_engine(meikiocr_ocr):
         "available_providers: " + ", ".join(available_providers),
     )
 
-    if "CUDAExecutionProvider" in available_providers and _cuda_provider_looks_usable():
+    if "CUDAExecutionProvider" in available_providers:
         try:
             return _create_meikiocr_engine(meikiocr_ocr, "CUDAExecutionProvider")
         except Exception as exc:
             _log_runtime_error("create_cuda_meikiocr_engine", exc)
+    else:
+        _log_runtime_message(
+            "cuda_provider_unavailable",
+            "CUDAExecutionProvider was not reported; using CPUExecutionProvider",
+        )
 
     return _create_meikiocr_engine(meikiocr_ocr, "CPUExecutionProvider")
 
@@ -392,7 +411,7 @@ def ocr_region(
     try:
         return recognize_image(result.image)
     except OcrError as exc:
-        messagebox.showerror("MekiCopy", f"OCR ?ㅽ뻾 ?ㅽ뙣:\n{exc}", parent=parent)
+        messagebox.showerror("MekiCopy", f"OCR 실행 실패:\n{exc}", parent=parent)
         return None
 
 

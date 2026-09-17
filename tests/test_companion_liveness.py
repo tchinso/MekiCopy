@@ -91,6 +91,19 @@ class UiHeartbeatTests(unittest.TestCase):
         tick.assert_called_once_with()
         self.assertEqual(root.calls, [])
 
+    def test_default_schedule_uses_the_low_frequency_idle_heartbeat(self) -> None:
+        heartbeat = companion_liveness.UiHeartbeat()
+        root = FakeTkRoot()
+
+        heartbeat.schedule(root)
+        _initial_delay, pulse = root.calls.pop(0)
+        pulse()
+
+        self.assertEqual(
+            root.calls[0][0],
+            companion_liveness.DEFAULT_UI_HEARTBEAT_INTERVAL_MS,
+        )
+
     def test_schedule_is_safe_when_called_during_tk_teardown(self) -> None:
         heartbeat = companion_liveness.UiHeartbeat()
         root = FakeTkRoot()

@@ -4,6 +4,8 @@ let generator = null;
 let socket = null;
 let config = null;
 let activeDevice = null;
+let activeDeviceDetail = null;
+let selectedWebGpuAdapter = null;
 let warning = null;
 let lastProgressPercent = -1;
 let lastProgressSentAt = 0;
@@ -43,6 +45,55 @@ function setStatus(message, notifyServer = true) {
   if (notifyServer) {
     sendToServer({ type: "loading", message });
   }
+}
+
+function compactErrorDetail(error) {
+  const detail = error?.message ?? String(error ?? "unknown error");
+  return String(detail).replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
+function clearSelectedWebGpuAdapter() {
+  selectedWebGpuAdapter = null;
+  if (env.backends?.onnx?.webgpu) {
+    // Do not leave a rejected adapter attached if this page retries its model
+    // initialization. ONNX Runtime Web otherwise reuses it silently.
+    env.backends.onnx.webgpu.adapter = undefined;
+  }
+}
+
+function selectWasmFallback(reason) {
+  clearSelectedWebGpuAdapter();
+  activeDeviceDetail = null;
+  warning = `WebGPU를 사용할 수 없어 CPU(WASM)로 실행합니다: ${reason}`;
+  console.warn("[HYTrans Worker]", warning);
+  // The warning is included in /ready even when debug logging is off.  Keep a
+  // full diagnostic in the optional worker debug log without creating an
+  // error-log entry for a computer that simply has no WebGPU-capable adapter.
+  void sendClientLog("debug", "webgpu_fallback", warning);
+  return "wasm";
+}
+
+function inspectWebGpuAdapter(adapter) {
+  // GPUAdapterInfo is intentionally privacy-limited, so every field may be
+  // empty.  Its fallback flag is the reliable signal when Chromium exposes it;
+  // known software-renderer names are retained as a diagnostic for older
+  // Chromium builds that did not expose that flag yet.
+  const info = adapter?.info || null;
+  const isFallback = info?.isFallbackAdapter ?? adapter?.isFallbackAdapter;
+  const details = [
+    info?.vendor,
+    info?.architecture,
+    info?.device,
+    info?.description,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  const detail = details.join(" / ");
+  const looksSoftware = /swiftshader|software|warp|llvmpipe|lavapipe|basic render/i.test(detail);
+  return {
+    detail: detail || "browser did not expose adapter details",
+    software: isFallback === true || looksSoftware,
+  };
 }
 
 window.addEventListener("error", (event) => {
@@ -500,6 +551,16 @@ function setupTransformersEnv(runtimeConfig) {
       wasm: "/assets/wasm/ort-wasm-simd-threaded.asyncify.wasm",
     };
   }
+
+  // Prefer the discrete adapter on dual-GPU laptops. Transformers.js currently
+  // applies the same hint, but set it here as part of this worker's contract so
+  // an upstream default change cannot quietly move inference to a
+  // power-saving adapter.
+  if (env.backends?.onnx?.webgpu) {
+    env.backends.onnx.webgpu.powerPreference = "high-performance";
+    env.backends.onnx.webgpu.forceFallbackAdapter = false;
+    clearSelectedWebGpuAdapter();
+  }
 }
 
 async function createPipeline(device) {
@@ -513,14 +574,38 @@ async function createPipeline(device) {
 
 async function preferredDevice() {
   if (!navigator.gpu) {
-    return "wasm";
+    return selectWasmFallback("navigator.gpu를 사용할 수 없습니다");
   }
   try {
-    const adapter = await navigator.gpu.requestAdapter();
-    return adapter ? "webgpu" : "wasm";
+    const adapter = await navigator.gpu.requestAdapter({
+      powerPreference: "high-performance",
+      forceFallbackAdapter: false,
+    });
+    if (!adapter) {
+      return selectWasmFallback("WebGPU 어댑터를 찾지 못했습니다");
+    }
+    const adapterInfo = inspectWebGpuAdapter(adapter);
+    if (adapterInfo.software) {
+      return selectWasmFallback(
+        `하드웨어 대신 소프트웨어 WebGPU 어댑터가 선택되었습니다 (${adapterInfo.detail})`,
+      );
+    }
+    if (!env.backends?.onnx?.webgpu) {
+      return selectWasmFallback("Transformers.js WebGPU 백엔드 설정을 찾지 못했습니다");
+    }
+    // Transformers.js/ONNX Runtime would otherwise request a second adapter
+    // while constructing the pipeline. Reuse the adapter that was checked
+    // above so the ready state cannot claim a hardware GPU while inference is
+    // actually performed by a different software or low-power adapter.
+    selectedWebGpuAdapter = adapter;
+    env.backends.onnx.webgpu.adapter = selectedWebGpuAdapter;
+    activeDeviceDetail = adapterInfo.detail;
+    void sendClientLog("debug", "webgpu_adapter", activeDeviceDetail);
+    return "webgpu";
   } catch (err) {
-    console.warn("WebGPU adapter probe failed, using wasm:", err);
-    return "wasm";
+    return selectWasmFallback(
+      `WebGPU 어댑터 확인 실패 (${compactErrorDetail(err)})`,
+    );
   }
 }
 
@@ -545,8 +630,15 @@ async function createGeneratorWithFallback() {
     if (device !== "webgpu") {
       throw err;
     }
+    const detail = compactErrorDetail(err);
+    warning = `WebGPU 모델 초기화에 실패해 CPU(WASM)로 전환했습니다: ${detail}`;
+    clearSelectedWebGpuAdapter();
+    activeDeviceDetail = null;
     console.warn("WebGPU failed, fallback to wasm:", err);
-    warning = "webgpu failed, using wasm fallback";
+    // An adapter was found but ONNX Runtime could not create its WebGPU
+    // sessions. Persist this distinct failure for a useful bug report instead
+    // of silently appearing as an ordinary CPU-only configuration.
+    void sendClientLog("error", "webgpu_pipeline_fallback", warning);
     setStatus("WebGPU 로드 실패. CPU(wasm)로 다시 시도합니다...");
     const pipe = await createPipeline("wasm");
     activeDevice = "wasm";
@@ -558,6 +650,7 @@ function announceReady() {
   sendToServer({
     type: "ready",
     device: activeDevice,
+    deviceDetail: activeDeviceDetail,
     model: config.modelId,
     dtype: config.dtype,
     modelMode: config.modelMode,

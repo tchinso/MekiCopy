@@ -44,8 +44,8 @@
                   },
                   {
                       "path":  "worker.js",
-                      "size":  19653,
-                      "sha256":  "11dc36acc625545b39a2f0f86a4727800fd155b587942214670683644ff9322e"
+                      "size":  23740,
+                      "sha256":  "b38aafce1fe3c44c5b14194397a21ce2468f621e0fac762aaf66c6d993ea00c2"
                   },
                   {
                       "path":  "wasm/ort-wasm-simd-threaded.asyncify.mjs",

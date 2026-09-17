@@ -6,6 +6,7 @@ import ipaddress
 import json
 from pathlib import Path
 import secrets
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse
@@ -33,7 +34,7 @@ from .model_cache import (
 from .model_download import model_download_manager
 from .model_files import active_model_profile
 from .paths import assets_dir, models_dir
-from .queue import TranslationQueue
+from .queue import TranslationQueue, TranslationQueueOverloadedError
 from .state import AppState
 from system_logging import log_debug as system_debug
 from system_logging import log_error as system_error
@@ -160,6 +161,9 @@ def _clear_current_worker(websocket: WebSocket, reason: str) -> bool:
     state.worker_connected = False
     state.worker_ready = False
     state.state = "ERROR"
+    state.device = None
+    state.device_detail = None
+    state.warning = None
     state.error = reason
     return True
 
@@ -234,6 +238,14 @@ async def _translate_text(text: str, *, realtime: bool = False) -> str:
         else:
             state.state = "READY"
         raise HTTPException(status_code=504, detail="translation timeout")
+    except TranslationQueueOverloadedError as exc:
+        # A bounded queue protects the game and companion processes from a
+        # burst of retained request bodies.  The connected worker remains
+        # healthy, so expose this as a retryable overload rather than a 500.
+        state.state = "READY" if state.worker_ready else "ERROR"
+        state.error = None
+        debug("translation_overloaded", str(exc))
+        raise HTTPException(status_code=429, detail="translation queue is busy; retry shortly") from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -247,8 +259,24 @@ async def _translate_text(text: str, *, realtime: bool = False) -> str:
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    global queue_task
+    global queue_task, translation_queue, worker_open_task
+    # A FastAPI app object may be stopped and started again in the same
+    # interpreter (embedded hosting and lifespan tests do this). ``stop``
+    # permanently wakes the old queue, so each server lifetime needs a fresh
+    # admission queue rather than reusing an object marked as stopped.
+    translation_queue = TranslationQueue()
+    worker_open_task = None
     state.state = "STARTING"
+    state.worker_ready = False
+    state.worker_connected = False
+    state.device = None
+    state.device_detail = None
+    state.model = None
+    state.dtype = None
+    state.model_mode = None
+    state.warning = None
+    state.error = None
+    state.started_at = time.time()
     queue_task = asyncio.create_task(
         translation_queue.run(default_max_new_tokens=MAX_NEW_TOKENS)
     )
@@ -462,6 +490,9 @@ async def worker_ws(websocket: WebSocket) -> None:
     state.worker_connected = True
     state.worker_ready = False
     state.state = "WORKER_CONNECTED"
+    state.device = None
+    state.device_detail = None
+    state.warning = None
     state.error = None
     debug("worker_connected", "websocket connected")
 
@@ -498,6 +529,7 @@ async def worker_ws(websocket: WebSocket) -> None:
                 state.worker_ready = True
                 state.state = "READY"
                 state.device = message.get("device")
+                state.device_detail = message.get("deviceDetail")
                 state.model = message.get("model")
                 state.dtype = message.get("dtype")
                 state.model_mode = message.get("modelMode")

@@ -25,6 +25,15 @@ _RUNTIME_PATH_READY = False
 _WINDOW_STREAM = None
 _APP_USER_MODEL_ID_READY = False
 
+# ``onnxruntime-gpu[cuda,cudnn]`` 1.30 uses CUDA 13's consolidated ``cu13``
+# layout. PyInstaller preserves it, so add the directories explicitly before
+# importing ONNX Runtime. A display driver alone does not provide the
+# CUDA/cuDNN libraries required by the CUDA EP.
+_NVIDIA_RUNTIME_DLL_SUBDIRECTORIES = (
+    os.path.join("nvidia", "cu13", "bin", "x86_64"),
+    os.path.join("nvidia", "cudnn", "bin"),
+)
+
 def _get_app_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
@@ -174,6 +183,11 @@ def _prepare_native_runtime_paths() -> None:
         os.path.join(_get_resource_dir(), "cv2"),
         os.path.join(_get_app_dir(), "cv2"),
     ]
+    for root in (_get_resource_dir(), _get_app_dir()):
+        candidate_dirs.extend(
+            os.path.join(root, relative)
+            for relative in _NVIDIA_RUNTIME_DLL_SUBDIRECTORIES
+        )
 
     existing_dirs: list[str] = []
     for directory in candidate_dirs:

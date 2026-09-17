@@ -57,44 +57,36 @@ class VadPresetTests(unittest.TestCase):
                 "pre_padding": 0.05,
                 "post_padding": 0.10,
                 "merge_gap": 0.05,
-                "merge_short_under": 0.60,
+                "short_segment_max_duration": 0.60,
                 "forced_cut_overlap": 0.25,
             },
             "BALANCED": {
                 "threshold": 0.55,
-                "min_speech_duration": 0.225,
-                "min_silence_duration": 0.525,
-                "max_segment_duration": 18.5,
-                "pre_padding": 0.15,
-                "post_padding": 0.325,
-                "merge_gap": 0.30,
-                "merge_short_under": 1.05,
-                "forced_cut_overlap": 0.425,
+                "min_speech_duration": 0.20,
+                "min_silence_duration": 0.30,
+                "max_segment_duration": 15.0,
+                "pre_padding": 0.10,
+                "post_padding": 0.20,
+                "merge_gap": 0.15,
+                "short_segment_max_duration": 1.00,
+                "forced_cut_overlap": 0.75,
             },
             "LONG": {
-                "threshold": 0.50,
-                "min_speech_duration": 0.25,
-                "min_silence_duration": 0.95,
-                "max_segment_duration": 27.0,
-                "pre_padding": 0.25,
-                "post_padding": 0.55,
-                "merge_gap": 0.55,
-                "merge_short_under": 1.50,
-                "forced_cut_overlap": 0.60,
+                "threshold": 0.55,
+                "min_speech_duration": 0.20,
+                "min_silence_duration": 0.60,
+                "max_segment_duration": 20.0,
+                "pre_padding": 0.15,
+                "post_padding": 0.30,
+                "merge_gap": 0.30,
+                "short_segment_max_duration": 1.50,
+                "forced_cut_overlap": 1.50,
             },
         }
 
         for preset_name, values in expected.items():
             with self.subTest(preset=preset_name):
                 self.assertEqual(VAD_PRESETS[preset_name], values)
-
-    def test_balanced_is_the_midpoint_of_fast_and_long(self) -> None:
-        for key, fast_value in VAD_PRESETS["FAST"].items():
-            with self.subTest(setting=key):
-                self.assertAlmostEqual(
-                    VAD_PRESETS["BALANCED"][key],
-                    (fast_value + VAD_PRESETS["LONG"][key]) / 2,
-                )
 
     def test_fast_keeps_a_short_dialogue_boundary(self) -> None:
         audio = np.zeros(32_000, dtype=np.float32)
@@ -104,6 +96,17 @@ class VadPresetTests(unittest.TestCase):
         segments = build_segments(audio, intervals, "FAST")
         self.assertEqual(len(segments), 2)
         self.assertLess(segments[0].end_time, segments[1].start_time)
+
+    def test_short_segment_limit_marks_metadata_without_merging(self) -> None:
+        audio = np.zeros(40_000, dtype=np.float32)
+        # The raw gap is larger than FAST's 0.05 s merge gap. The first
+        # padded segment is <= 0.60 s, while the second is longer.
+        intervals = [(3_200, 9_600), (14_400, 28_800)]
+
+        segments = build_segments(audio, intervals, "FAST")
+
+        self.assertEqual(len(segments), 2)
+        self.assertEqual([segment.is_short for segment in segments], [True, False])
 
 
 class SttModelTests(unittest.TestCase):
@@ -382,6 +385,58 @@ class CaptureControllerTests(unittest.TestCase):
         self.assertEqual(controller.state, "RECORDING")
         self.assertIn("컴퓨터 소리를 녹음", controller.status)
 
+    def test_live_start_skips_batch_wav_workspace_and_disk_gate(self) -> None:
+        controller = self._controller()
+        controller._session_generation = 1
+        controller.state = "STARTING"
+        session_options = (
+            controller.stt_model,
+            controller.precision,
+            controller.preset,
+            controller.script_url,
+            controller.hytrans_url,
+            True,
+        )
+        live_session = mock.Mock()
+        record_thread = mock.Mock()
+
+        with (
+            mock.patch.object(
+                controller,
+                "_models_for_processing",
+                return_value={"vad": Path("vad.onnx")},
+            ),
+            mock.patch.object(
+                meki_audio_capture,
+                "RealtimeTranslationSession",
+                return_value=live_session,
+            ),
+            mock.patch.object(
+                meki_audio_capture,
+                "work_dir",
+                side_effect=AssertionError("live mode must not allocate a batch workspace"),
+            ) as work_dir,
+            mock.patch.object(
+                meki_audio_capture.shutil,
+                "disk_usage",
+                side_effect=AssertionError("live mode must not apply the batch disk gate"),
+            ) as disk_usage,
+            mock.patch.object(
+                meki_audio_capture.threading,
+                "Thread",
+                return_value=record_thread,
+            ) as new_thread,
+        ):
+            controller._start_recording(1, session_options)
+
+        work_dir.assert_not_called()
+        disk_usage.assert_not_called()
+        live_session.start.assert_called_once_with()
+        self.assertEqual(controller.session_work_dir, None)
+        self.assertEqual(controller.wav_path, None)
+        self.assertEqual(new_thread.call_args.kwargs["args"][2:], (None, None, live_session))
+        record_thread.start.assert_called_once_with()
+
     def test_new_start_waits_for_an_aborted_live_session_to_exit(self) -> None:
         controller = self._controller()
         previous_session = mock.Mock()
@@ -494,13 +549,10 @@ class RealtimeTranslationSessionTests(unittest.TestCase):
             stt_latency=0.01,
         )
 
-    def test_translation_queue_keeps_more_than_the_legacy_capacity(self) -> None:
+    def test_translation_queue_has_a_bounded_live_backlog(self) -> None:
         session = self._session()
 
-        self.assertGreaterEqual(
-            meki_audio_capture.REALTIME_TRANSLATION_QUEUE_MAX_SEGMENTS,
-            65_536,
-        )
+        self.assertEqual(meki_audio_capture.REALTIME_TRANSLATION_QUEUE_MAX_SEGMENTS, 2048)
         for index in range(32):
             session._enqueue_translation(self._result(index + 1), f"entry-{index + 1}")
 
@@ -602,7 +654,13 @@ class RealtimeTranslationSessionTests(unittest.TestCase):
             "live-session",
             statuses.append,
         )
-        capture_frames = 512 * (audio_capture_core.CAPTURE_SAMPLE_RATE // audio_capture_core.INTERNAL_SAMPLE_RATE) + 1
+        # Live padding waits through the native VAD's minimum speech/silence
+        # finalization tail as well as the padded-boundary merge window. Feed
+        # enough source PCM for BALANCED's bounded lookahead to expire before
+        # checking that the utterance is published.
+        capture_frames = 28 * 512 * (
+            audio_capture_core.CAPTURE_SAMPLE_RATE // audio_capture_core.INTERNAL_SAMPLE_RATE
+        )
         with (
             mock.patch.object(
                 meki_audio_capture,
@@ -625,12 +683,17 @@ class RealtimeTranslationSessionTests(unittest.TestCase):
             summary = session.wait_for_completion()
 
         self.assertEqual(create_vad.call_args.args, (Path("vad.onnx"), "BALANCED"))
+        self.assertEqual(
+            create_vad.call_args.kwargs,
+            {"num_threads": meki_audio_capture.REALTIME_VAD_NUM_THREADS},
+        )
         create_recognizer.assert_called_once_with(
             {"vad": Path("vad.onnx")},
             model_key="parakeet",
             precision="int8",
+            num_threads=meki_audio_capture.REALTIME_STT_NUM_THREADS,
         )
-        self.assertEqual([len(window) for window in fake_vad.accepted_windows], [512, 512])
+        self.assertEqual([len(window) for window in fake_vad.accepted_windows], [512] * 28)
         self.assertEqual(fake_vad.flush_calls, 1)
         self.assertEqual(
             deliveries,
@@ -647,6 +710,131 @@ class RealtimeTranslationSessionTests(unittest.TestCase):
         self.assertFalse(session._translation_thread.is_alive())
         self.assertEqual(realtime_flags, [True])
         self.assertTrue(any("번역 1개" in status for status in statuses))
+
+    def test_live_vad_merges_intervals_when_their_padding_overlaps(self) -> None:
+        class FakeVad:
+            def __init__(self, items: list[object]) -> None:
+                self._items = items
+
+            def empty(self) -> bool:
+                return not self._items
+
+            @property
+            def front(self) -> object:
+                return self._items[0]
+
+            def pop(self) -> None:
+                self._items.pop(0)
+
+        session = self._session()
+        source = np.arange(20_000, dtype=np.float32)
+        session._append_live_history(source)
+        # The raw 0.25-second gap exceeds BALANCED's merge_gap (0.15 s), but
+        # is covered by its 0.10 s pre- plus 0.20 s post-padding.  Batch and
+        # live segmentation must therefore form one contiguous request.
+        session._vad = FakeVad(
+            [
+                types.SimpleNamespace(samples=source[3_200:6_400], start=3_200),
+                types.SimpleNamespace(samples=source[10_400:13_600], start=10_400),
+            ]
+        )
+
+        session._drain_vad()
+        session._flush_live_pending_segments(force=True)
+
+        segment = session._stt_queue.get_nowait()
+        self.assertTrue(session._stt_queue.empty())
+        self.assertEqual((segment.start_time, segment.end_time), (0.1, 1.05))
+        np.testing.assert_array_equal(segment.audio, source[1_600:16_800])
+
+    def test_live_vad_waits_for_a_delayed_nearby_interval_before_flushing(self) -> None:
+        class FakeVad:
+            def __init__(self, items: list[object]) -> None:
+                self._items = items
+
+            def empty(self) -> bool:
+                return not self._items
+
+            @property
+            def front(self) -> object:
+                return self._items[0]
+
+            def pop(self) -> None:
+                self._items.pop(0)
+
+        session = self._session()
+        source = np.arange(25_600, dtype=np.float32)
+        # The first interval is finalized after BALANCED's 0.30 s silence.
+        # At that point the second, nearby interval has not been emitted by
+        # native VAD yet. Its padded range overlaps the first, so batch and
+        # live processing must still produce one STT request.
+        session._append_live_history(source[:11_200])
+        session._vad = FakeVad(
+            [types.SimpleNamespace(samples=source[3_200:6_400], start=3_200)]
+        )
+        session._drain_vad()
+        session._flush_live_pending_segments()
+        self.assertTrue(session._stt_queue.empty())
+
+        session._append_live_history(source[11_200:16_000])
+        session._vad = FakeVad(
+            [types.SimpleNamespace(samples=source[8_000:11_200], start=8_000)]
+        )
+        session._drain_vad()
+        session._append_live_history(source[16_000:])
+        session._flush_live_pending_segments()
+
+        segment = session._stt_queue.get_nowait()
+        self.assertTrue(session._stt_queue.empty())
+        self.assertEqual((segment.start_time, segment.end_time), (0.1, 0.9))
+        np.testing.assert_array_equal(segment.audio, source[1_600:14_400])
+
+    def test_live_vad_applies_padding_and_forced_cut_overlap(self) -> None:
+        class FakeVad:
+            def __init__(self, item: object) -> None:
+                self._items = [item]
+
+            def empty(self) -> bool:
+                return not self._items
+
+            @property
+            def front(self) -> object:
+                return self._items[0]
+
+            def pop(self) -> None:
+                self._items.pop(0)
+
+        session = meki_audio_capture.RealtimeTranslationSession(
+            {"vad": Path("vad.onnx")},
+            "parakeet",
+            "int8",
+            "FAST",
+            "http://script",
+            "http://hytrans",
+            "live-session",
+            lambda _status: None,
+        )
+        # FAST: 0.05 s pre-padding, 0.10 s post-padding, a 10-second
+        # maximum, and a 0.25-second forced-cut overlap.
+        source = np.arange(165_600, dtype=np.float32)
+        session._append_live_history(source)
+        session._vad = FakeVad(
+            types.SimpleNamespace(samples=source[3_200:163_200], start=3_200)
+        )
+
+        session._drain_vad()
+        session._flush_live_pending_segments(force=True)
+
+        first = session._stt_queue.get_nowait()
+        second = session._stt_queue.get_nowait()
+        self.assertTrue(session._stt_queue.empty())
+        self.assertEqual((first.start_time, first.end_time), (0.15, 10.15))
+        self.assertEqual((second.start_time, second.end_time), (9.9, 10.3))
+        self.assertTrue(first.is_forced_cut)
+        self.assertTrue(second.is_forced_cut)
+        self.assertEqual(second.previous_overlap, 0.25)
+        np.testing.assert_array_equal(first.audio, source[2_400:162_400])
+        np.testing.assert_array_equal(second.audio, source[158_400:164_800])
 
     def test_failed_translator_with_full_queue_cannot_deadlock_stt_shutdown(self) -> None:
         session = self._session()

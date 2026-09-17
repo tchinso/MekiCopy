@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import os
 import tempfile
 import threading
@@ -221,6 +222,7 @@ class MekiSubtitleIntegrationTests(unittest.TestCase):
             _translate=translator,
             _events=events,
             _emit_status=mock.Mock(),
+            _emit_log=mock.Mock(),
             _cancel_event=threading.Event(),
         )
         with (
@@ -237,6 +239,7 @@ class MekiSubtitleIntegrationTests(unittest.TestCase):
         self.assertEqual(process.call_args.kwargs["vad_preset"], "FAST")
         self.assertIs(process.call_args.kwargs["translate"], translator)
         self.assertEqual(process.call_args.kwargs["stt_model_root"], shared_root)
+        self.assertIs(process.call_args.kwargs["log"], window._emit_log)
         events.put.assert_called_once_with(("done", summary))
 
     def test_subtitle_job_does_not_start_when_hytrans_launch_failed(self) -> None:
@@ -295,6 +298,52 @@ class MekiSubtitleIntegrationTests(unittest.TestCase):
         self.assertTrue(window._closing)
         window._cancel.assert_called_once_with()
         window.withdraw.assert_called_once_with()
+
+
+class MekiSubtitleUiBufferTests(unittest.TestCase):
+    @staticmethod
+    def _buffer_window() -> SimpleNamespace:
+        return SimpleNamespace(
+            _event_lock=threading.Lock(),
+            _latest_status=None,
+            _pending_logs=deque(),
+            _dropped_log_count=0,
+        )
+
+    def test_status_updates_are_coalesced_to_the_latest_value(self) -> None:
+        window = self._buffer_window()
+        MekiSubtitleWindow._emit_status(window, 0.1, "첫 상태")
+        MekiSubtitleWindow._emit_status(window, 0.9, "최신 상태")
+        status, logs = MekiSubtitleWindow._take_pending_updates(window)
+        self.assertEqual(status, (0.9, "최신 상태"))
+        self.assertEqual(logs, [])
+        self.assertIsNone(window._latest_status)
+
+    def test_log_buffer_keeps_recent_entries_and_reports_drops(self) -> None:
+        window = self._buffer_window()
+        window._PENDING_LOG_MAX_ENTRIES = 2
+        for text in ("첫 로그", "둘째 로그", "셋째 로그", "넷째 로그"):
+            MekiSubtitleWindow._emit_log(window, text)
+        status, logs = MekiSubtitleWindow._take_pending_updates(window)
+        self.assertIsNone(status)
+        self.assertEqual(
+            logs,
+            [
+                "… 이전 처리 기록 2개는 생략했습니다.",
+                "셋째 로그",
+                "넷째 로그",
+            ],
+        )
+
+    def test_visible_log_trim_removes_excess_lines_in_one_batch(self) -> None:
+        log_text = mock.Mock()
+        log_text.index.return_value = "2002.0"
+        window = SimpleNamespace(
+            log_text=log_text,
+            _VISIBLE_LOG_MAX_LINES=2_000,
+        )
+        MekiSubtitleWindow._trim_visible_log(window)
+        log_text.delete.assert_called_once_with("1.0", "3.0")
 
 
 if __name__ == "__main__":

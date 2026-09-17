@@ -82,7 +82,18 @@ def _probe_service(expected_app: str, base_url: str, timeout: float = 2.0) -> st
         detail = ready.get("error")
         suffix = f" ({detail})" if detail else ""
         raise RuntimeError(f"HYTrans 번역 모델이 준비되지 않았습니다: {worker_state}{suffix}")
-    return str(ready.get("state") or "READY")
+    state = str(ready.get("state") or "READY")
+    details: list[str] = []
+    device = str(ready.get("device") or "").strip()
+    device_detail = str(ready.get("deviceDetail") or "").strip()
+    warning = str(ready.get("warning") or "").strip()
+    if device:
+        details.append(f"device={device}")
+    if device_detail:
+        details.append(f"adapter={device_detail}")
+    if warning:
+        details.append(warning)
+    return f"{state} ({'; '.join(details)})" if details else state
 
 
 def _is_loopback_port_open(port: int, timeout: float = 0.25) -> bool:

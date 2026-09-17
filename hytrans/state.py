@@ -11,6 +11,7 @@ class AppState:
     worker_ready: bool = False
     worker_connected: bool = False
     device: Optional[str] = None
+    device_detail: Optional[str] = None
     model: Optional[str] = None
     dtype: Optional[str] = None
     model_mode: Optional[str] = None
@@ -24,6 +25,7 @@ class AppState:
             "workerConnected": self.worker_connected,
             "state": self.state,
             "device": self.device,
+            "deviceDetail": self.device_detail,
             "model": self.model,
             "dtype": self.dtype,
             "modelMode": self.model_mode,

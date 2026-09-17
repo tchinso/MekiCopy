@@ -89,6 +89,14 @@ from companion_watchdog import (
     RecoveryRequest,
     default_health_evaluator,
 )
+from companion_manual_close import (
+    MANUAL_CLOSE_EXIT_CODE,
+    ManualCloseSignal,
+    consume_manual_close_signal,
+    create_manual_close_signal,
+    discard_manual_close_signal,
+    manual_close_signal_arguments,
+)
 from mekicopy_ocr import (
     OcrError,
     _get_ocr_engine,
@@ -188,6 +196,15 @@ _RUNTIME_PATH_READY = False
 _WINDOW_STREAM = None
 _ORT_PRELOAD_READY = False
 _APP_USER_MODEL_ID_READY = False
+_COMPANION_PROCESS_ATTRIBUTES = {
+    "MekiAudioCapture": "audio_capture_process",
+    "MekiScript": "script_process",
+    "MekiOverlayer": "overlayer_process",
+    "HYTrans": "hytrans_process",
+}
+_MANUALLY_CLOSABLE_COMPANIONS = frozenset(
+    _COMPANION_PROCESS_ATTRIBUTES
+) - {"HYTrans"}
 
 
 
@@ -206,7 +223,10 @@ class DetachedOcrButtonApp:
     MIN_WIDTH = 120
     MIN_HEIGHT = 80
     RESIZE_MARGIN = 10
-    SETTINGS_POLL_MS = 500
+    # The main window writes this file only when settings change.  Polling its
+    # metadata every two seconds is enough for the detached companion while
+    # avoiding a ConfigParser read twice per second for its whole lifetime.
+    SETTINGS_POLL_MS = 2_000
 
     def __init__(self) -> None:
         _enable_dpi_awareness()
@@ -223,7 +243,8 @@ class DetachedOcrButtonApp:
         self._drag_start: tuple[int, int] | None = None
         self._drag_geometry: tuple[int, int, int, int] | None = None
         self._suppress_next_click = False
-        self._settings_signature: tuple | None = None
+        self._settings_signature = self._settings_key(self.settings)
+        self._settings_file_state = self._current_settings_file_state()
         self._settings_after_id: str | None = None
         self._geometry_after_id: str | None = None
         self._closing = False
@@ -498,6 +519,18 @@ class DetachedOcrButtonApp:
             settings.overlay_translation_mode,
         )
 
+    @staticmethod
+    def _current_settings_file_state() -> tuple[str, int, int]:
+        """Return a cheap change marker without parsing the settings file."""
+
+        path = mekicopy_settings.SETTINGS_FILE
+        try:
+            stat = os.stat(path)
+            return path, int(stat.st_mtime_ns), int(stat.st_size)
+        except OSError:
+            # Missing files are normal before the first explicit save.
+            return path, -1, -1
+
     def _schedule_settings_poll(self) -> None:
         if not self._closing:
             self._settings_after_id = self.root.after(
@@ -509,7 +542,12 @@ class DetachedOcrButtonApp:
         self._settings_after_id = None
         if self._closing:
             return
+        file_state = self._current_settings_file_state()
+        if file_state == self._settings_file_state:
+            self._schedule_settings_poll()
+            return
         latest = load_settings()
+        self._settings_file_state = file_state
         signature = self._settings_key(latest)
         if signature != self._settings_signature:
             self.capture_geometry(persist=True)
@@ -660,6 +698,10 @@ class MainWindow(tk.Tk):
         self.overlayer_process: subprocess.Popen | None = None
         self.audio_capture_process: subprocess.Popen | None = None
         self.script_process: subprocess.Popen | None = None
+        # Per-launch close notices let a companion distinguish an explicitly
+        # confirmed user close from a crash without broadening ownership beyond
+        # the Popen children this window created.
+        self._companion_manual_close_signals: dict[str, ManualCloseSignal] = {}
         self.magpie_process: subprocess.Popen | None = None
         self.subtitle_window: MekiSubtitleWindow | None = None
         self._magpie_install_results: queue.Queue[tuple[bool, str]] = queue.Queue()
@@ -1336,6 +1378,12 @@ class MainWindow(tk.Tk):
                     "companion_exited_after_start",
                     f"{app_name} exit_code={exit_code}",
                 )
+                if exit_code == MANUAL_CLOSE_EXIT_CODE:
+                    # A companion only uses this code after its own close
+                    # confirmation.  Its one-shot notice normally reaches the
+                    # watchdog first; this avoids a misleading startup error
+                    # when the user closes a just-opened child very quickly.
+                    return
                 if notify:
                     messagebox.showerror(
                         "MekiCopy",
@@ -1369,12 +1417,25 @@ class MainWindow(tk.Tk):
         app_name: str,
         process: subprocess.Popen,
         base_url: str,
+        *,
+        manual_close_signal: ManualCloseSignal | None = None,
     ) -> None:
         """Register only a child this MekiCopy instance just spawned."""
 
         evaluator = self._companion_health_evaluators.get(app_name)
         if evaluator is None:
             raise ValueError(f"지원하지 않는 감시 대상입니다: {app_name}")
+        signals = getattr(self, "_companion_manual_close_signals", None)
+        if signals is None:
+            signals = {}
+            self._companion_manual_close_signals = signals
+        previous_signal = signals.get(app_name)
+        if manual_close_signal is None:
+            signals.pop(app_name, None)
+        else:
+            signals[app_name] = manual_close_signal
+        if previous_signal is not manual_close_signal:
+            discard_manual_close_signal(previous_signal)
         self._companion_watchdog.track(
             app_name,
             expected_app=app_name,
@@ -1383,12 +1444,105 @@ class MainWindow(tk.Tk):
             evaluator=evaluator,
         )
 
+    def _create_manual_close_signal(self, app_name: str) -> ManualCloseSignal | None:
+        """Prepare an optional close notice without making launch depend on disk."""
+
+        try:
+            return create_manual_close_signal(app_name)
+        except OSError as exc:
+            # The exit-code fallback still prevents a confirmed close from
+            # being revived if the normal per-launch notice cannot be created.
+            _log_runtime_error("create_companion_manual_close_signal", exc)
+            return None
+
+    def _consume_manual_close_signal(
+        self,
+        app_name: str,
+        process: subprocess.Popen | None,
+    ) -> bool:
+        """Stop supervising a child which the user explicitly chose to close."""
+
+        signals = getattr(self, "_companion_manual_close_signals", None)
+        if not signals:
+            return False
+        signal = signals.get(app_name)
+        if signal is None:
+            return False
+        process_id = getattr(process, "pid", None)
+        if not isinstance(process_id, int) or isinstance(process_id, bool) or process_id <= 0:
+            return False
+        if not consume_manual_close_signal(
+            signal,
+            app_name=app_name,
+            process_id=process_id,
+        ):
+            return False
+        signals.pop(app_name, None)
+        self._companion_watchdog.untrack(app_name)
+        _log_runtime_message(
+            "companion_manual_close",
+            f"{app_name} was closed after user confirmation; watchdog recovery disabled",
+        )
+        return True
+
+    def _consume_pending_manual_close_signals(self) -> None:
+        """Process close notices before draining queued recovery requests."""
+
+        for app_name in _MANUALLY_CLOSABLE_COMPANIONS:
+            process_attribute = _COMPANION_PROCESS_ATTRIBUTES[app_name]
+            process = getattr(self, process_attribute, None)
+            try:
+                has_exited = process is not None and process.poll() is not None
+            except Exception:
+                has_exited = False
+            if not has_exited:
+                # Do not read three signal files every 500 ms while companions
+                # are idle.  A recovery request below still checks its signal
+                # directly, covering the close/recovery race.
+                continue
+            MainWindow._consume_manual_close_signal(
+                self,
+                app_name,
+                process,
+            )
+
+    def _suppress_confirmed_manual_close_recovery(
+        self,
+        request: RecoveryRequest,
+        process: subprocess.Popen | None,
+    ) -> bool:
+        """Reject a recovery request when its child confirmed a manual close."""
+
+        if request.name not in _MANUALLY_CLOSABLE_COMPANIONS:
+            return False
+        if MainWindow._consume_manual_close_signal(self, request.name, process):
+            return True
+        if request.exit_code != MANUAL_CLOSE_EXIT_CODE:
+            return False
+        if not self._companion_watchdog.matches_process(request, process):
+            return False
+
+        # The signed file is the normal path.  Exit status is deliberately a
+        # fallback for the small window between a confirmed close and a failed
+        # notice write (for example, a temporary storage error).
+        signals = getattr(self, "_companion_manual_close_signals", None)
+        if signals:
+            discard_manual_close_signal(signals.pop(request.name, None))
+        self._companion_watchdog.untrack(request.name)
+        _log_runtime_message(
+            "companion_manual_close",
+            f"{request.name} exited after user confirmation; watchdog recovery disabled",
+        )
+        return True
+
     def _schedule_companion_watchdog_poll(self) -> None:
         if self._closing:
             return
         try:
             self._companion_watchdog_after_id = self.after(
-                250,
+                # Health probes run on a worker thread; this is only the UI
+                # handoff for queued recovery work, so 500 ms remains prompt.
+                500,
                 self._poll_companion_watchdog,
             )
         except tk.TclError:
@@ -1399,7 +1553,20 @@ class MainWindow(tk.Tk):
         try:
             if self._closing:
                 return
+            self._consume_pending_manual_close_signals()
             for request in self._companion_watchdog.drain_recovery_requests():
+                process_attribute = _COMPANION_PROCESS_ATTRIBUTES.get(request.name)
+                process = (
+                    getattr(self, process_attribute, None)
+                    if process_attribute is not None
+                    else None
+                )
+                if MainWindow._suppress_confirmed_manual_close_recovery(
+                    self,
+                    request,
+                    process,
+                ):
+                    continue
                 # Claiming also drops a queued failure when the companion has
                 # become healthy again before this UI callback runs.
                 if self._companion_watchdog.claim_recovery(request):
@@ -1410,17 +1577,14 @@ class MainWindow(tk.Tk):
     def _recover_owned_companion(self, request: RecoveryRequest) -> None:
         """Restart one unresponsive child without blocking the probe thread."""
 
-        process_attribute = {
-            "MekiAudioCapture": "audio_capture_process",
-            "MekiScript": "script_process",
-            "MekiOverlayer": "overlayer_process",
-            "HYTrans": "hytrans_process",
-        }.get(request.name)
+        process_attribute = _COMPANION_PROCESS_ATTRIBUTES.get(request.name)
         if process_attribute is None:
             self._companion_watchdog.acknowledge_recovery(request, succeeded=False)
             return
 
         process = getattr(self, process_attribute, None)
+        if MainWindow._suppress_confirmed_manual_close_recovery(self, request, process):
+            return
         if not self._companion_watchdog.matches_process(request, process):
             # Never use a stale window attribute to terminate a process.  This
             # protects an independently launched replacement from a queued
@@ -1577,6 +1741,7 @@ class MainWindow(tk.Tk):
             if notify:
                 messagebox.showerror("MekiCopy", detail, parent=self)
             return False
+        manual_close_signal = self._create_manual_close_signal("MekiScript")
         cfg = self._script_config_payload()
         command += [
             "--port", str(self.settings.script_port),
@@ -1590,6 +1755,8 @@ class MainWindow(tk.Tk):
             "--translated-size", str(cfg["translated_size"]),
             "--translated-font", str(cfg["translated_font"]),
         ]
+        if manual_close_signal is not None:
+            command += manual_close_signal_arguments(manual_close_signal)
         if self.settings.debug_logging:
             command.append("--debug-log")
         try:
@@ -1605,11 +1772,13 @@ class MainWindow(tk.Tk):
                 "MekiScript",
                 self.script_process,
                 self._script_base_url(),
+                manual_close_signal=manual_close_signal,
             )
             if notify:
                 messagebox.showinfo("MekiCopy", "MekiScript를 실행했습니다.", parent=self)
             return True
         except Exception as exc:
+            discard_manual_close_signal(manual_close_signal)
             _log_runtime_error("start_script", exc)
             if notify:
                 messagebox.showerror("MekiCopy", f"MekiScript 실행 실패:\n{exc}", parent=self)
@@ -1647,6 +1816,7 @@ class MainWindow(tk.Tk):
             if notify:
                 messagebox.showerror("MekiCopy", detail, parent=self)
             return False
+        manual_close_signal = self._create_manual_close_signal("MekiAudioCapture")
         cfg = self._audio_capture_config_payload()
         command += [
             "--port", str(self.settings.audio_capture_port),
@@ -1656,6 +1826,8 @@ class MainWindow(tk.Tk):
             "--script-url", str(cfg["scriptUrl"]),
             "--hytrans-url", str(cfg["hytransUrl"]),
         ]
+        if manual_close_signal is not None:
+            command += manual_close_signal_arguments(manual_close_signal)
         if self.settings.debug_logging:
             command.append("--debug-log")
         try:
@@ -1671,11 +1843,13 @@ class MainWindow(tk.Tk):
                 "MekiAudioCapture",
                 self.audio_capture_process,
                 self._audio_capture_base_url(),
+                manual_close_signal=manual_close_signal,
             )
             if notify:
                 messagebox.showinfo("MekiCopy", "MekiAudioCapture를 실행했습니다.", parent=self)
             return True
         except Exception as exc:
+            discard_manual_close_signal(manual_close_signal)
             _log_runtime_error("start_audio_capture", exc)
             if notify:
                 messagebox.showerror("MekiCopy", f"MekiAudioCapture 실행 실패:\n{exc}", parent=self)
@@ -2015,6 +2189,7 @@ class MainWindow(tk.Tk):
                 messagebox.showerror("MekiCopy", detail, parent=self)
             return False
 
+        manual_close_signal = self._create_manual_close_signal("MekiOverlayer")
         cfg = self._overlayer_config_payload()
         command += [
             "--port",
@@ -2038,6 +2213,8 @@ class MainWindow(tk.Tk):
             "--text-font",
             str(cfg["text_font"]),
         ]
+        if manual_close_signal is not None:
+            command += manual_close_signal_arguments(manual_close_signal)
         if self.settings.debug_logging:
             command.append("--debug-log")
         try:
@@ -2057,11 +2234,13 @@ class MainWindow(tk.Tk):
                 "MekiOverlayer",
                 self.overlayer_process,
                 self._overlayer_base_url(),
+                manual_close_signal=manual_close_signal,
             )
             if notify:
                 messagebox.showinfo("MekiCopy", "MekiOverlayer를 실행했습니다.", parent=self)
             return True
         except Exception as exc:
+            discard_manual_close_signal(manual_close_signal)
             _log_runtime_error("start_overlayer", exc)
             if notify:
                 messagebox.showerror("MekiCopy", f"MekiOverlayer 실행 실패:\n{exc}", parent=self)
@@ -2366,6 +2545,9 @@ class MainWindow(tk.Tk):
                 pass
             self._companion_watchdog_after_id = None
         self._companion_watchdog.stop()
+        for signal in self._companion_manual_close_signals.values():
+            discard_manual_close_signal(signal)
+        self._companion_manual_close_signals.clear()
         if subtitle_window is not None and subtitle_window.winfo_exists():
             subtitle_window.cancel_for_parent_shutdown()
         if self._hytrans_restart_after_id is not None:

@@ -11,6 +11,13 @@ from typing import Any, Callable
 from .logging_setup import debug, error
 
 
+DEFAULT_MAX_QUEUED_JOBS = 16
+
+
+class TranslationQueueOverloadedError(RuntimeError):
+    """Raised when a short burst has filled the serialized worker queue."""
+
+
 @dataclass
 class TranslationJob:
     id: str
@@ -23,16 +30,35 @@ class TranslationJob:
 
 
 class TranslationQueue:
-    def __init__(self) -> None:
-        self.queue: asyncio.Queue[TranslationJob] = asyncio.Queue()
+    """Serialize browser-worker requests without retaining an unbounded burst.
+
+    The browser worker processes one translation at a time.  Admission is
+    therefore deliberately non-blocking: callers either acquire one of the
+    bounded waiting slots immediately or receive a retryable overload error.
+    Letting ``submit`` await an unbounded queue would retain every request body
+    and its HTTP task while a slow model is busy, and could also delay shutdown.
+    """
+
+    _STOP_MARKER = object()
+
+    def __init__(self, *, max_queued_jobs: int = DEFAULT_MAX_QUEUED_JOBS) -> None:
+        if max_queued_jobs < 1:
+            raise ValueError("max_queued_jobs must be at least 1")
+        self.max_queued_jobs = max_queued_jobs
+        self.queue: asyncio.Queue[TranslationJob | object] = asyncio.Queue(
+            maxsize=max_queued_jobs
+        )
         self.pending: dict[str, TranslationJob] = {}
         self.worker_ws: Any = None
         self._worker_usable = False
         self._worker_invalidated_callback: Callable[[str], None] | None = None
         self._last_worker_invalidation_reason: str | None = None
         self.running = False
+        self._stopped = False
 
     def set_worker(self, websocket: Any) -> None:
+        if self._stopped:
+            return
         if self.worker_ws is websocket:
             return
         if self.worker_ws is not None:
@@ -43,7 +69,11 @@ class TranslationQueue:
     @property
     def worker_available(self) -> bool:
         """Return whether new work may be dispatched to the active worker."""
-        return self.worker_ws is not None and self._worker_usable
+        return (
+            not self._stopped
+            and self.worker_ws is not None
+            and self._worker_usable
+        )
 
     def set_worker_invalidated_callback(
         self,
@@ -136,6 +166,9 @@ class TranslationQueue:
             except asyncio.QueueEmpty:
                 return
             try:
+                if job is self._STOP_MARKER:
+                    continue
+                assert isinstance(job, TranslationJob)
                 job.abandoned = True
                 if not job.future.done():
                     job.future.set_exception(RuntimeError(reason))
@@ -172,7 +205,22 @@ class TranslationQueue:
             created_at=time.time(),
             max_new_tokens=max_new_tokens,
         )
-        await self.queue.put(job)
+        try:
+            # Do not await capacity here.  A full browser-worker queue is an
+            # overload condition, not a reason to retain an arbitrary number
+            # of HTTP handlers and their request bodies in memory.
+            self.queue.put_nowait(job)
+        except asyncio.QueueFull as exc:
+            debug(
+                "queue_overloaded",
+                (
+                    f"queued: {self.queue.qsize()}/{self.max_queued_jobs}\n"
+                    f"chars: {len(text)}"
+                ),
+            )
+            raise TranslationQueueOverloadedError(
+                "translation queue is busy; please retry"
+            ) from exc
         debug(
             "queue_submit",
             (
@@ -203,13 +251,32 @@ class TranslationQueue:
                     job.future.cancel()
             error("translation_timeout", f"id: {job.id}, chars: {len(text)}")
             raise
+        except asyncio.CancelledError:
+            # A disconnected HTTP client must not leave a queued request to be
+            # translated later.  Do not cancel an in-flight browser request:
+            # the single worker still needs its response before it can safely
+            # receive the next request.
+            if job.id not in self.pending:
+                job.abandoned = True
+                if not job.future.done():
+                    job.future.cancel()
+            raise
 
     async def run(self, default_max_new_tokens: int) -> None:
+        if self._stopped:
+            return
         self.running = True
         try:
-            while self.running:
+            while True:
                 job = await self.queue.get()
                 try:
+                    if job is self._STOP_MARKER:
+                        return
+                    assert isinstance(job, TranslationJob)
+                    if not self.running:
+                        if not job.future.done():
+                            job.future.set_exception(RuntimeError("server is stopping"))
+                        continue
                     if job.abandoned:
                         if not job.future.done():
                             job.future.cancel()
@@ -240,7 +307,12 @@ class TranslationQueue:
                     if not job.future.done():
                         job.future.set_exception(exc)
                 finally:
-                    self.pending.pop(job.id, None)
+                    # The shutdown marker deliberately is not a
+                    # ``TranslationJob``.  ``return`` above still runs this
+                    # ``finally`` block, so do not try to read ``id`` from
+                    # the marker while gracefully waking an idle worker.
+                    if isinstance(job, TranslationJob):
+                        self.pending.pop(job.id, None)
                     self.queue.task_done()
         finally:
             self.running = False
@@ -256,8 +328,17 @@ class TranslationQueue:
             job.future.set_exception(RuntimeError(message))
 
     def stop(self) -> None:
+        if self._stopped:
+            return
+        # Set this before draining so a request cannot be admitted after the
+        # queue has been emptied for shutdown.
+        self._stopped = True
         self.running = False
         self.worker_ws = None
         self._worker_usable = False
         self._fail_pending("server is stopping")
         self._fail_queued("server is stopping")
+        # Wake run() when it is waiting on an empty queue.  This keeps graceful
+        # shutdown independent of task cancellation and never blocks because
+        # _fail_queued() just made room.
+        self.queue.put_nowait(self._STOP_MARKER)

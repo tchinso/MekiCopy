@@ -14,6 +14,7 @@ from typing import Any
 
 
 DEFAULT_MAX_UI_HEARTBEAT_AGE_SECONDS = 7.0
+DEFAULT_UI_HEARTBEAT_INTERVAL_MS = 1_000
 
 
 class UiHeartbeat:
@@ -28,7 +29,12 @@ class UiHeartbeat:
         with self._lock:
             self._last_tick = time.monotonic()
 
-    def schedule(self, root: Any, *, interval_ms: int = 250) -> None:
+    def schedule(
+        self,
+        root: Any,
+        *,
+        interval_ms: int = DEFAULT_UI_HEARTBEAT_INTERVAL_MS,
+    ) -> None:
         """Refresh on Tk's event loop until that loop is no longer alive."""
 
         delay = max(25, int(interval_ms))

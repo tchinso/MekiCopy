@@ -314,11 +314,11 @@ function New-ReleaseZip {
         throw "tar.exe is required to create the release ZIP. Use Windows 10 or newer."
     }
 
+    # Archives are always created in a unique staging directory.  Refusing to
+    # overwrite here ensures a partially failed build can never erase the last
+    # verified release archive.
     if (Test-Path -LiteralPath $ArchivePath) {
-        if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
-            throw "Release archive path is not a file: $ArchivePath"
-        }
-        Remove-Item -LiteralPath $ArchivePath -Force
+        throw "Staged release archive path already exists: $ArchivePath"
     }
 
     $parent = Split-Path -Parent $SourceRoot
@@ -334,6 +334,119 @@ function New-ReleaseZip {
     if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf) -or
         (Get-Item -LiteralPath $ArchivePath).Length -le 0) {
         throw "Release ZIP was not created: $ArchivePath"
+    }
+}
+
+function Publish-StagedRelease {
+    param(
+        [Parameter(Mandatory = $true)][string]$StagingRoot,
+        [Parameter(Mandatory = $true)][string]$StagedReleaseRoot,
+        [Parameter(Mandatory = $true)][string]$ReleaseRoot,
+        [Parameter(Mandatory = $true)][string]$StagedArchivePath,
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$StagedChecksumPath,
+        [Parameter(Mandatory = $true)][string]$ChecksumPath
+    )
+
+    # Build and smoke-test every artifact before touching a previous release.
+    # All paths are under the workspace, so same-volume moves are renames.  A
+    # backup lets us restore the prior set if publishing any later artifact
+    # fails (for example because a user still has the old ZIP open).
+    $operations = @(
+        [pscustomobject]@{
+            Source = $StagedReleaseRoot
+            Destination = $ReleaseRoot
+            Backup = $null
+            Published = $false
+            Description = "release directory"
+        },
+        [pscustomobject]@{
+            Source = $StagedArchivePath
+            Destination = $ArchivePath
+            Backup = $null
+            Published = $false
+            Description = "release archive"
+        },
+        [pscustomobject]@{
+            Source = $StagedChecksumPath
+            Destination = $ChecksumPath
+            Backup = $null
+            Published = $false
+            Description = "release checksum"
+        }
+    )
+    foreach ($operation in $operations) {
+        if (-not (Test-Path -LiteralPath $operation.Source)) {
+            throw "Staged $($operation.Description) is missing: $($operation.Source)"
+        }
+    }
+
+    $backupSuffix = "$(Get-Date -Format 'yyyyMMdd-HHmmss')-$([guid]::NewGuid().ToString('N'))"
+    try {
+        foreach ($operation in $operations) {
+            if (Test-Path -LiteralPath $operation.Destination) {
+                $operation.Backup = "$($operation.Destination).previous-$backupSuffix"
+                Move-Item `
+                    -LiteralPath $operation.Destination `
+                    -Destination $operation.Backup `
+                    -ErrorAction Stop
+            }
+            Move-Item `
+                -LiteralPath $operation.Source `
+                -Destination $operation.Destination `
+                -ErrorAction Stop
+            $operation.Published = $true
+        }
+    }
+    catch {
+        $publishError = $_
+        for ($index = $operations.Count - 1; $index -ge 0; $index--) {
+            $operation = $operations[$index]
+            if ($operation.Published -and (Test-Path -LiteralPath $operation.Destination)) {
+                $failedPath = Join-Path `
+                    $StagingRoot `
+                    ("publish-failed-$index-" + (Split-Path -Leaf $operation.Destination))
+                try {
+                    Move-Item `
+                        -LiteralPath $operation.Destination `
+                        -Destination $failedPath `
+                        -ErrorAction Stop
+                }
+                catch {
+                    Write-Warning "Could not move the new $($operation.Description) aside during rollback: $($operation.Destination)"
+                    continue
+                }
+            }
+            if ($operation.Backup -and (Test-Path -LiteralPath $operation.Backup)) {
+                try {
+                    Move-Item `
+                        -LiteralPath $operation.Backup `
+                        -Destination $operation.Destination `
+                        -ErrorAction Stop
+                }
+                catch {
+                    Write-Warning "Could not restore the previous $($operation.Description): $($operation.Backup)"
+                }
+            }
+        }
+        throw $publishError
+    }
+
+    # Only remove the replaced artifacts after the complete new set has been
+    # published.  A cleanup failure does not invalidate the verified release.
+    foreach ($operation in $operations) {
+        if ($operation.Backup -and (Test-Path -LiteralPath $operation.Backup)) {
+            try {
+                Remove-Item `
+                    -LiteralPath $operation.Backup `
+                    -Recurse `
+                    -Force `
+                    -ErrorAction Stop
+            }
+            catch {
+                Write-Warning "Previous $($operation.Description) was retained at: $($operation.Backup)"
+            }
+        }
     }
 }
 
@@ -536,9 +649,11 @@ if (-not $SkipDependencyInstall) {
     )
     # meikiocr depends on the CPU distribution, while onnxruntime-gpu exposes
     # the same import package. Reinstall the GPU wheel last so its binaries win.
+    # CUDA/cuDNN extras were already resolved from requirements-build.txt and
+    # are bundled with MekiCopy below; do not depend on a user's CUDA toolkit.
     Invoke-CheckedPython @(
         "-m", "pip", "install", "--force-reinstall", "--no-deps",
-        "onnxruntime-gpu==$OnnxRuntimeGpuVersion"
+        "onnxruntime-gpu[cuda,cudnn]==$OnnxRuntimeGpuVersion"
     )
 }
 
@@ -559,6 +674,7 @@ import soundcard
 import typer
 import uvicorn
 import cv2
+from importlib.util import find_spec
 if not callable(getattr(sherpa_onnx.OfflineRecognizer, "from_nemo_ctc", None)):
     raise SystemExit("sherpa-onnx does not provide OfflineRecognizer.from_nemo_ctc")
 root = tk.Tk()
@@ -591,6 +707,22 @@ if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
     raise SystemExit(
         "onnxruntime-gpu metadata is installed, but CUDAExecutionProvider is missing; "
         "the CPU wheel likely overwrote the GPU runtime"
+    )
+# ONNX Runtime 1.30 uses CUDA 13's consolidated package layout. The CUDA
+# extras share ``nvidia.cu13`` while cuDNN remains in ``nvidia.cudnn``.
+# Checking the importable namespaces catches a partial extras install before
+# PyInstaller can silently create a CPU-only release.
+gpu_runtime_packages = (
+    "nvidia.cu13",
+    "nvidia.cudnn",
+)
+missing_gpu_runtime_packages = [
+    package for package in gpu_runtime_packages if find_spec(package) is None
+]
+if missing_gpu_runtime_packages:
+    raise SystemExit(
+        "onnxruntime-gpu CUDA/cuDNN runtime packages are missing: "
+        + ", ".join(missing_gpu_runtime_packages)
     )
 print(f"ONNX Runtime providers: {onnxruntime.get_available_providers()}")
 print("Pinned build dependencies and Tk are ready")
@@ -663,17 +795,13 @@ foreach ($subtitleTool in @("ffmpeg.exe", "ffprobe.exe")) {
 }
 
 Remove-WorkspaceDirectory "build"
-$distRelativePath = "MekiCopy-$PackageFlavor"
-try {
-    Remove-WorkspaceDirectory $distRelativePath
-}
-catch {
-    # A running copy of an older build can keep a DLL locked on Windows.
-    # Preserve that process and publish the new verified build separately.
-    Write-Warning "The existing release folder is in use; publishing to a timestamped folder instead."
-    $distRelativePath = "MekiCopy-$PackageFlavor-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-    Remove-WorkspaceDirectory $distRelativePath
-}
+$releaseName = "MekiCopy-$PackageFlavor"
+$stagingRelativePath = Join-Path `
+    ".release-staging" `
+    ("$releaseName-$([guid]::NewGuid().ToString('N'))")
+$stagingRoot = Join-Path $PSScriptRoot $stagingRelativePath
+New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+$distRelativePath = Join-Path $stagingRelativePath $releaseName
 $distRoot = Join-Path $PSScriptRoot $distRelativePath
 
 $specs = @(
@@ -746,6 +874,37 @@ Assert-ArtifactPattern `
     -RelativeDirectory "_internal\onnxruntime\capi" `
     -FilePattern "onnxruntime_pybind11_state*.pyd" `
     -Description "MekiCopy ONNX Runtime Python extension"
+$cudaRuntimeArtifacts = @(
+    # ONNX Runtime 1.30 is built for CUDA 13. The CUDA extra wheels preserve
+    # this single package-relative directory in the frozen one-dir bundle.
+    @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "cublasLt64_13.dll"; Description = "NVIDIA cuBLASLt runtime" },
+    @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "cublas64_13.dll"; Description = "NVIDIA cuBLAS runtime" },
+    @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "cufft64_12.dll"; Description = "NVIDIA cuFFT runtime" },
+    @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "cudart64_13.dll"; Description = "NVIDIA CUDA runtime" },
+    @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "nvrtc64_13*.dll"; Description = "NVIDIA CUDA NVRTC runtime" },
+    @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "nvrtc-builtins64_13*.dll"; Description = "NVIDIA CUDA NVRTC builtins" },
+    @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "curand64_10.dll"; Description = "NVIDIA cuRAND runtime" },
+    @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "cufftw64_12.dll"; Description = "NVIDIA cuFFTW runtime" },
+    @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "nvblas64_13.dll"; Description = "NVIDIA NVBLAS runtime" },
+    @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "nvJitLink_13*.dll"; Description = "NVIDIA NVJITLINK runtime" },
+    @{ Directory = "_internal\nvidia\cudnn\bin"; Pattern = "cudnn_adv64_9.dll"; Description = "NVIDIA cuDNN advanced runtime" },
+    @{ Directory = "_internal\nvidia\cudnn\bin"; Pattern = "cudnn_cnn64_9.dll"; Description = "NVIDIA cuDNN CNN runtime" },
+    @{ Directory = "_internal\nvidia\cudnn\bin"; Pattern = "cudnn_engines_precompiled64_9.dll"; Description = "NVIDIA cuDNN precompiled engine" },
+    @{ Directory = "_internal\nvidia\cudnn\bin"; Pattern = "cudnn_engines_runtime_compiled64_9.dll"; Description = "NVIDIA cuDNN runtime engine" },
+    @{ Directory = "_internal\nvidia\cudnn\bin"; Pattern = "cudnn_engines_tensor_ir64_9.dll"; Description = "NVIDIA cuDNN tensor IR engine" },
+    @{ Directory = "_internal\nvidia\cudnn\bin"; Pattern = "cudnn_ext64_9.dll"; Description = "NVIDIA cuDNN extension runtime" },
+    @{ Directory = "_internal\nvidia\cudnn\bin"; Pattern = "cudnn_graph64_9.dll"; Description = "NVIDIA cuDNN graph runtime" },
+    @{ Directory = "_internal\nvidia\cudnn\bin"; Pattern = "cudnn_heuristic64_9.dll"; Description = "NVIDIA cuDNN heuristic runtime" },
+    @{ Directory = "_internal\nvidia\cudnn\bin"; Pattern = "cudnn_ops64_9.dll"; Description = "NVIDIA cuDNN operations runtime" },
+    @{ Directory = "_internal\nvidia\cudnn\bin"; Pattern = "cudnn64_9.dll"; Description = "NVIDIA cuDNN runtime" }
+)
+foreach ($artifact in $cudaRuntimeArtifacts) {
+    Assert-ArtifactPattern `
+        -AppRoot $mekiCopyRoot `
+        -RelativeDirectory $artifact.Directory `
+        -FilePattern $artifact.Pattern `
+        -Description "MekiCopy $($artifact.Description)"
+}
 foreach ($subtitleTool in @("ffmpeg.exe", "ffprobe.exe")) {
     Assert-ArtifactFile `
         -AppRoot $mekiCopyRoot `
@@ -1131,18 +1290,45 @@ start "" "MekiCopy.exe"
 '@
 Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding ASCII
 
-$releaseArchivePath = Join-Path $PSScriptRoot "MekiCopy-$PackageFlavor-one-dir.zip"
+$releaseRoot = Join-Path $PSScriptRoot $releaseName
+$releaseArchivePath = Join-Path $PSScriptRoot "$releaseName-one-dir.zip"
 $releaseChecksumPath = "$releaseArchivePath.sha256"
-if (Test-Path -LiteralPath $releaseChecksumPath) {
-    if (-not (Test-Path -LiteralPath $releaseChecksumPath -PathType Leaf)) {
-        throw "Release checksum path is not a file: $releaseChecksumPath"
-    }
-    Remove-Item -LiteralPath $releaseChecksumPath -Force
-}
-New-ReleaseZip -SourceRoot $distRoot -ArchivePath $releaseArchivePath
-$releaseHash = (Get-FileHash -LiteralPath $releaseArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$stagedArchivePath = Join-Path $stagingRoot "$releaseName-one-dir.zip"
+$stagedChecksumPath = "$stagedArchivePath.sha256"
+New-ReleaseZip -SourceRoot $distRoot -ArchivePath $stagedArchivePath
+$releaseHash = (Get-FileHash -LiteralPath $stagedArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $releaseChecksum = "$releaseHash *$(Split-Path -Leaf $releaseArchivePath)"
-Set-Content -LiteralPath $releaseChecksumPath -Value $releaseChecksum -Encoding ASCII
+Set-Content -LiteralPath $stagedChecksumPath -Value $releaseChecksum -Encoding ASCII
+
+try {
+    Publish-StagedRelease `
+        -StagingRoot $stagingRoot `
+        -StagedReleaseRoot $distRoot `
+        -ReleaseRoot $releaseRoot `
+        -StagedArchivePath $stagedArchivePath `
+        -ArchivePath $releaseArchivePath `
+        -StagedChecksumPath $stagedChecksumPath `
+        -ChecksumPath $releaseChecksumPath
+}
+catch {
+    Write-Warning "The verified staged release was retained for recovery at: $stagingRoot"
+    throw
+}
+try {
+    Remove-WorkspaceDirectory $stagingRelativePath
+}
+catch {
+    Write-Warning "Could not remove the empty release staging directory: $stagingRoot"
+}
+
+# The staged tree was moved into its canonical release location above.  Refresh
+# these display paths so the completion report never points at a removed stage.
+$launcherPath = Join-Path $releaseRoot "Start-MekiCopy.bat"
+$mekiCopyExe = Join-Path $releaseRoot "MekiCopy\MekiCopy.exe"
+$hyTransExe = Join-Path $releaseRoot "HYTrans\HYTrans.exe"
+$overlayerExe = Join-Path $releaseRoot "MekiDisplay\MekiOverlayer.exe"
+$scriptExe = Join-Path $releaseRoot "MekiDisplay\MekiScript.exe"
+$audioCaptureExe = Join-Path $releaseRoot "MekiAudioCapture\MekiAudioCapture.exe"
 
 Write-Host ""
 Write-Host "Build complete and verified:"

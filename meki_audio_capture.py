@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import datetime as dt
 import json
@@ -22,6 +23,7 @@ import soundcard as sc
 
 from app_identity import apply_tk_icon, set_windows_app_id
 from companion_liveness import UiHeartbeat
+from companion_manual_close import MANUAL_CLOSE_EXIT_CODE, publish_manual_close_signal
 from audio_capture_core import (
     CAPTURE_SAMPLE_RATE,
     DEFAULT_STT_MODEL,
@@ -96,11 +98,20 @@ AUDIO_TRANSLATION_TIMEOUT_SECONDS = 300
 MAX_TRANSLATION_SESSION_SECONDS = 30 * 60
 MAX_CONSECUTIVE_TRANSLATION_FAILURES = 2
 REALTIME_STT_QUEUE_MAX_SEGMENTS = 24
-# STT items retain raw PCM, so that queue intentionally stays small. A
-# translation item only holds text and timing metadata; this provides a
-# substantial multi-hour cushion even when FAST produces short turns.
-REALTIME_TRANSLATION_QUEUE_MAX_SEGMENTS = 65_536
-REALTIME_TRANSLATION_QUEUE_WARNING_SEGMENTS = 64
+# Keep the browser translator's backlog bounded. Each entry is small, but an
+# hours-long stall used to retain unbounded text/result objects while a game
+# was running. 256 utterances is still several minutes of headroom for rapid
+# dialogue. Translation entries contain only completed text/metadata, and
+# overflow already has an explicit skip-marker path.
+REALTIME_TRANSLATION_QUEUE_MAX_SEGMENTS = 2048
+# Keep the warning at the same 25% utilization point as the previous 64/256
+# configuration, so normal short bursts do not create unnecessary notices.
+REALTIME_TRANSLATION_QUEUE_WARNING_SEGMENTS = 512
+# Live VAD and STT run concurrently with the game. Batch/subtitle processing
+# retains the generic four-thread defaults in audio_capture_core, but live
+# mode deliberately reserves only a small, predictable CPU share.
+REALTIME_VAD_NUM_THREADS = 1
+REALTIME_STT_NUM_THREADS = 2
 _SESSION_DIRECTORY_PATTERN = re.compile(r"^\d{8}-\d{6}-\d{6}$")
 _WORK_SWEEP_LOCK = threading.Lock()
 _WORK_SWEEP_DONE = False
@@ -153,6 +164,21 @@ class RealtimeTranslationSummary:
     max_translation_backlog: int = 0
 
 
+@dataclass(frozen=True)
+class _LiveVadInterval:
+    """One finalized native-VAD interval retained until its live boundary is safe.
+
+    ``samples`` is a bounded fallback for the unusual case where a native VAD
+    interval reaches farther back than the rolling PCM history.  Normal live
+    segments are reconstructed from that history so padding and forced-cut
+    overlap use the original contiguous audio.
+    """
+
+    start: int
+    end: int
+    samples: np.ndarray
+
+
 class RealtimeTranslationSession:
     """Process finalized Silero VAD chunks while WASAPI recording continues.
 
@@ -185,6 +211,67 @@ class RealtimeTranslationSession:
         self._vad = None
         self._capture_remainder = np.empty(0, dtype=np.float32)
         self._vad_remainder = np.empty(0, dtype=np.float32)
+        # sherpa-onnx exposes only its native speech-boundary controls.  Keep
+        # a bounded source PCM history so the same padding, padded-boundary
+        # merge, and forced-cut semantics as ``build_segments`` can also be
+        # applied to finalized live VAD intervals.  This is deliberately a
+        # little larger than one maximum VAD chunk, never a whole recording.
+        live_preset = VAD_PRESETS[self.preset]
+        self._live_pre_padding_samples = int(
+            round(live_preset["pre_padding"] * INTERNAL_SAMPLE_RATE)
+        )
+        self._live_post_padding_samples = int(
+            round(live_preset["post_padding"] * INTERNAL_SAMPLE_RATE)
+        )
+        self._live_max_segment_samples = max(
+            1,
+            int(round(live_preset["max_segment_duration"] * INTERNAL_SAMPLE_RATE)),
+        )
+        self._live_forced_cut_overlap_samples = min(
+            max(
+                0,
+                int(round(live_preset["forced_cut_overlap"] * INTERNAL_SAMPLE_RATE)),
+            ),
+            self._live_max_segment_samples - 1,
+        )
+        self._live_short_segment_max_duration = live_preset[
+            "short_segment_max_duration"
+        ]
+        # Batch processing joins raw intervals within ``merge_gap`` and also
+        # joins padded intervals whose boundaries overlap.  The native VAD
+        # reports an interval only after its minimum speech and silence tails,
+        # so the live lookahead includes those tails as well. Otherwise an
+        # earlier interval can be emitted before a nearby later interval is
+        # finalized, causing needless separate STT/translation requests.
+        self._live_join_gap_samples = max(
+            int(round(live_preset["merge_gap"] * INTERNAL_SAMPLE_RATE)),
+            self._live_pre_padding_samples + self._live_post_padding_samples,
+        )
+        native_finalize_tail = int(
+            round(live_preset["min_silence_duration"] * INTERNAL_SAMPLE_RATE)
+        )
+        native_minimum_speech = int(
+            round(live_preset["min_speech_duration"] * INTERNAL_SAMPLE_RATE)
+        )
+        self._live_merge_lookahead_samples = (
+            self._live_join_gap_samples
+            + native_minimum_speech
+            + native_finalize_tail
+        )
+        self._live_history_capacity = max(
+            512,
+            self._live_max_segment_samples
+            + self._live_pre_padding_samples
+            + self._live_post_padding_samples
+            + self._live_merge_lookahead_samples
+            + 2 * 512,
+        )
+        self._live_history = np.empty(
+            self._live_history_capacity,
+            dtype=np.float32,
+        )
+        self._live_source_end = 0
+        self._live_pending_intervals: list[_LiveVadInterval] = []
         self._next_segment_id = 1
         self._previous_text = ""
         self._stt_queue: queue.Queue[SpeechSegment | object] = queue.Queue(
@@ -223,7 +310,11 @@ class RealtimeTranslationSession:
         """Initialize VAD before opening loopback, then begin worker threads."""
         if self._started:
             return
-        self._vad = create_voice_activity_detector(self.models["vad"], self.preset)
+        self._vad = create_voice_activity_detector(
+            self.models["vad"],
+            self.preset,
+            num_threads=REALTIME_VAD_NUM_THREADS,
+        )
         self._started = True
         self._translation_thread.start()
         self._stt_thread.start()
@@ -267,12 +358,19 @@ class RealtimeTranslationSession:
                     self._capture_remainder = np.empty(0, dtype=np.float32)
                     self._feed_vad(padded.reshape(-1, ratio).mean(axis=1, dtype=np.float32))
                 if self._vad_remainder.size:
-                    padded = np.pad(self._vad_remainder, (0, 512 - len(self._vad_remainder)))
+                    remainder = self._vad_remainder
+                    padded = np.pad(remainder, (0, 512 - len(remainder)))
                     self._vad_remainder = np.empty(0, dtype=np.float32)
-                    self._vad.accept_waveform(padded)
-                    self._drain_vad()
+                    # The final VAD window is zero-padded only for the native
+                    # model.  Keep its real sample count separate so emitted
+                    # timestamps and post-padding never extend past recording
+                    # input just because a detector window needed padding.
+                    self._accept_vad_window(padded, source_samples=len(remainder))
                 self._vad.flush()
                 self._drain_vad()
+                # At end of input there is no future PCM to wait for.  Flush
+                # the held interval with the real trailing audio available.
+                self._flush_live_pending_segments(force=True)
             finally:
                 # The translation worker polls this event and drains every
                 # successfully queued live utterance in order.
@@ -306,13 +404,48 @@ class RealtimeTranslationSession:
         return any(worker.is_alive() for worker in (self._stt_thread, self._translation_thread))
 
     def _feed_vad(self, samples: np.ndarray) -> None:
+        samples = np.asarray(samples, dtype=np.float32)
         if self._vad_remainder.size:
             samples = np.concatenate((self._vad_remainder, samples))
         usable = (len(samples) // 512) * 512
         self._vad_remainder = samples[usable:].copy()
         for start in range(0, usable, 512):
-            self._vad.accept_waveform(np.asarray(samples[start : start + 512], dtype=np.float32))
-            self._drain_vad()
+            self._accept_vad_window(samples[start : start + 512])
+
+    def _accept_vad_window(
+        self,
+        samples: np.ndarray,
+        *,
+        source_samples: int | None = None,
+    ) -> None:
+        """Feed one native VAD window while retaining only needed source PCM."""
+
+        assert self._vad is not None
+        window = np.asarray(samples, dtype=np.float32)
+        real_count = len(window) if source_samples is None else int(source_samples)
+        real_count = max(0, min(len(window), real_count))
+        if real_count:
+            self._append_live_history(window[:real_count])
+        self._vad.accept_waveform(window)
+        self._drain_vad()
+        self._flush_live_pending_segments()
+
+    def _append_live_history(self, samples: np.ndarray) -> None:
+        """Append real 16 kHz PCM into a fixed-size, absolute-position ring."""
+
+        values = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if not values.size:
+            return
+        previous_end = self._live_source_end
+        new_end = previous_end + len(values)
+        retained = values[-min(len(values), self._live_history_capacity) :]
+        retained_start = new_end - len(retained)
+        first = retained_start % self._live_history_capacity
+        first_count = min(len(retained), self._live_history_capacity - first)
+        self._live_history[first : first + first_count] = retained[:first_count]
+        if first_count < len(retained):
+            self._live_history[: len(retained) - first_count] = retained[first_count:]
+        self._live_source_end = new_end
 
     def _drain_vad(self) -> None:
         assert self._vad is not None
@@ -321,23 +454,128 @@ class RealtimeTranslationSession:
             # ``front`` points into the native VAD queue and becomes invalid
             # after ``pop`` or the next detector call.
             samples = np.array(item.samples, dtype=np.float32, copy=True)
-            start = int(item.start)
+            start = max(0, int(item.start))
             self._vad.pop()
             if not samples.size:
                 continue
-            duration = len(samples) / INTERNAL_SAMPLE_RATE
+            interval = _LiveVadInterval(
+                start=start,
+                end=start + len(samples),
+                samples=samples,
+            )
+            self._queue_live_vad_interval(interval)
+
+    def _queue_live_vad_interval(self, interval: _LiveVadInterval) -> None:
+        """Hold finalized native intervals for a bounded live merge lookahead."""
+
+        if self._live_pending_intervals:
+            pending_end = max(item.end for item in self._live_pending_intervals)
+            if interval.start - pending_end > self._live_join_gap_samples:
+                # A later finalized interval beyond the padded-boundary union
+                # proves the old group cannot merge with it.  Real-time mode
+                # cannot wait indefinitely for an unrelated future utterance
+                # to finish, so this only coalesces intervals VAD has already
+                # finalized within the bounded lookahead.
+                self._flush_live_pending_segments(force=True)
+        self._live_pending_intervals.append(interval)
+
+    def _flush_live_pending_segments(self, *, force: bool = False) -> None:
+        """Emit a held group once its bounded pad/merge lookahead has elapsed."""
+
+        if not self._live_pending_intervals:
+            return
+        pending_end = max(item.end for item in self._live_pending_intervals)
+        if (
+            not force
+            and self._live_source_end
+            < pending_end + self._live_merge_lookahead_samples
+        ):
+            return
+        self._emit_live_pending_segments()
+        self._live_pending_intervals.clear()
+
+    def _emit_live_pending_segments(self) -> None:
+        """Apply batch-equivalent bounds to one held live VAD interval group."""
+
+        if not self._live_pending_intervals:
+            return
+        speech_start = max(0, min(item.start for item in self._live_pending_intervals))
+        speech_end = min(
+            self._live_source_end,
+            max(item.end for item in self._live_pending_intervals),
+        )
+        if speech_end <= speech_start:
+            return
+
+        start = max(0, speech_start - self._live_pre_padding_samples)
+        end = min(self._live_source_end, speech_end + self._live_post_padding_samples)
+        cursor = start
+        previous_overlap = 0
+        while cursor < end:
+            cut_end = min(cursor + self._live_max_segment_samples, end)
+            forced = cut_end < end
+            duration = (cut_end - cursor) / INTERNAL_SAMPLE_RATE
             segment = SpeechSegment(
                 id=self._next_segment_id,
-                start_time=start / INTERNAL_SAMPLE_RATE,
-                end_time=(start + len(samples)) / INTERNAL_SAMPLE_RATE,
+                start_time=cursor / INTERNAL_SAMPLE_RATE,
+                end_time=cut_end / INTERNAL_SAMPLE_RATE,
                 duration=duration,
-                audio=samples,
-                is_forced_cut=False,
-                is_short=duration <= VAD_PRESETS[self.preset]["merge_short_under"],
-                previous_overlap=0.0,
+                audio=self._live_pcm_slice(cursor, cut_end),
+                is_forced_cut=forced or previous_overlap > 0,
+                is_short=duration <= self._live_short_segment_max_duration,
+                previous_overlap=previous_overlap / INTERNAL_SAMPLE_RATE,
             )
             self._next_segment_id += 1
             self._enqueue_segment(segment)
+            if not forced:
+                break
+            cursor = max(
+                cursor + 1,
+                cut_end - self._live_forced_cut_overlap_samples,
+            )
+            previous_overlap = self._live_forced_cut_overlap_samples
+
+    def _live_pcm_slice(self, start: int, end: int) -> np.ndarray:
+        """Copy one bounded PCM range, falling back to native VAD audio if needed."""
+
+        start = max(0, int(start))
+        end = min(self._live_source_end, int(end))
+        if end <= start:
+            return np.empty(0, dtype=np.float32)
+        output = np.zeros(end - start, dtype=np.float32)
+
+        # A native result can occasionally be delivered after its oldest PCM
+        # samples have left the ring (for example, a backend-specific delayed
+        # flush).  Keep that result as a best-effort fallback, then overwrite
+        # it with the exact source PCM wherever the ring still has coverage.
+        for interval in self._live_pending_intervals:
+            overlap_start = max(start, interval.start)
+            overlap_end = min(end, interval.end)
+            if overlap_end <= overlap_start:
+                continue
+            source_offset = overlap_start - interval.start
+            target_offset = overlap_start - start
+            output[target_offset : target_offset + overlap_end - overlap_start] = interval.samples[
+                source_offset : source_offset + overlap_end - overlap_start
+            ]
+
+        history_start = max(0, self._live_source_end - self._live_history_capacity)
+        available_start = max(start, history_start)
+        available_end = min(end, self._live_source_end)
+        if available_end <= available_start:
+            return output
+        length = available_end - available_start
+        ring_start = available_start % self._live_history_capacity
+        target_offset = available_start - start
+        first_count = min(length, self._live_history_capacity - ring_start)
+        output[target_offset : target_offset + first_count] = self._live_history[
+            ring_start : ring_start + first_count
+        ]
+        if first_count < length:
+            output[target_offset + first_count : target_offset + length] = self._live_history[
+                : length - first_count
+            ]
+        return output
 
     def _enqueue_segment(self, segment: SpeechSegment) -> None:
         try:
@@ -393,6 +631,7 @@ class RealtimeTranslationSession:
                 self.models,
                 model_key=self.stt_model,
                 precision=self.precision,
+                num_threads=REALTIME_STT_NUM_THREADS,
             )
             while True:
                 if self._aborted.is_set():
@@ -574,7 +813,11 @@ class CaptureController:
         self.preset = normalize_preset(preset)
         self.script_url = script_url.rstrip("/")
         self.hytrans_url = hytrans_url.rstrip("/")
-        self.events: queue.Queue[tuple[str, str]] = queue.Queue()
+        # The UI only renders the latest status.  Coalesce updates so a slow
+        # Tk repaint during a download or realtime translation cannot retain
+        # an unbounded history of already-obsolete messages.
+        self.events: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=1)
+        self._events_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.record_thread: threading.Thread | None = None
         self.process_thread: threading.Thread | None = None
@@ -616,6 +859,21 @@ class CaptureController:
                 "error": self.error or None,
             }
 
+    def _publish_status(self, status: str) -> None:
+        """Replace a stale UI-only status update without blocking workers."""
+
+        with self._events_lock:
+            try:
+                self.events.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.events.put_nowait(("status", status))
+            except queue.Full:
+                # A Tk consumer can race the removal above.  The current UI
+                # update is still valid, and a later status will supersede it.
+                pass
+
     def configure(self, payload: dict[str, Any]) -> None:
         if any(
             str(key).casefold() in {"realtimetranslation", "real_time_translation"}
@@ -655,7 +913,7 @@ class CaptureController:
             self.state = state
             self.status = status
             self.error = error
-        self.events.put(("status", status))
+        self._publish_status(status)
         log_debug("state", f"state: {state}\nstatus: {status}")
         if error:
             log_error("state", error)
@@ -677,7 +935,7 @@ class CaptureController:
             self.state = state
             self.status = status
             self.error = error
-        self.events.put(("status", status))
+        self._publish_status(status)
         log_debug("state", f"state: {state}\nstatus: {status}")
         if error:
             log_error("state", error)
@@ -691,7 +949,7 @@ class CaptureController:
             if self.state not in {"STARTING", "RECORDING", "STOPPING", "PROCESSING"}:
                 return False
             self.status = status
-        self.events.put(("status", status))
+        self._publish_status(status)
         log_debug("realtime_status", status)
         return True
 
@@ -713,7 +971,7 @@ class CaptureController:
                 daemon=True,
             )
             self.model_thread = model_thread
-        self.events.put(("status", self.status))
+        self._publish_status(self.status)
         log_debug("state", f"state: DOWNLOADING\nstatus: {self.status}")
         try:
             model_thread.start()
@@ -800,16 +1058,16 @@ class CaptureController:
                 return
             if self.start_thread and self.start_thread.is_alive():
                 self.status = "이전 녹음 준비가 아직 진행 중입니다. 잠시 후 다시 시도해 주세요."
-                self.events.put(("status", self.status))
+                self._publish_status(self.status)
                 return
             if self.record_thread and self.record_thread.is_alive():
                 self.status = "이전 녹음 장치가 아직 종료 중입니다. 잠시 후 다시 시도해 주세요."
-                self.events.put(("status", self.status))
+                self._publish_status(self.status)
                 return
             if self.realtime_session is not None:
                 if self.realtime_session.has_active_workers():
                     self.status = "이전 실시간 번역 작업이 종료 중입니다. 잠시 후 다시 시도해 주세요."
-                    self.events.put(("status", self.status))
+                    self._publish_status(self.status)
                     return
                 self.realtime_session = None
             # Reserve the state before allocating paths so concurrent HTTP
@@ -833,7 +1091,7 @@ class CaptureController:
                 daemon=True,
             )
             self.start_thread = start_thread
-        self.events.put(("status", self.status))
+        self._publish_status(self.status)
         log_debug("state", f"state: STARTING\nstatus: {self.status}")
         try:
             start_thread.start()
@@ -863,16 +1121,22 @@ class CaptureController:
             realtime_translation,
         ) = session_options
         session_work_dir: Path | None = None
+        wav_path: Path | None = None
         realtime_session: RealtimeTranslationSession | None = None
         try:
-            session_root = work_dir()
-            if shutil.disk_usage(session_root).free < MIN_RECORDING_FREE_BYTES:
-                raise RuntimeError("녹음을 시작하려면 작업 드라이브에 2GB 이상의 여유 공간이 필요합니다.")
             now = dt.datetime.now()
             session_id = f"{now:%Y%m%d-%H%M%S-%f}"
-            session_work_dir = session_root / session_id
-            session_work_dir.mkdir(parents=True, exist_ok=True)
-            wav_path = session_work_dir / "capture.wav"
+            if not realtime_translation:
+                # Batch mode needs the complete source WAV and a disk-backed
+                # 16 kHz conversion. Live mode sends each block directly to
+                # VAD/STT and never reads this file, so avoid its continuous
+                # PCM conversion, disk writes, and unrelated 2 GB gate.
+                session_root = work_dir()
+                if shutil.disk_usage(session_root).free < MIN_RECORDING_FREE_BYTES:
+                    raise RuntimeError("녹음을 시작하려면 작업 드라이브에 2GB 이상의 여유 공간이 필요합니다.")
+                session_work_dir = session_root / session_id
+                session_work_dir.mkdir(parents=True, exist_ok=True)
+                wav_path = session_work_dir / "capture.wav"
             stop_event = threading.Event()
             if realtime_translation:
                 self._set_status_for_session(generation, "실시간 음성 번역을 준비하고 있습니다…")
@@ -896,7 +1160,8 @@ class CaptureController:
                 # prevent a new recording from overlapping old workers.
                 with self._lock:
                     if generation != self._session_generation or self.state != "STARTING":
-                        cleanup_work_files(session_work_dir)
+                        if session_work_dir is not None:
+                            cleanup_work_files(session_work_dir)
                         return
                     self.realtime_session = realtime_session
                 # VAD initialization happens before the loopback opens.  The
@@ -911,7 +1176,8 @@ class CaptureController:
                 if generation != self._session_generation or self.state != "STARTING":
                     if realtime_session is not None:
                         realtime_session.abort()
-                    cleanup_work_files(session_work_dir)
+                    if session_work_dir is not None:
+                        cleanup_work_files(session_work_dir)
                     return
                 self.session_id = session_id
                 self.session_work_dir = session_work_dir
@@ -982,7 +1248,7 @@ class CaptureController:
 
         if cancel_live_drain:
             realtime_session.abort()
-            self.events.put(("status", cancel_status))
+            self._publish_status(cancel_status)
             log_debug("state", f"state: CANCELLING\nstatus: {cancel_status}")
             return
 
@@ -1033,8 +1299,8 @@ class CaptureController:
         self,
         generation: int,
         stop_event: threading.Event,
-        wav_path: Path,
-        session_work_dir: Path,
+        wav_path: Path | None,
+        session_work_dir: Path | None,
         realtime_session: RealtimeTranslationSession | None = None,
     ) -> None:
         stop_reason = ""
@@ -1046,39 +1312,51 @@ class CaptureController:
             if loopback is None:
                 raise RuntimeError("기본 출력 장치의 WASAPI loopback을 열 수 없습니다.")
             chunk_frames = CAPTURE_SAMPLE_RATE // 10
-            with wave.open(str(wav_path), "wb") as output:
-                output.setnchannels(2)
-                output.setsampwidth(2)
-                output.setframerate(CAPTURE_SAMPLE_RATE)
-                with loopback.recorder(
-                    samplerate=CAPTURE_SAMPLE_RATE,
-                    channels=2,
-                    blocksize=chunk_frames,
-                ) as recorder:
-                    recorded_frames = 0
-                    while not stop_event.is_set():
-                        block = recorder.record(numframes=chunk_frames)
+            with contextlib.ExitStack() as stack:
+                output = None
+                if wav_path is not None:
+                    output = stack.enter_context(wave.open(str(wav_path), "wb"))
+                    output.setnchannels(2)
+                    output.setsampwidth(2)
+                    output.setframerate(CAPTURE_SAMPLE_RATE)
+                recorder = stack.enter_context(
+                    loopback.recorder(
+                        samplerate=CAPTURE_SAMPLE_RATE,
+                        channels=2,
+                        blocksize=chunk_frames,
+                    )
+                )
+                recorded_frames = 0
+                while not stop_event.is_set():
+                    block = recorder.record(numframes=chunk_frames)
+                    if output is not None:
+                        # Batch mode retains the entire recording for its
+                        # post-stop pipeline. Live mode intentionally skips
+                        # this clip/convert/write path and feeds VAD below.
                         pcm = np.clip(block, -1.0, 1.0)
                         output.writeframes((pcm * 32767.0).astype("<i2").tobytes())
-                        if realtime_session is not None:
-                            # The recorder owns VAD; only finalized chunks are
-                            # handed off to the STT worker.
-                            realtime_session.accept_capture_block(block)
-                        recorded_frames += len(block)
-                        if recorded_frames >= MAX_RECORDING_SECONDS * CAPTURE_SAMPLE_RATE:
-                            stop_reason = "최대 녹음 시간 4시간에 도달해 자동으로 종료합니다."
+                    if realtime_session is not None:
+                        # The recorder owns VAD; only finalized chunks are
+                        # handed off to the STT worker.
+                        realtime_session.accept_capture_block(block)
+                    recorded_frames += len(block)
+                    if recorded_frames >= MAX_RECORDING_SECONDS * CAPTURE_SAMPLE_RATE:
+                        stop_reason = "최대 녹음 시간 4시간에 도달해 자동으로 종료합니다."
+                        stop_event.set()
+                        break
+                    if (
+                        session_work_dir is not None
+                        and recorded_frames % (CAPTURE_SAMPLE_RATE * 10) < chunk_frames
+                    ):
+                        estimated_raw_bytes = int(recorded_frames * 4 / 3)
+                        required_free = max(
+                            MIN_RECORDING_FREE_BYTES,
+                            estimated_raw_bytes + 512 * 1024 * 1024,
+                        )
+                        if shutil.disk_usage(session_work_dir).free < required_free:
+                            stop_reason = "작업 드라이브의 여유 공간이 부족해 녹음을 자동으로 종료합니다."
                             stop_event.set()
                             break
-                        if recorded_frames % (CAPTURE_SAMPLE_RATE * 10) < chunk_frames:
-                            estimated_raw_bytes = int(recorded_frames * 4 / 3)
-                            required_free = max(
-                                MIN_RECORDING_FREE_BYTES,
-                                estimated_raw_bytes + 512 * 1024 * 1024,
-                            )
-                            if shutil.disk_usage(session_work_dir).free < required_free:
-                                stop_reason = "작업 드라이브의 여유 공간이 부족해 녹음을 자동으로 종료합니다."
-                                stop_event.set()
-                                break
             if realtime_session is not None:
                 # Keep native VAD ownership on this recorder thread through
                 # the final padded window and flush.
@@ -1101,7 +1379,8 @@ class CaptureController:
                 traceback.format_exc(),
             )
             stop_event.set()
-            cleanup_work_files(session_work_dir)
+            if session_work_dir is not None:
+                cleanup_work_files(session_work_dir)
 
     def _finish_and_process(
         self,
@@ -1368,9 +1647,19 @@ class CaptureWindow:
     state.
     """
 
-    def __init__(self, root: tk.Tk, controller: CaptureController) -> None:
+    ACTIVE_POLL_INTERVAL_MS = 100
+    IDLE_POLL_INTERVAL_MS = 250
+
+    def __init__(
+        self,
+        root: tk.Tk,
+        controller: CaptureController,
+        *,
+        on_confirmed_close: Callable[[], None] | None = None,
+    ) -> None:
         self.root = root
         self.controller = controller
+        self._on_confirmed_close = on_confirmed_close
         self._last_state = controller.state
         root.title("MekiAudioCapture")
         root.geometry("480x350")
@@ -1490,7 +1779,7 @@ class CaptureWindow:
         )
         self.stop_button.grid(row=0, column=1, sticky=tk.EW, padx=(5, 0))
 
-        root.after(100, self.poll)
+        root.after(self.IDLE_POLL_INTERVAL_MS, self.poll)
 
     def _on_realtime_translation_changed(self) -> None:
         if not self.realtime_translation_var.get():
@@ -1525,13 +1814,30 @@ class CaptureWindow:
                 parent=self.root,
             )
             return
+        if not messagebox.askyesno(
+            "MekiAudioCapture 종료",
+            (
+                "MekiAudioCapture 창을 닫을까요?\n\n"
+                "MekiCopy에서 실행한 경우 자동 복구 대상에서 제외됩니다. 다시 사용하려면 "
+                "MekiCopy에서 MekiAudioCapture를 실행하세요."
+            ),
+            parent=self.root,
+        ):
+            return
+        if self._on_confirmed_close is not None:
+            try:
+                self._on_confirmed_close()
+            except Exception as exc:
+                log_error("manual_close_signal", exc)
         self.root.destroy()
 
     def poll(self) -> None:
+        handled_event = False
         while True:
             try:
                 _, text = self.controller.events.get_nowait()
                 self.status.configure(text=text)
+                handled_event = True
             except queue.Empty:
                 break
         state = self.controller.state
@@ -1555,7 +1861,12 @@ class CaptureWindow:
             # be explicitly opted into again.
             self.realtime_translation_var.set(False)
         self._last_state = state
-        self.root.after(100, self.poll)
+        self.root.after(
+            self.ACTIVE_POLL_INTERVAL_MS
+            if handled_event or state not in {"READY", "ERROR"}
+            else self.IDLE_POLL_INTERVAL_MS,
+            self.poll,
+        )
 
 
 def _load_model_test_wav(wav_path: Path) -> np.ndarray:
@@ -1621,6 +1932,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--self-test-models", action="store_true")
     parser.add_argument("--self-test-ui", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test-server", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--watchdog-manual-close-file", help=argparse.SUPPRESS)
+    parser.add_argument("--watchdog-manual-close-token", help=argparse.SUPPRESS)
     parser.add_argument("--debug-log", action="store_true")
     return parser.parse_args()
 
@@ -1692,7 +2005,17 @@ def main() -> int:
         root = tk.Tk()
         install_tk_exception_hook(root)
         apply_tk_icon(root)
-        CaptureWindow(root, controller)
+        manual_close_confirmed = threading.Event()
+
+        def on_confirmed_close() -> None:
+            manual_close_confirmed.set()
+            publish_manual_close_signal(
+                args.watchdog_manual_close_file,
+                args.watchdog_manual_close_token,
+                app_name="MekiAudioCapture",
+            )
+
+        CaptureWindow(root, controller, on_confirmed_close=on_confirmed_close)
         ui_heartbeat = UiHeartbeat()
         ui_heartbeat.schedule(root)
         server = ThreadingHTTPServer(
@@ -1705,7 +2028,7 @@ def main() -> int:
         root.mainloop()
         server.shutdown()
         server.server_close()
-        return 0
+        return MANUAL_CLOSE_EXIT_CODE if manual_close_confirmed.is_set() else 0
     except Exception as exc:
         log_error("main", exc)
         try:

@@ -26,11 +26,25 @@ class _TaskCompletion(Generic[T]):
 class TkTaskRunner:
     """Run uniquely-keyed daemon tasks and return their results on Tk's thread."""
 
-    POLL_INTERVAL_MS = 40
+    # No worker touches Tk directly, so this bridge must poll from the Tk
+    # thread.  Keep the check responsive while work is in flight, but do not
+    # wake an otherwise idle visual-novel companion 25 times per second.
+    POLL_INTERVAL_MS = 100
+    IDLE_POLL_INTERVAL_MS = 500
 
-    def __init__(self, root, *, poll_interval_ms: int = POLL_INTERVAL_MS) -> None:
+    def __init__(
+        self,
+        root,
+        *,
+        poll_interval_ms: int = POLL_INTERVAL_MS,
+        idle_poll_interval_ms: int = IDLE_POLL_INTERVAL_MS,
+    ) -> None:
         self._root = root
         self._poll_interval_ms = max(10, int(poll_interval_ms))
+        self._idle_poll_interval_ms = max(
+            self._poll_interval_ms,
+            int(idle_poll_interval_ms),
+        )
         self._completions: queue.Queue[_TaskCompletion] = queue.Queue()
         self._running_keys: set[str] = set()
         self._callbacks: dict[
@@ -39,7 +53,7 @@ class TkTaskRunner:
         ] = {}
         self._closed = False
         self._poll_after_id: str | None = None
-        self._schedule_poll()
+        self._schedule_poll(self._idle_poll_interval_ms)
 
     def submit(
         self,
@@ -55,6 +69,11 @@ class TkTaskRunner:
 
         self._running_keys.add(key)
         self._callbacks[key] = (on_success, on_error)
+
+        # ``submit`` is called from the Tk thread.  A previous idle callback
+        # can therefore be safely replaced so a fast task is delivered without
+        # waiting up to the idle interval.
+        self._schedule_poll(0, replace=True)
 
         def run() -> None:
             try:
@@ -87,12 +106,20 @@ class TkTaskRunner:
                 pass
             self._poll_after_id = None
 
-    def _schedule_poll(self) -> None:
+    def _schedule_poll(self, delay_ms: int, *, replace: bool = False) -> None:
         if self._closed:
             return
+        if self._poll_after_id is not None:
+            if not replace:
+                return
+            try:
+                self._root.after_cancel(self._poll_after_id)
+            except Exception:
+                pass
+            self._poll_after_id = None
         try:
             self._poll_after_id = self._root.after(
-                self._poll_interval_ms,
+                max(0, int(delay_ms)),
                 self._drain,
             )
         except Exception:
@@ -111,7 +138,12 @@ class TkTaskRunner:
         except queue.Empty:
             pass
         finally:
-            self._schedule_poll()
+            delay = (
+                self._poll_interval_ms
+                if self._running_keys or not self._completions.empty()
+                else self._idle_poll_interval_ms
+            )
+            self._schedule_poll(delay)
 
     def _deliver(self, completion: _TaskCompletion) -> None:
         on_success, on_error = self._callbacks.pop(completion.key, (None, None))

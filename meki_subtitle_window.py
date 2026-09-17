@@ -8,6 +8,7 @@ service.
 
 from __future__ import annotations
 
+from collections import deque
 import os
 import queue
 import threading
@@ -59,8 +60,13 @@ class MekiSubtitleWindow(tk.Toplevel):
     ready.
     """
 
-    _POLL_INTERVAL_MS = 80
+    # Processing progress needs a quick UI handoff, but an idle subtitle
+    # window should not continuously wake the main application.
+    _ACTIVE_POLL_INTERVAL_MS = 100
+    _IDLE_POLL_INTERVAL_MS = 500
     _HYTRANS_READY_TIMEOUT_SECONDS = 600.0
+    _PENDING_LOG_MAX_ENTRIES = 512
+    _VISIBLE_LOG_MAX_LINES = 2_000
 
     def __init__(
         self,
@@ -76,7 +82,14 @@ class MekiSubtitleWindow(tk.Toplevel):
         self._hytrans_url = hytrans_url
         self._start_hytrans = start_hytrans
         self._on_destroy_callback = on_destroy
+        # Completion/error events must never be dropped.  Frequent status and
+        # diagnostic log updates use bounded, coalesced handoff buffers below
+        # so a long video cannot retain an unbounded Tk backlog.
         self._events: queue.Queue[tuple[Any, ...]] = queue.Queue()
+        self._event_lock = threading.Lock()
+        self._latest_status: tuple[float, str] | None = None
+        self._pending_logs: deque[str] = deque()
+        self._dropped_log_count = 0
         self._cancel_event = threading.Event()
         self._worker: threading.Thread | None = None
         self._closing = False
@@ -100,7 +113,7 @@ class MekiSubtitleWindow(tk.Toplevel):
         self._refresh_translation_model_label()
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(self._POLL_INTERVAL_MS, self._poll_events)
+        self.after(self._IDLE_POLL_INTERVAL_MS, self._poll_events)
 
     def _set_icon(self, parent: tk.Misc) -> None:
         try:
@@ -431,10 +444,25 @@ class MekiSubtitleWindow(tk.Toplevel):
         self.cancel_button.configure(state=tk.NORMAL if running else tk.DISABLED)
 
     def _append_log(self, text: str) -> None:
+        self._append_logs((text,))
+
+    def _append_logs(self, texts: tuple[str, ...] | list[str]) -> None:
+        lines = [str(text).rstrip() for text in texts]
+        if not lines:
+            return
         self.log_text.configure(state=tk.NORMAL)
-        self.log_text.insert(tk.END, str(text).rstrip() + "\n")
+        self.log_text.insert(tk.END, "\n".join(lines) + "\n")
+        self._trim_visible_log()
         self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
+
+    def _trim_visible_log(self) -> None:
+        # Tk's final implicit line is not content, hence end-1c gives the
+        # number of visible log lines after our newline-terminated inserts.
+        line_count = int(self.log_text.index("end-1c").split(".", 1)[0])
+        excess = line_count - self._VISIBLE_LOG_MAX_LINES
+        if excess > 0:
+            self.log_text.delete("1.0", f"{excess + 1}.0")
 
     def _start(self) -> None:
         input_text = self.input_var.get().strip()
@@ -473,6 +501,10 @@ class MekiSubtitleWindow(tk.Toplevel):
         self.open_folder_button.configure(state=tk.DISABLED)
         self.progress_var.set(0)
         self.status_var.set("자막 생성을 시작합니다.")
+        with self._event_lock:
+            self._latest_status = None
+            self._pending_logs.clear()
+            self._dropped_log_count = 0
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.delete("1.0", tk.END)
         self.log_text.configure(state=tk.DISABLED)
@@ -487,7 +519,32 @@ class MekiSubtitleWindow(tk.Toplevel):
         self._worker.start()
 
     def _emit_status(self, ratio: float, message: str) -> None:
-        self._events.put(("status", ratio, message))
+        # Progress is naturally superseded by the newest value.  Keeping only
+        # that value prevents a fast STT pipeline from flooding the UI queue.
+        with self._event_lock:
+            self._latest_status = (ratio, message)
+
+    def _emit_log(self, text: str) -> None:
+        # Logs are useful diagnostics, but retaining every recognition line
+        # from a multi-hour video makes the UI increasingly expensive.  Keep
+        # the newest bounded window and report any elided records to the user.
+        with self._event_lock:
+            if len(self._pending_logs) >= self._PENDING_LOG_MAX_ENTRIES:
+                self._pending_logs.popleft()
+                self._dropped_log_count += 1
+            self._pending_logs.append(str(text))
+
+    def _take_pending_updates(self) -> tuple[tuple[float, str] | None, list[str]]:
+        with self._event_lock:
+            status = self._latest_status
+            self._latest_status = None
+            logs = list(self._pending_logs)
+            self._pending_logs.clear()
+            dropped_log_count = self._dropped_log_count
+            self._dropped_log_count = 0
+        if dropped_log_count:
+            logs.insert(0, f"… 이전 처리 기록 {dropped_log_count}개는 생략했습니다.")
+        return status, logs
 
     def _wait_for_hytrans_ready(self) -> str:
         """Wait for the active HYTrans worker without blocking Tk."""
@@ -561,7 +618,7 @@ class MekiSubtitleWindow(tk.Toplevel):
                 translate=self._translate,
                 stt_model_root=shared_stt_model_root(),
                 status=self._emit_status,
-                log=lambda text: self._events.put(("log", text)),
+                log=self._emit_log,
                 cancel_event=self._cancel_event,
             )
             self._events.put(("done", summary))
@@ -571,16 +628,21 @@ class MekiSubtitleWindow(tk.Toplevel):
             self._events.put(("error", str(exc), traceback.format_exc()))
 
     def _poll_events(self) -> None:
+        handled_event = False
+        status, logs = self._take_pending_updates()
+        if status is not None:
+            self.progress_var.set(max(0, min(100, float(status[0]) * 100)))
+            self.status_var.set(str(status[1]))
+            handled_event = True
+        if logs:
+            self._append_logs(logs)
+            handled_event = True
         try:
             while True:
                 event = self._events.get_nowait()
+                handled_event = True
                 kind = event[0]
-                if kind == "status":
-                    self.progress_var.set(max(0, min(100, float(event[1]) * 100)))
-                    self.status_var.set(str(event[2]))
-                elif kind == "log":
-                    self._append_log(str(event[1]))
-                elif kind == "done":
+                if kind == "done":
                     self._finish_success(event[1])
                 elif kind == "cancelled":
                     self._finish_cancelled(str(event[1]))
@@ -589,7 +651,13 @@ class MekiSubtitleWindow(tk.Toplevel):
         except queue.Empty:
             pass
         if self.winfo_exists():
-            self.after(self._POLL_INTERVAL_MS, self._poll_events)
+            worker_running = bool(self._worker and self._worker.is_alive())
+            self.after(
+                self._ACTIVE_POLL_INTERVAL_MS
+                if handled_event or worker_running
+                else self._IDLE_POLL_INTERVAL_MS,
+                self._poll_events,
+            )
 
     def _finish_success(self, summary: SubtitleProcessSummary) -> None:
         self._worker = None

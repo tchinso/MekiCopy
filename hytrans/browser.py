@@ -67,6 +67,10 @@ class BrowserManager:
             "--enable-unsafe-webgpu",
             "--enable-features=Vulkan",
             "--disable-gpu-sandbox",
+            # The worker never renders user-facing content. Refuse Chromium's
+            # software rasterizer so an emulated SwiftShader path cannot be
+            # reported as GPU translation while consuming the game's CPU.
+            "--disable-software-rasterizer",
             "--window-size=800,600",
             url,
         ]

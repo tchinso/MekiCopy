@@ -11,6 +11,8 @@ pydantic==2.13.5
 typer==0.27.2
 huggingface-hub==1.31.0
 onnxruntime==1.30.0
-onnxruntime-gpu==1.30.0
+# Include the CUDA 13 and cuDNN runtime DLLs in the standalone application.
+# The NVIDIA display driver alone is not enough for ONNX Runtime's CUDA provider.
+onnxruntime-gpu[cuda,cudnn]==1.30.0
 sherpa-onnx==1.13.8
 soundcard==0.4.6
