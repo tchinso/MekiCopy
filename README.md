@@ -28,7 +28,7 @@ MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일�
 | 구분 | 최소 사양 | 권장 사양 |
 |--------|--------|--------|
 | 운영체제 | 윈도우 10 2004 이상 | 윈도우 10 2004 이상 |
-| CPU | 4코어 이상 | 8코어 이상 |
+| CPU | Intel Core i5-6500 <br> / Ryzen 3 1200 급 이상 | Intel Core i5-8400 <br>/ Ryzen 5 2600급 이상 |
 | RAM | 8GB 이상 | 16GB 이상 |
 | GPU | 요구사항 없음 | VRAM 6GB 이상의 GPU |
 
