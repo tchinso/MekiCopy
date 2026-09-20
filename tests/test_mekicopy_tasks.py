@@ -55,10 +55,12 @@ class TkTaskRunnerTests(unittest.TestCase):
         immediate_id, (immediate_delay, _callback) = next(iter(root.callbacks.items()))
         self.assertEqual(immediate_delay, 0)
         self.assertTrue(completed.wait(timeout=1))
+        self.assertTrue(runner.is_running("work"))
 
         root.fire(immediate_id)
 
         self.assertEqual(delivered, ["done"])
+        self.assertFalse(runner.is_running("work"))
         _next_id, (next_delay, _next_callback) = next(iter(root.callbacks.items()))
         self.assertEqual(next_delay, 30)
         runner.close()

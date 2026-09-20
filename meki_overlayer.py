@@ -51,6 +51,7 @@ from system_logging import (
     log_error as system_error,
     set_debug_enabled,
 )
+from win32_overlay import TopmostWindowController, get_top_level_hwnd
 
 DEFAULT_PORT = OVERLAYER_DEFAULT_PORT
 DEFAULT_GEOMETRY = "780x180+120+120"
@@ -238,10 +239,12 @@ class OverlayerApp:
         self.last_text = ""
         self._drag_start: tuple[int, int] | None = None
         self._window_start: tuple[int, int] | None = None
+        self._topmost_controller: TopmostWindowController | None = None
 
         self.root.title("MekiOverlayer")
         self.root.geometry(DEFAULT_GEOMETRY)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.bind("<Destroy>", self._on_root_destroy, add="+")
 
         self.label = tk.Label(
             self.root,
@@ -258,6 +261,17 @@ class OverlayerApp:
         self.label.bind("<ButtonPress-1>", self._on_drag_start)
         self.label.bind("<B1-Motion>", self._on_drag_move)
         self.apply_config()
+        # Preserve the overlay's established drag interaction.  Its native
+        # topmost updates still use SWP_NOACTIVATE; WS_EX_NOACTIVATE is reserved
+        # for the detached OCR button, where keeping the game foreground is
+        # more important than keyboard interaction with the overlay itself.
+        self._topmost_controller = TopmostWindowController(
+            self.root,
+            enabled=self.config.topmost,
+            no_activate=False,
+            debug_log=self.config.debug_log,
+        )
+        self._topmost_controller.start()
         self.root.after(self.IDLE_EVENT_POLL_MS, self._drain_events)
 
     @staticmethod
@@ -369,6 +383,9 @@ class OverlayerApp:
         self.root.deiconify()
         self.root.update_idletasks()
         self._apply_capture_exclusion()
+        if self._topmost_controller is not None:
+            self._topmost_controller.set_debug_log(cfg.debug_log)
+            self._topmost_controller.set_enabled(cfg.topmost)
 
     def _apply_capture_exclusion(self) -> bool:
         if os.name != "nt":
@@ -376,13 +393,12 @@ class OverlayerApp:
         affinity = WDA_EXCLUDEFROMCAPTURE if self.config.exclude_from_capture else WDA_NONE
         try:
             user32 = ctypes.WinDLL("user32", use_last_error=True)
-            user32.GetParent.argtypes = [wintypes.HWND]
-            user32.GetParent.restype = wintypes.HWND
             set_window_display_affinity = user32.SetWindowDisplayAffinity
             set_window_display_affinity.argtypes = [wintypes.HWND, wintypes.DWORD]
             set_window_display_affinity.restype = wintypes.BOOL
-            widget_hwnd = self.root.winfo_id()
-            top_level_hwnd = user32.GetParent(widget_hwnd) or widget_hwnd
+            top_level_hwnd = get_top_level_hwnd(self.root)
+            if not top_level_hwnd:
+                return False
             if set_window_display_affinity(top_level_hwnd, affinity):
                 log_debug(
                     self.config.debug_log,
@@ -399,6 +415,10 @@ class OverlayerApp:
     def _on_configure(self, event: tk.Event) -> None:
         if event.widget == self.root:
             self._update_wraplength()
+
+    def _on_root_destroy(self, event: tk.Event) -> None:
+        if event.widget == self.root and self._topmost_controller is not None:
+            self._topmost_controller.close()
 
     def _update_wraplength(self) -> None:
         width = max(80, self.root.winfo_width() - 36)
@@ -420,11 +440,7 @@ class OverlayerApp:
     def close(self) -> None:
         if not messagebox.askyesno(
             "MekiOverlayer 종료",
-            (
-                "MekiOverlayer 창을 닫을까요?\n\n"
-                "MekiCopy에서 실행한 경우 자동 복구 대상에서 제외됩니다. 다시 사용하려면 "
-                "MekiCopy에서 MekiOverlayer를 실행하세요."
-            ),
+            "MekiOverlayer 창을 닫을까요?",
             parent=self.root,
         ):
             return
@@ -433,6 +449,8 @@ class OverlayerApp:
                 self._on_confirmed_close()
             except Exception as exc:
                 log_error("manual_close_signal", exc)
+        if self._topmost_controller is not None:
+            self._topmost_controller.close()
         self.root.destroy()
 
     def _drain_events(self) -> None:

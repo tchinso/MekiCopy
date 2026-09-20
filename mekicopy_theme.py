@@ -261,6 +261,7 @@ class RoundedButton(tk.Canvas):
         anchor: str = "center",
         variant: str = "normal",
         font: tuple[str, int] | tuple[str, int, str] = BUTTON_FONT,
+        focus_on_click: bool = True,
         **kwargs: Any,
     ) -> None:
         palette = _button_palette(variant)
@@ -278,6 +279,7 @@ class RoundedButton(tk.Canvas):
         self._height = height
         self._radius = radius
         self._anchor = anchor
+        self._focus_on_click = bool(focus_on_click)
         self._hover = False
         self._pressed = False
         self._button_options: dict[str, Any] = {
@@ -358,7 +360,8 @@ class RoundedButton(tk.Canvas):
     def _on_press(self, _event: tk.Event) -> None:
         if self._button_options.get("state") == tk.DISABLED:
             return
-        self.focus_set()
+        if self._focus_on_click:
+            self.focus_set()
         self._pressed = True
         self._redraw()
 

@@ -1816,11 +1816,7 @@ class CaptureWindow:
             return
         if not messagebox.askyesno(
             "MekiAudioCapture 종료",
-            (
-                "MekiAudioCapture 창을 닫을까요?\n\n"
-                "MekiCopy에서 실행한 경우 자동 복구 대상에서 제외됩니다. 다시 사용하려면 "
-                "MekiCopy에서 MekiAudioCapture를 실행하세요."
-            ),
+            "MekiAudioCapture 창을 닫을까요?",
             parent=self.root,
         ):
             return

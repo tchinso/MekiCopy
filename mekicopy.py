@@ -109,6 +109,7 @@ from mekicopy_ocr import (
     ocr_region,
     recognize_image,
 )
+from mekicopy_hotkey import GlobalHotkeyManager
 from mekicopy_region_ui import (
     build_initial_rect,
     pick_bookmark,
@@ -170,12 +171,14 @@ from system_logging import (
     log_directory,
     set_debug_enabled,
 )
+from win32_overlay import TopmostWindowController
 import mekicopy_settings
 EDGE_GRAB_PX = 8
 MAIN_WINDOW_WIDTH = 520
 MAIN_WINDOW_HEIGHT = 440
 MAIN_TAB_BAR_WIDTH = 138
 OCR_BUTTON_HEIGHT_PX = 278
+GLOBAL_HOTKEY_POLL_MS = 50
 SELECTION_INSTRUCTION_FONT_SIZE = 36
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 ICON_FILENAME = "MekiCopy.ico"
@@ -248,6 +251,12 @@ class DetachedOcrButtonApp:
         self._settings_after_id: str | None = None
         self._geometry_after_id: str | None = None
         self._closing = False
+        self._topmost_controller = TopmostWindowController(
+            self.root,
+            enabled=self.settings.detached_always_on_top,
+            no_activate=True,
+            debug_log=self.settings.debug_logging,
+        )
 
         self.button = RoundedButton(
             self.root,
@@ -256,6 +265,7 @@ class DetachedOcrButtonApp:
             font=("Malgun Gothic", 14, "bold"),
             variant="primary",
             radius=22,
+            focus_on_click=False,
         )
         self.button.pack(fill=tk.BOTH, expand=True)
 
@@ -265,11 +275,13 @@ class DetachedOcrButtonApp:
             )
         )
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.bind("<Destroy>", self._on_root_destroy, add="+")
         self.root.bind("<Configure>", self._on_configure)
         self.button.bind("<ButtonPress-1>", self._on_mouse_down, add="+")
         self.button.bind("<B1-Motion>", self._on_mouse_drag, add="+")
         self.button.bind("<ButtonRelease-1>", self._on_mouse_release, add="+")
         self.apply_settings()
+        self._topmost_controller.start()
         self._schedule_settings_poll()
 
     def run(self) -> None:
@@ -320,12 +332,15 @@ class DetachedOcrButtonApp:
         self.root.deiconify()
         self.root.attributes("-topmost", settings.detached_always_on_top)
         self._set_maximize_button_enabled(not settings.detached_fixed_size)
+        self._topmost_controller.set_debug_log(settings.debug_logging)
+        self._topmost_controller.set_enabled(settings.detached_always_on_top)
 
     def close(self) -> None:
         if self._closing:
             return
         self._closing = True
         self._task_runner.close()
+        self._topmost_controller.close()
         if self._settings_after_id:
             try:
                 self.root.after_cancel(self._settings_after_id)
@@ -556,6 +571,7 @@ class DetachedOcrButtonApp:
             self._settings_signature = signature
         else:
             self.settings = latest
+            self._topmost_controller.set_debug_log(latest.debug_logging)
         self._schedule_settings_poll()
 
     def _on_configure(self, event: tk.Event) -> None:
@@ -572,6 +588,10 @@ class DetachedOcrButtonApp:
         self._geometry_after_id = None
         if not self._closing and self.root.winfo_exists():
             self.capture_geometry(persist=True)
+
+    def _on_root_destroy(self, event: tk.Event) -> None:
+        if event.widget == self.root:
+            self._topmost_controller.close()
 
     def _on_mouse_down(self, event: tk.Event) -> None:
         if not self.settings.detached_hide_titlebar:
@@ -686,6 +706,11 @@ class MainWindow(tk.Tk):
         configure_window_theme(self)
         install_tk_exception_hook(self)
         self._task_runner = TkTaskRunner(self)
+        self._global_hotkey = GlobalHotkeyManager()
+        self._global_hotkey_after_id: str | None = None
+        self._global_hotkey_settings: tuple[bool, str] | None = None
+        self._global_hotkey_paused = False
+        self._global_hotkey_action_active = False
         self.settings = load_settings()
         self.detached_process: subprocess.Popen | None = None
         self.settings_window: SettingsWindow | None = None
@@ -754,9 +779,11 @@ class MainWindow(tk.Tk):
         self._build_ui()
         self.apply_settings(self.settings, persist=False)
         self.bind("<Unmap>", self._on_unmap)
+        self.bind("<Destroy>", self._on_root_destroy, add="+")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._companion_watchdog.start()
         self._schedule_companion_watchdog_poll()
+        self._schedule_global_hotkey_poll()
 
     def _build_ui(self) -> None:
         header = tk.Label(
@@ -990,6 +1017,97 @@ class MainWindow(tk.Tk):
                 button.config(state=overlay_state)
         self.ocr_button.config(text=self.ocr_action_label())
         self.detach_button.config(text=f"'{self.ocr_action_label()}' 버튼 분리하기")
+
+    @staticmethod
+    def _global_hotkey_configuration(settings: AppSettings) -> tuple[bool, str]:
+        return settings.global_hotkey_enabled, settings.global_hotkey
+
+    def _configure_global_hotkey(
+        self,
+        settings: AppSettings,
+        *,
+        force: bool = False,
+    ) -> tuple[bool, str]:
+        configuration = self._global_hotkey_configuration(settings)
+        if self._global_hotkey_paused:
+            self._global_hotkey_settings = configuration
+            return True, ""
+        if not force and configuration == self._global_hotkey_settings:
+            return True, ""
+
+        result = self._global_hotkey.configure(
+            enabled=configuration[0],
+            hotkey=configuration[1],
+        )
+        if result.ok:
+            self._global_hotkey_settings = configuration
+            return True, ""
+        detail = result.error or "알 수 없는 오류"
+        _log_runtime_error("global_hotkey", detail)
+        return False, detail
+
+    def pause_global_hotkey(self) -> None:
+        """Temporarily release the key while the settings capture field has focus."""
+
+        if self._closing or self._global_hotkey_paused:
+            return
+        result = self._global_hotkey.configure(
+            enabled=False,
+            hotkey=self.settings.global_hotkey,
+        )
+        if result.ok:
+            self._global_hotkey_paused = True
+        else:
+            _log_runtime_error("pause_global_hotkey", result.error or "unknown error")
+
+    def resume_global_hotkey(self) -> None:
+        if self._closing or not self._global_hotkey_paused:
+            return
+        self._global_hotkey_paused = False
+        configured, detail = self._configure_global_hotkey(self.settings, force=True)
+        if not configured:
+            # Keep it released if re-registration failed, rather than leaving
+            # the settings field unable to accept the selected ordinary key.
+            self._global_hotkey_paused = True
+            _log_runtime_error("resume_global_hotkey", detail)
+
+    def _schedule_global_hotkey_poll(self) -> None:
+        if not self._closing:
+            self._global_hotkey_after_id = self.after(
+                GLOBAL_HOTKEY_POLL_MS,
+                self._poll_global_hotkey,
+            )
+
+    def _poll_global_hotkey(self) -> None:
+        self._global_hotkey_after_id = None
+        if self._closing:
+            return
+        activations = self._global_hotkey.drain_activations()
+        # A fast sequence of key repeats can all arrive in one Tk turn. One
+        # OCR request is enough; TkTaskRunner also keeps the actual work single.
+        if (
+            activations
+            and self.settings.global_hotkey_enabled
+            and not self._global_hotkey_paused
+            and not self._global_hotkey_action_active
+            and not self._task_runner.is_running("main_ocr")
+        ):
+            self._global_hotkey_action_active = True
+            started = self._on_ocr_copy(
+                source_button=self.ocr_button,
+                on_finished=self._on_global_hotkey_action_finished,
+            )
+            if not started:
+                self._global_hotkey_action_active = False
+        self._schedule_global_hotkey_poll()
+
+    def _on_global_hotkey_action_finished(self) -> None:
+        self._global_hotkey_action_active = False
+
+    def _on_root_destroy(self, event: tk.Event) -> None:
+        if event.widget == self:
+            self._closing = True
+            self._global_hotkey.close()
 
     def _format_region(self, region: Region | None) -> str:
         if not region:
@@ -2279,12 +2397,17 @@ class MainWindow(tk.Tk):
             _log_runtime_error("test_overlay_connection", exc)
             messagebox.showerror("MekiCopy", f"연결 테스트 실패:\n{exc}", parent=owner)
 
-    def _on_ocr_copy(self, source_button: tk.Button | None = None) -> None:
+    def _on_ocr_copy(
+        self,
+        source_button: tk.Button | None = None,
+        *,
+        on_finished: Callable[[], None] | None = None,
+    ) -> bool:
         if not self.active_region:
             messagebox.showerror("MekiCopy", "설정된 영역이 없습니다.", parent=self)
-            return
+            return False
         if not self._prepare_active_region_for_capture():
-            return
+            return False
         try:
             image = capture_ocr_image(
                 self.active_region.left,
@@ -2295,13 +2418,14 @@ class MainWindow(tk.Tk):
         except OcrError as exc:
             self._set_capture_status_from_last_result()
             messagebox.showwarning("MekiCopy", str(exc), parent=self)
-            return
+            return False
         self._set_capture_status_from_last_result()
-        self._start_ocr_task(
+        return self._start_ocr_task(
             image,
             source_button=source_button or self.ocr_button,
             simple_feedback=self.settings.simple_copy_complete,
             translate=self.settings.overlay_translation_mode,
+            on_finished=on_finished,
         )
 
     def _start_ocr_task(
@@ -2311,7 +2435,8 @@ class MainWindow(tk.Tk):
         source_button: tk.Button,
         simple_feedback: bool,
         translate: bool,
-    ) -> None:
+        on_finished: Callable[[], None] | None = None,
+    ) -> bool:
         settings = self.settings
         hytrans_url = f"http://127.0.0.1:{settings.hytrans_port}"
         overlayer_url = f"http://127.0.0.1:{settings.overlayer_port}"
@@ -2340,42 +2465,50 @@ class MainWindow(tk.Tk):
             return text
 
         def on_success(text: str) -> None:
-            if translate:
-                if not text.strip():
-                    messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=self)
+            try:
+                if translate:
+                    if not text.strip():
+                        messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=self)
+                        return
+                    if simple_feedback:
+                        self._show_copy_feedback(source_button)
+                    else:
+                        messagebox.showinfo(
+                            "MekiCopy",
+                            "번역 결과를 MekiOverlayer에 표시했습니다.",
+                            parent=self,
+                        )
+                    return
+
+                try:
+                    copy_text_to_clipboard(text, notify=not simple_feedback, parent=self)
+                except Exception as exc:
+                    _log_runtime_error("ocr_copy_clipboard", exc)
+                    messagebox.showerror("MekiCopy", f"클립보드 복사 실패:\n{exc}", parent=self)
                     return
                 if simple_feedback:
                     self._show_copy_feedback(source_button)
-                else:
-                    messagebox.showinfo(
-                        "MekiCopy",
-                        "번역 결과를 MekiOverlayer에 표시했습니다.",
-                        parent=self,
-                    )
-                return
-
-            try:
-                copy_text_to_clipboard(text, notify=not simple_feedback, parent=self)
-            except Exception as exc:
-                _log_runtime_error("ocr_copy_clipboard", exc)
-                messagebox.showerror("MekiCopy", f"클립보드 복사 실패:\n{exc}", parent=self)
-                return
-            if simple_feedback:
-                self._show_copy_feedback(source_button)
+            finally:
+                if on_finished is not None:
+                    on_finished()
 
         def on_error(exc: Exception) -> None:
-            stage = "ocr_translate_and_show" if translate else "ocr"
-            _log_runtime_error(stage, exc)
-            detail = str(exc)
-            if isinstance(exc, urllib.error.HTTPError):
-                try:
-                    detail = f"HTTP {exc.code}\n{exc.read().decode('utf-8', errors='replace')}"
-                except Exception:
-                    detail = f"HTTP {exc.code}"
-            title = "번역 및 표시 실패" if translate else "OCR 실행 실패"
-            messagebox.showerror("MekiCopy", f"{title}:\n{detail}", parent=self)
+            try:
+                stage = "ocr_translate_and_show" if translate else "ocr"
+                _log_runtime_error(stage, exc)
+                detail = str(exc)
+                if isinstance(exc, urllib.error.HTTPError):
+                    try:
+                        detail = f"HTTP {exc.code}\n{exc.read().decode('utf-8', errors='replace')}"
+                    except Exception:
+                        detail = f"HTTP {exc.code}"
+                title = "번역 및 표시 실패" if translate else "OCR 실행 실패"
+                messagebox.showerror("MekiCopy", f"{title}:\n{detail}", parent=self)
+            finally:
+                if on_finished is not None:
+                    on_finished()
 
-        self._task_runner.submit(
+        return self._task_runner.submit(
             "main_ocr",
             operation,
             on_success=on_success,
@@ -2447,7 +2580,41 @@ class MainWindow(tk.Tk):
             )
             return None
 
+        hotkey_changed = self._global_hotkey_configuration(
+            previous
+        ) != self._global_hotkey_configuration(settings)
+        was_hotkey_paused = self._global_hotkey_paused
+        if persist and was_hotkey_paused:
+            # Saving must validate the newly captured key, rather than merely
+            # remembering it while the field has temporarily released the old
+            # registration.
+            self._global_hotkey_paused = False
+        hotkey_configured, hotkey_error = self._configure_global_hotkey(settings)
+        if not hotkey_configured:
+            if persist:
+                if was_hotkey_paused:
+                    self.pause_global_hotkey()
+                messagebox.showerror(
+                    "MekiCopy",
+                    (
+                        f"전역 단축키 '{settings.global_hotkey}'를 등록하지 못했습니다.\n"
+                        f"{hotkey_error}"
+                    ),
+                    parent=self.settings_window or self,
+                )
+                return None
+            _log_runtime_error("global_hotkey_startup", hotkey_error)
+
         if persist and not save_settings(settings):
+            if hotkey_changed:
+                restored, restore_error = self._configure_global_hotkey(
+                    previous,
+                    force=True,
+                )
+                if not restored:
+                    _log_runtime_error("restore_global_hotkey", restore_error)
+            if was_hotkey_paused:
+                self.pause_global_hotkey()
             _log_runtime_error("save_settings", "settings file could not be written")
             messagebox.showerror(
                 "MekiCopy",
@@ -2538,6 +2705,13 @@ class MainWindow(tk.Tk):
             ):
                 return
         self._closing = True
+        if self._global_hotkey_after_id is not None:
+            try:
+                self.after_cancel(self._global_hotkey_after_id)
+            except tk.TclError:
+                pass
+            self._global_hotkey_after_id = None
+        self._global_hotkey.close()
         if self._companion_watchdog_after_id is not None:
             try:
                 self.after_cancel(self._companion_watchdog_after_id)

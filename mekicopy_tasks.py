@@ -117,6 +117,7 @@ class TkTaskRunner:
             except Exception:
                 pass
             self._poll_after_id = None
+
         try:
             self._poll_after_id = self._root.after(
                 max(0, int(delay_ms)),
@@ -124,6 +125,11 @@ class TkTaskRunner:
             )
         except Exception:
             self._closed = True
+
+    def is_running(self, key: str) -> bool:
+        """Return whether a uniquely keyed task is active on the Tk thread."""
+
+        return not self._closed and key in self._running_keys
 
     def _drain(self) -> None:
         self._poll_after_id = None

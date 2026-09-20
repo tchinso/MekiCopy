@@ -3,6 +3,11 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import colorchooser, messagebox, ttk
 
+from mekicopy_hotkey import (
+    DEFAULT_GLOBAL_HOTKEY,
+    hotkey_from_tk_event,
+    parse_hotkey,
+)
 from mekicopy_runtime import _set_window_icon
 from mekicopy_settings import (
     AppSettings,
@@ -112,6 +117,10 @@ class SettingsWindow(tk.Toplevel):
         self.simple_copy_complete_var = tk.BooleanVar(
             value=settings.simple_copy_complete
         )
+        self.global_hotkey_enabled_var = tk.BooleanVar(
+            value=settings.global_hotkey_enabled
+        )
+        self.global_hotkey_var = tk.StringVar(value=settings.global_hotkey)
         self.overlay_mode_var = tk.BooleanVar(value=settings.overlay_translation_mode)
         selected_model = normalize_model_id(settings.hytrans_model_id)
         self.hytrans_model_var = tk.StringVar(
@@ -169,6 +178,7 @@ class SettingsWindow(tk.Toplevel):
         self.overlay_only_widgets: list[tk.Widget] = []
         self.detached_label_controls: list[tuple[tk.Widget, str]] = []
         self._color_buttons: list[tuple[tk.Button, tk.StringVar]] = []
+        self._global_hotkey_controls: list[tk.Widget] = []
 
         self._build_ui()
         self.audio_stt_model_var.trace_add("write", self._on_audio_stt_model_changed)
@@ -177,8 +187,12 @@ class SettingsWindow(tk.Toplevel):
         self.transient(owner)
         self.attributes("-topmost", settings.main_always_on_top)
         self.overlay_mode_var.trace_add("write", lambda *_: self._on_overlay_mode_changed())
+        self.global_hotkey_enabled_var.trace_add(
+            "write", lambda *_: self._update_global_hotkey_controls()
+        )
         self._update_mode_labels()
         self._update_overlay_controls()
+        self._update_global_hotkey_controls()
 
     def _on_audio_stt_model_changed(self, *_args) -> None:
         is_parakeet = (
@@ -224,6 +238,64 @@ class SettingsWindow(tk.Toplevel):
         for text, variable in options:
             checkbox = tk.Checkbutton(general_tab, text=text, variable=variable, anchor="w")
             checkbox.pack(fill=tk.X, pady=4)
+
+        global_hotkey_frame = tk.LabelFrame(
+            general_tab,
+            text="전역 단축키",
+            padx=10,
+            pady=8,
+        )
+        global_hotkey_frame.pack(fill=tk.X, pady=(8, 4))
+        tk.Checkbutton(
+            global_hotkey_frame,
+            text="전역 단축키 사용",
+            variable=self.global_hotkey_enabled_var,
+            anchor="w",
+        ).pack(fill=tk.X, pady=(0, 4))
+        self.global_hotkey_action_label = tk.Label(
+            global_hotkey_frame,
+            anchor="w",
+        )
+        self.global_hotkey_action_label.pack(fill=tk.X, pady=(0, 4))
+        global_hotkey_row = tk.Frame(global_hotkey_frame)
+        global_hotkey_row.pack(fill=tk.X)
+        tk.Label(global_hotkey_row, text="실행 키").pack(side=tk.LEFT)
+        self.global_hotkey_entry = tk.Entry(
+            global_hotkey_row,
+            width=18,
+            textvariable=self.global_hotkey_var,
+        )
+        self.global_hotkey_entry.pack(side=tk.RIGHT, padx=(8, 0))
+        self.global_hotkey_entry.bind(
+            "<KeyPress>",
+            self._capture_global_hotkey,
+            add="+",
+        )
+        self.global_hotkey_entry.bind(
+            "<FocusIn>",
+            self._on_global_hotkey_focus_in,
+            add="+",
+        )
+        self.global_hotkey_entry.bind(
+            "<FocusOut>",
+            self._on_global_hotkey_focus_out,
+            add="+",
+        )
+        self.global_hotkey_default_button = tk.Button(
+            global_hotkey_frame,
+            text="기본값 B",
+            command=self._restore_default_global_hotkey,
+        )
+        self.global_hotkey_default_button.pack(anchor="e", pady=(4, 2))
+        tk.Label(
+            global_hotkey_frame,
+            text="입력칸을 클릭한 뒤 키를 누르세요. B 같은 일반 키도 단독으로 사용할 수 있습니다.",
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(fill=tk.X)
+        self._global_hotkey_controls.extend(
+            [self.global_hotkey_entry, self.global_hotkey_default_button]
+        )
 
         detached_options = [
             ("버튼을 항상 위로", self.detached_topmost_var),
@@ -547,6 +619,37 @@ class SettingsWindow(tk.Toplevel):
         action_label = self._mode_action_label()
         for widget, suffix in self.detached_label_controls:
             widget.configure(text=f"분리된 '{action_label}' {suffix}")
+        global_hotkey_label = getattr(self, "global_hotkey_action_label", None)
+        if global_hotkey_label is not None:
+            global_hotkey_label.configure(
+                text=f"전역 단축키를 누르면 현재 모드의 '{action_label}' 실행"
+            )
+
+    def _update_global_hotkey_controls(self) -> None:
+        state = tk.NORMAL if self.global_hotkey_enabled_var.get() else tk.DISABLED
+        for widget in self._global_hotkey_controls:
+            widget.configure(state=state)
+
+    def _capture_global_hotkey(self, event: tk.Event) -> str:
+        hotkey = hotkey_from_tk_event(event.keysym, event.state)
+        if hotkey is not None:
+            self.global_hotkey_var.set(hotkey)
+        # This is a dedicated capture field. Do not let a keypress append raw
+        # text after it has been converted to the canonical shortcut.
+        return "break"
+
+    def _restore_default_global_hotkey(self) -> None:
+        self.global_hotkey_var.set(DEFAULT_GLOBAL_HOTKEY)
+
+    def _on_global_hotkey_focus_in(self, _event: tk.Event) -> None:
+        pause = getattr(self.owner, "pause_global_hotkey", None)
+        if callable(pause):
+            pause()
+
+    def _on_global_hotkey_focus_out(self, _event: tk.Event) -> None:
+        resume = getattr(self.owner, "resume_global_hotkey", None)
+        if callable(resume):
+            resume()
 
     def _on_overlay_mode_changed(self) -> None:
         self._update_mode_labels()
@@ -592,6 +695,11 @@ class SettingsWindow(tk.Toplevel):
     def _collect_settings(self) -> AppSettings:
         current = self.owner.settings
         detached_geometry = load_detached_geometry(current.detached_geometry)
+        global_hotkey = parse_hotkey(self.global_hotkey_var.get())
+        if global_hotkey is None:
+            raise ValueError(
+                "전역 단축키는 B 또는 Ctrl+Alt+B처럼 키 하나를 포함해 입력하세요."
+            )
         hytrans_port = self._read_port(self.hytrans_port_var, "HYTrans")
         overlayer_port = self._read_port(self.overlayer_port_var, "MekiOverlayer")
         audio_capture_port = self._read_port(
@@ -618,6 +726,8 @@ class SettingsWindow(tk.Toplevel):
             detached_hide_titlebar=self.detached_hide_titlebar_var.get(),
             detached_fixed_size=self.detached_fixed_size_var.get(),
             simple_copy_complete=self.simple_copy_complete_var.get(),
+            global_hotkey_enabled=self.global_hotkey_enabled_var.get(),
+            global_hotkey=global_hotkey.text,
             detached_geometry=detached_geometry,
             detached_fixed_width=current.detached_fixed_width,
             detached_fixed_height=current.detached_fixed_height,
@@ -722,5 +832,6 @@ class SettingsWindow(tk.Toplevel):
         self.owner._on_test_overlay_connection(parent=self)
 
     def _on_close(self) -> None:
+        self._on_global_hotkey_focus_out(None)
         self.owner.settings_window = None
         self.destroy()

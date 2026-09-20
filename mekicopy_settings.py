@@ -17,6 +17,7 @@ from pathlib import Path
 from tkinter import font as tkfont
 
 from mekicopy_capture import MIN_SIZE_PX, Region
+from mekicopy_hotkey import DEFAULT_GLOBAL_HOTKEY, normalize_hotkey
 from mekicopy_runtime import _get_app_dir
 from hytrans.model_files import (
     DEFAULT_MODEL_ID,
@@ -287,6 +288,8 @@ class AppSettings:
     detached_hide_titlebar: bool = False
     detached_fixed_size: bool = False
     simple_copy_complete: bool = True
+    global_hotkey_enabled: bool = True
+    global_hotkey: str = DEFAULT_GLOBAL_HOTKEY
     detached_geometry: str = DETACHED_DEFAULT_GEOMETRY
     detached_fixed_width: int = 260
     detached_fixed_height: int = 160
@@ -547,6 +550,16 @@ def load_settings() -> AppSettings:
     settings.simple_copy_complete = parser.getboolean(
         section, "simple_copy_complete", fallback=settings.simple_copy_complete
     )
+    settings.global_hotkey_enabled = parser.getboolean(
+        section,
+        "global_hotkey_enabled",
+        fallback=settings.global_hotkey_enabled,
+    )
+    settings.global_hotkey = parser.get(
+        section,
+        "global_hotkey",
+        fallback=settings.global_hotkey,
+    )
     settings.detached_geometry = parser.get(
         section, "detached_geometry", fallback=settings.detached_geometry
     )
@@ -739,6 +752,10 @@ def load_settings() -> AppSettings:
     settings.script_translated_text_size = max(8, min(96, settings.script_translated_text_size))
     settings.script_original_text_font = _normalize_font_name(settings.script_original_text_font)
     settings.script_translated_text_font = _normalize_font_name(settings.script_translated_text_font)
+    settings.global_hotkey = normalize_hotkey(
+        settings.global_hotkey,
+        AppSettings().global_hotkey,
+    )
     return settings
 
 
@@ -752,6 +769,8 @@ def save_settings(settings: AppSettings) -> bool:
         "detached_hide_titlebar": str(settings.detached_hide_titlebar).lower(),
         "detached_fixed_size": str(settings.detached_fixed_size).lower(),
         "simple_copy_complete": str(settings.simple_copy_complete).lower(),
+        "global_hotkey_enabled": str(settings.global_hotkey_enabled).lower(),
+        "global_hotkey": normalize_hotkey(settings.global_hotkey),
         "detached_geometry": settings.detached_geometry,
         "detached_fixed_width": str(settings.detached_fixed_width),
         "detached_fixed_height": str(settings.detached_fixed_height),

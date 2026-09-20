@@ -396,11 +396,7 @@ class ScriptWindow:
     def close(self) -> None:
         if not messagebox.askyesno(
             "MekiScript 종료",
-            (
-                "MekiScript 창을 닫을까요?\n\n"
-                "MekiCopy에서 실행한 경우 자동 복구 대상에서 제외됩니다. 다시 사용하려면 "
-                "MekiCopy에서 MekiScript를 실행하세요."
-            ),
+            "MekiScript 창을 닫을까요?",
             parent=self.root,
         ):
             return
