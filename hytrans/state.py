@@ -7,6 +7,7 @@ from typing import Optional
 
 @dataclass
 class AppState:
+    backend: str = "local"
     state: str = "STARTING"
     worker_ready: bool = False
     worker_connected: bool = False
@@ -22,6 +23,7 @@ class AppState:
     def as_ready_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "ready": self.worker_ready,
+            "backend": self.backend,
             "workerConnected": self.worker_connected,
             "state": self.state,
             "device": self.device,

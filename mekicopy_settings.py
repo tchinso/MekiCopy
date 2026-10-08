@@ -23,6 +23,7 @@ from hytrans.model_files import (
     DEFAULT_MODEL_ID,
     normalize_model_id,
 )
+from hytrans.api_settings import normalize_backend
 from runtime_paths import exclusive_file_lock, fallback_app_data_dirs, state_data_dir
 from service_ports import (
     AUDIO_CAPTURE_DEFAULT_PORT,
@@ -39,6 +40,7 @@ HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 _STATE_FILENAMES = (
     "bookmarks.txt",
     "settings.cfg",
+    "translation_api.json",
     "detached_button_region.json",
     "detached_button_geometry.json",
 )
@@ -294,6 +296,7 @@ class AppSettings:
     detached_fixed_width: int = 260
     detached_fixed_height: int = 160
     overlay_translation_mode: bool = True
+    hytrans_backend: str = "local"
     hytrans_model_id: str = DEFAULT_MODEL_ID
     hytrans_port: int = HYTRANS_DEFAULT_PORT
     overlayer_port: int = OVERLAYER_DEFAULT_PORT
@@ -581,6 +584,9 @@ def load_settings() -> AppSettings:
             fallback=settings.hytrans_model_id,
         )
     )
+    settings.hytrans_backend = normalize_backend(
+        parser.get(section, "hytrans_backend", fallback=settings.hytrans_backend)
+    )
     settings.hytrans_port = parser.getint(
         section, "hytrans_port", fallback=settings.hytrans_port
     )
@@ -775,6 +781,7 @@ def save_settings(settings: AppSettings) -> bool:
         "detached_fixed_width": str(settings.detached_fixed_width),
         "detached_fixed_height": str(settings.detached_fixed_height),
         "overlay_translation_mode": str(settings.overlay_translation_mode).lower(),
+        "hytrans_backend": normalize_backend(settings.hytrans_backend),
         "hytrans_model_id": normalize_model_id(settings.hytrans_model_id),
         "hytrans_port": str(settings.hytrans_port),
         "overlayer_port": str(settings.overlayer_port),

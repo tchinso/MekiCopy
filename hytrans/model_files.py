@@ -38,51 +38,6 @@ def _immutable_files(
     return MappingProxyType(dict(files))
 
 
-MT2_PROFILE = ModelProfile(
-    key="mt2",
-    display_label="Hy-MT2 1.8B (q4f16)",
-    model_id="tchinso/Hy-MT2-1.8B-onnx-q4f16",
-    revision="6b6a4f12235342ed00ac089159c7192ea40bf6e8",
-    dtype="q4f16",
-    prompt=(
-        "Translate the following text into {target}. Note that you should only "
-        "output the translated result without any additional explanation:\n\n{text}"
-    ),
-    files=_immutable_files(
-        {
-            "chat_template.jinja": ModelFileSpec(
-                654,
-                "b7491ec0e9c869dfce20f2176758099bf248d979dd05530ede99deb21698acee",
-            ),
-            "config.json": ModelFileSpec(
-                1_518,
-                "c0621df26e008b9a9d3a288062aebd150169e25aa707400c58fecd410e20d8f8",
-            ),
-            "generation_config.json": ModelFileSpec(
-                221,
-                "0e28667f1cb4c7b880b9223b2d87978f88e79ed7ae037de1021f826c18d4ed6f",
-            ),
-            "special_tokens_map.json": ModelFileSpec(
-                488,
-                "bb9f59990034dae326581b9c62471523975417869f78a244b7ae2ce8cbb085eb",
-            ),
-            "tokenizer.json": ModelFileSpec(
-                9_527_287,
-                "b475bbef1b0b2fd57dcb865332b546475bd1ede2deb3bb91bafd0c047a8a530a",
-            ),
-            "tokenizer_config.json": ModelFileSpec(
-                166_491,
-                "273eea0d246839923aa90d4e376e4bce6ae9ad2ea82ff17c1db76a99d6a50e92",
-            ),
-            "onnx/model_q4f16.onnx": ModelFileSpec(
-                1_373_443_906,
-                "c0f5921fe143b05a420334392c59c175389d87dcfd60dc2554ca1c629eebec2a",
-            ),
-        }
-    ),
-)
-
-
 MT15_PROFILE = ModelProfile(
     key="mt1.5",
     display_label="HY-MT1.5 1.8B (q4)",
@@ -125,14 +80,12 @@ MT15_PROFILE = ModelProfile(
 
 
 # These are stable user-setting/CLI keys, not Hugging Face repository IDs.
-# MT1.5 is the stable/default path.  MT2 remains selectable for people who
-# explicitly opt into the experimental, larger q4f16 runtime.
+# MT1.5 is the only supported local translation model.
 DEFAULT_MODEL_ID = MT15_PROFILE.key
-SUPPORTED_MODEL_IDS = (MT15_PROFILE.key, MT2_PROFILE.key)
+SUPPORTED_MODEL_IDS = (MT15_PROFILE.key,)
 MODEL_PROFILES: Mapping[str, ModelProfile] = MappingProxyType(
     {
         MT15_PROFILE.key: MT15_PROFILE,
-        MT2_PROFILE.key: MT2_PROFILE,
     }
 )
 MODEL_DISPLAY_LABELS: Mapping[str, str] = MappingProxyType(
@@ -141,10 +94,6 @@ MODEL_DISPLAY_LABELS: Mapping[str, str] = MappingProxyType(
 
 _MODEL_ALIASES: Mapping[str, str] = MappingProxyType(
     {
-        "mt2": MT2_PROFILE.key,
-        "hy-mt2": MT2_PROFILE.key,
-        "hy-mt2-1.8b": MT2_PROFILE.key,
-        MT2_PROFILE.model_id.casefold(): MT2_PROFILE.key,
         "mt1.5": MT15_PROFILE.key,
         "mt1_5": MT15_PROFILE.key,
         "mt15": MT15_PROFILE.key,

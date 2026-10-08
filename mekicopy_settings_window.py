@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import tkinter as tk
 from tkinter import colorchooser, messagebox, ttk
 
@@ -19,7 +20,16 @@ from mekicopy_settings import (
     _normalize_port,
     load_detached_geometry,
 )
-from hytrans.model_files import DEFAULT_MODEL_ID, normalize_model_id
+from hytrans.model_files import DEFAULT_MODEL_ID
+from hytrans.api_settings import (
+    BACKEND_LABELS,
+    PROVIDERS,
+    ApiSettings,
+    ProviderSettings,
+    load_api_settings,
+    normalize_backend,
+    validate_provider_settings,
+)
 from service_ports import validate_unique_ports
 from mekicopy_theme import (
     BG,
@@ -36,11 +46,8 @@ from mekicopy_theme import (
 
 HYTRANS_MODEL_LABELS = {
     "mt1.5": "MT1.5 (기본) · Hy-MT1.5 1.8B q4",
-    "mt2": "MT2 (실험용) · Hy-MT2 1.8B q4f16",
 }
-HYTRANS_MODEL_IDS_BY_LABEL = {
-    label: model_id for model_id, label in HYTRANS_MODEL_LABELS.items()
-}
+BACKEND_IDS_BY_LABEL = {label: backend for backend, label in BACKEND_LABELS.items()}
 STT_MODEL_LABELS = {
     "parakeet": "Parakeet TDT-CTC 0.6B 일본어 (기본, INT8)",
     "reazonspeech": "ReazonSpeech 일본어 (INT8 / FP32)",
@@ -95,6 +102,181 @@ class _ScrollableTab(tk.Frame):
             return
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
+
+class ApiSettingsDialog(tk.Toplevel):
+    """Edit provider drafts; the main settings Save commits them together."""
+
+    def __init__(self, owner: "SettingsWindow") -> None:
+        super().__init__(owner)
+        self.owner = owner
+        self.settings = deepcopy(owner.api_settings)
+        backend = BACKEND_IDS_BY_LABEL.get(owner.hytrans_backend_var.get(), "local")
+        self.provider = backend if backend in PROVIDERS else PROVIDERS[0]
+        self.title("번역 API 설정")
+        configure_window_theme(self)
+        self.geometry(
+            f"{min(660, max(560, self.winfo_screenwidth() - 80))}x"
+            f"{min(840, max(480, self.winfo_screenheight() - 100))}"
+        )
+        self.minsize(560, 480)
+        self.transient(owner)
+        _set_window_icon(self)
+        self.provider_var = tk.StringVar(value=BACKEND_LABELS[self.provider])
+        self.api_key_var = tk.StringVar()
+        self.account_id_var = tk.StringVar()
+        self.model_var = tk.StringVar()
+        self.show_key_var = tk.BooleanVar(value=False)
+
+        body = tk.Frame(self, bg=BG, padx=14, pady=14)
+        body.pack(fill=tk.BOTH, expand=True)
+        provider_row = tk.Frame(body, bg=BG)
+        provider_row.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(provider_row, text="API 서비스").pack(side=tk.LEFT)
+        tk.OptionMenu(
+            provider_row,
+            self.provider_var,
+            *(BACKEND_LABELS[provider] for provider in PROVIDERS),
+            command=self._on_provider_changed,
+        ).pack(side=tk.RIGHT)
+
+        wrapper = _ScrollableTab(body)
+        wrapper.pack(fill=tk.BOTH, expand=True)
+        fields = wrapper.interior
+        key_frame = tk.LabelFrame(fields, text="연결 정보", padx=10, pady=8)
+        key_frame.pack(fill=tk.X)
+        tk.Label(key_frame, text="API 키", anchor="w").pack(fill=tk.X)
+        self.key_entry = tk.Entry(key_frame, textvariable=self.api_key_var, show="•")
+        self.key_entry.pack(fill=tk.X, pady=(4, 2))
+        tk.Checkbutton(
+            key_frame,
+            text="API 키 표시",
+            variable=self.show_key_var,
+            command=self._update_key_visibility,
+            anchor="w",
+        ).pack(fill=tk.X)
+        self.account_row = tk.Frame(key_frame, bg=BG)
+        tk.Label(self.account_row, text="Cloudflare Account ID", anchor="w").pack(fill=tk.X)
+        tk.Entry(self.account_row, textvariable=self.account_id_var).pack(fill=tk.X, pady=(4, 0))
+
+        model_frame = tk.LabelFrame(fields, text="모델", padx=10, pady=8)
+        model_frame.pack(fill=tk.X, pady=(10, 0))
+        tk.Label(model_frame, text="사용할 모델 ID (직접 입력 가능)", anchor="w").pack(fill=tk.X)
+        self.model_combo = ttk.Combobox(model_frame, textvariable=self.model_var, state="normal")
+        self.model_combo.pack(fill=tk.X, pady=(4, 8))
+        tk.Label(model_frame, text="모델 목록 (한 줄에 모델 ID 하나)", anchor="w").pack(fill=tk.X)
+        self.models_text = self._text_field(model_frame, height=4)
+        self.models_text.bind("<<Modified>>", self._on_model_list_changed)
+
+        prompt_frame = tk.LabelFrame(fields, text="번역 프롬프트", padx=10, pady=8)
+        prompt_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        tk.Label(
+            prompt_frame,
+            text="{source}: 원문 언어 · {target}: 번역 언어 · {text}: 원문\n"
+            "프롬프트와 모델 목록은 서비스별로 따로 보관됩니다.",
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=520,
+        ).pack(fill=tk.X, pady=(0, 6))
+        self.prompt_text = self._text_field(prompt_frame, height=8)
+
+        tk.Label(
+            body,
+            text="적용한 뒤 MekiCopy 설정의 '저장'을 누르면 반영됩니다.",
+            anchor="w",
+        ).pack(fill=tk.X, pady=(10, 4))
+        buttons = tk.Frame(body, bg=BG)
+        buttons.pack(fill=tk.X)
+        apply_button = tk.Button(buttons, text="적용", command=self._on_apply)
+        apply_button.pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(buttons, text="취소", command=self._on_close).pack(side=tk.RIGHT)
+        style_tree(self)
+        style_standard_button(apply_button, "primary")
+        self._load_provider()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    @staticmethod
+    def _text_field(master: tk.Misc, *, height: int) -> tk.Text:
+        row = tk.Frame(master, bg=BG)
+        row.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        field = tk.Text(
+            row,
+            height=height,
+            width=1,
+            wrap=tk.WORD,
+            undo=True,
+            bg=SURFACE,
+            fg=INK,
+            insertbackground=ROSE,
+            selectbackground=SOFT,
+            highlightbackground=BORDER,
+            highlightcolor=ROSE,
+            relief=tk.FLAT,
+        )
+        scrollbar = ttk.Scrollbar(row, command=field.yview)
+        field.configure(yscrollcommand=scrollbar.set)
+        field.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        return field
+
+    def _models(self) -> list[str]:
+        return list(dict.fromkeys(
+            line.strip()
+            for line in self.models_text.get("1.0", "end-1c").splitlines()
+            if line.strip()
+        ))
+
+    def _store_provider(self) -> None:
+        self.settings.profiles[self.provider] = ProviderSettings(
+            api_key=self.api_key_var.get().strip(),
+            account_id=self.account_id_var.get().strip(),
+            model=self.model_var.get().strip(),
+            models=self._models(),
+            prompt=self.prompt_text.get("1.0", "end-1c"),
+        )
+
+    def _load_provider(self) -> None:
+        profile = self.settings.profiles[self.provider]
+        self.api_key_var.set(profile.api_key)
+        self.account_id_var.set(profile.account_id)
+        self.model_var.set(profile.model)
+        self.models_text.delete("1.0", tk.END)
+        self.models_text.insert("1.0", "\n".join(profile.models))
+        self.prompt_text.delete("1.0", tk.END)
+        self.prompt_text.insert("1.0", profile.prompt)
+        self.models_text.edit_reset()
+        self.prompt_text.edit_reset()
+        self.model_combo.configure(values=profile.models)
+        self.show_key_var.set(False)
+        self._update_key_visibility()
+        if self.provider == "cloudflare":
+            self.account_row.pack(fill=tk.X, pady=(8, 0))
+        else:
+            self.account_row.pack_forget()
+
+    def _on_provider_changed(self, label: str) -> None:
+        self._store_provider()
+        self.provider = BACKEND_IDS_BY_LABEL[label]
+        self._load_provider()
+
+    def _on_model_list_changed(self, _event: tk.Event) -> None:
+        if self.models_text.edit_modified():
+            self.model_combo.configure(values=self._models())
+            self.models_text.edit_modified(False)
+
+    def _update_key_visibility(self) -> None:
+        self.key_entry.configure(show="" if self.show_key_var.get() else "•")
+
+    def _on_apply(self) -> None:
+        self._store_provider()
+        self.owner.api_settings = deepcopy(self.settings)
+        self.owner._update_translation_controls()
+        self._on_close()
+
+    def _on_close(self) -> None:
+        self.owner.api_settings_dialog = None
+        self.destroy()
+
+
 class SettingsWindow(tk.Toplevel):
     def __init__(self, owner) -> None:
         super().__init__(owner)
@@ -122,12 +304,10 @@ class SettingsWindow(tk.Toplevel):
         )
         self.global_hotkey_var = tk.StringVar(value=settings.global_hotkey)
         self.overlay_mode_var = tk.BooleanVar(value=settings.overlay_translation_mode)
-        selected_model = normalize_model_id(settings.hytrans_model_id)
-        self.hytrans_model_var = tk.StringVar(
-            value=HYTRANS_MODEL_LABELS.get(
-                selected_model,
-                HYTRANS_MODEL_LABELS[DEFAULT_MODEL_ID],
-            )
+        self.api_settings: ApiSettings = load_api_settings()
+        self.api_settings_dialog: ApiSettingsDialog | None = None
+        self.hytrans_backend_var = tk.StringVar(
+            value=BACKEND_LABELS[normalize_backend(settings.hytrans_backend)]
         )
         self.hytrans_port_var = tk.IntVar(value=settings.hytrans_port)
         self.overlayer_port_var = tk.IntVar(value=settings.overlayer_port)
@@ -193,6 +373,8 @@ class SettingsWindow(tk.Toplevel):
         self._update_mode_labels()
         self._update_overlay_controls()
         self._update_global_hotkey_controls()
+        self.hytrans_backend_var.trace_add("write", lambda *_: self._update_translation_controls())
+        self._update_translation_controls()
 
     def _on_audio_stt_model_changed(self, *_args) -> None:
         is_parakeet = (
@@ -224,6 +406,7 @@ class SettingsWindow(tk.Toplevel):
         notebook = ttk.Notebook(body)
         notebook.pack(fill=tk.BOTH, expand=True)
         general_tab = self._add_scrollable_tab(notebook, "일반")
+        translation_tab = self._add_scrollable_tab(notebook, "번역")
         overlay_tab = self._add_scrollable_tab(notebook, "번역 오버레이")
         audio_tab = self._add_scrollable_tab(notebook, "음성인식")
 
@@ -323,6 +506,43 @@ class SettingsWindow(tk.Toplevel):
         )
         debug_checkbox.pack(fill=tk.X, pady=(4, 8))
 
+        translation_frame = tk.LabelFrame(translation_tab, text="HYTrans 번역", padx=10, pady=8)
+        translation_frame.pack(fill=tk.X)
+        tk.Label(
+            translation_frame,
+            text="번역 오버레이와 음성인식 등 HYTrans를 사용하는 모든 번역에 적용됩니다.",
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=460,
+        ).pack(fill=tk.X, pady=(0, 8))
+        provider_row = tk.Frame(translation_frame)
+        provider_row.pack(fill=tk.X, pady=3)
+        tk.Label(provider_row, text="번역 서비스").pack(side=tk.LEFT)
+        provider_menu = tk.OptionMenu(
+            provider_row, self.hytrans_backend_var, *BACKEND_LABELS.values()
+        )
+        provider_menu.configure(width=28, anchor="e")
+        provider_menu.pack(side=tk.RIGHT)
+        self.translation_model_label = tk.Label(
+            translation_frame, anchor="w", justify=tk.LEFT, wraplength=460
+        )
+        self.translation_model_label.pack(fill=tk.X, pady=(4, 8))
+        tk.Button(
+            translation_frame,
+            text="API 키 · 모델 목록 · 번역 프롬프트 설정",
+            command=self._open_api_settings,
+        ).pack(fill=tk.X, pady=3)
+        port_row = tk.Frame(translation_frame)
+        port_row.pack(fill=tk.X, pady=3)
+        tk.Label(port_row, text="HYTrans 포트").pack(side=tk.LEFT)
+        tk.Spinbox(
+            port_row,
+            from_=1,
+            to=65535,
+            width=8,
+            textvariable=self.hytrans_port_var,
+        ).pack(side=tk.RIGHT)
+
         overlay_frame = tk.LabelFrame(overlay_tab, text="번역 오버레이 모드", padx=10, pady=8)
         overlay_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -333,33 +553,6 @@ class SettingsWindow(tk.Toplevel):
             anchor="w",
         )
         overlay_checkbox.pack(fill=tk.X, pady=3)
-
-        model_row = tk.Frame(overlay_frame)
-        model_row.pack(fill=tk.X, pady=3)
-        model_label = tk.Label(model_row, text="HYTrans 번역 모델")
-        model_label.pack(side=tk.LEFT)
-        model_menu = tk.OptionMenu(
-            model_row,
-            self.hytrans_model_var,
-            *HYTRANS_MODEL_LABELS.values(),
-        )
-        model_menu.configure(width=29, anchor="e")
-        model_menu.pack(side=tk.RIGHT)
-        self.overlay_only_widgets.extend([model_label, model_menu])
-
-        port_row = tk.Frame(overlay_frame)
-        port_row.pack(fill=tk.X, pady=3)
-        port_label = tk.Label(port_row, text="HYTrans 포트")
-        port_label.pack(side=tk.LEFT)
-        port_spin = tk.Spinbox(
-            port_row,
-            from_=1,
-            to=65535,
-            width=8,
-            textvariable=self.hytrans_port_var,
-        )
-        port_spin.pack(side=tk.RIGHT)
-        self.overlay_only_widgets.extend([port_label, port_spin])
 
         overlayer_port_row = tk.Frame(overlay_frame)
         overlayer_port_row.pack(fill=tk.X, pady=3)
@@ -607,6 +800,22 @@ class SettingsWindow(tk.Toplevel):
         variable.set(color)
         self._refresh_color_buttons()
 
+    def _open_api_settings(self) -> None:
+        if self.api_settings_dialog is not None and self.api_settings_dialog.winfo_exists():
+            self.api_settings_dialog.lift()
+            self.api_settings_dialog.focus_set()
+            return
+        self.api_settings_dialog = ApiSettingsDialog(self)
+
+    def _update_translation_controls(self) -> None:
+        backend = BACKEND_IDS_BY_LABEL.get(self.hytrans_backend_var.get(), "local")
+        if backend == "local":
+            text = "로컬 모델: " + HYTRANS_MODEL_LABELS[DEFAULT_MODEL_ID]
+        else:
+            profile = self.api_settings.profiles[backend]
+            text = f"API 모델: {profile.model or '(모델 ID를 입력하세요)'}"
+        self.translation_model_label.configure(text=text)
+
     def _refresh_color_buttons(self) -> None:
         for button, variable in self._color_buttons:
             color = variable.get()
@@ -694,6 +903,11 @@ class SettingsWindow(tk.Toplevel):
 
     def _collect_settings(self) -> AppSettings:
         current = self.owner.settings
+        backend = BACKEND_IDS_BY_LABEL.get(self.hytrans_backend_var.get(), "local")
+        if backend in PROVIDERS:
+            error = validate_provider_settings(self.api_settings.profiles[backend], backend)
+            if error:
+                raise ValueError(f"{BACKEND_LABELS[backend]} API 설정을 확인하세요.\n{error}")
         detached_geometry = load_detached_geometry(current.detached_geometry)
         global_hotkey = parse_hotkey(self.global_hotkey_var.get())
         if global_hotkey is None:
@@ -732,10 +946,8 @@ class SettingsWindow(tk.Toplevel):
             detached_fixed_width=current.detached_fixed_width,
             detached_fixed_height=current.detached_fixed_height,
             overlay_translation_mode=self.overlay_mode_var.get(),
-            hytrans_model_id=HYTRANS_MODEL_IDS_BY_LABEL.get(
-                self.hytrans_model_var.get(),
-                DEFAULT_MODEL_ID,
-            ),
+            hytrans_backend=backend,
+            hytrans_model_id=DEFAULT_MODEL_ID,
             hytrans_port=hytrans_port,
             overlayer_port=overlayer_port,
             audio_capture_port=audio_capture_port,
@@ -797,6 +1009,8 @@ class SettingsWindow(tk.Toplevel):
         )
 
     def _on_save(self) -> None:
+        if self.api_settings_dialog is not None and self.api_settings_dialog.winfo_exists():
+            self.api_settings_dialog._on_apply()
         try:
             settings = self._collect_settings()
         except ValueError as exc:
@@ -808,24 +1022,26 @@ class SettingsWindow(tk.Toplevel):
                 width, height = detached_size
                 settings.detached_fixed_width = width
                 settings.detached_fixed_height = height
-        result = self.owner.apply_settings(settings, persist=True)
+        result = self.owner.apply_settings(settings, persist=True, api_settings=self.api_settings)
         if result is None:
             return
         self._on_close()
 
     def _on_test_connection(self) -> None:
+        if self.api_settings_dialog is not None and self.api_settings_dialog.winfo_exists():
+            self.api_settings_dialog._on_apply()
         try:
             settings = self._collect_settings()
         except ValueError as exc:
             messagebox.showerror("MekiCopy", str(exc), parent=self)
             return
-        result = self.owner.apply_settings(settings, persist=True)
+        result = self.owner.apply_settings(settings, persist=True, api_settings=self.api_settings)
         if result is None:
             return
         if result:
             messagebox.showinfo(
                 "MekiCopy",
-                "HYTrans를 재시작하고 있습니다. 모델 준비가 끝난 뒤 연결 상태를 확인해 주세요.",
+                "HYTrans를 재시작하고 있습니다. 번역 서비스 준비가 끝난 뒤 연결 상태를 확인해 주세요.",
                 parent=self,
             )
             return

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import secrets
 import socket
 import sys
@@ -18,6 +19,7 @@ from hytrans.app import (
     state,
 )
 from hytrans.browser import BrowserManager
+from hytrans.api_settings import BACKEND_LABELS
 from hytrans.config import DEFAULT_OVERLAY_URL, DEFAULT_PORT, HOST, configure_server
 from hytrans.logging_setup import configure_logging, debug, error
 from hytrans.model_files import DEFAULT_MODEL_ID, SUPPORTED_MODEL_IDS
@@ -32,6 +34,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--overlay-url", default=DEFAULT_OVERLAY_URL)
+    parser.add_argument("--backend", choices=tuple(BACKEND_LABELS), default="local")
+    parser.add_argument("--api-config", help="path to encrypted translation API settings; never pass keys on the command line")
+    parser.add_argument("--self-test-api", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--model",
         "--model-id",
@@ -77,12 +82,24 @@ def wait_server_ready(host: str, port: int, timeout: float = 15.0) -> bool:
 def main() -> int:
     set_windows_app_id("HYTrans")
     args = parse_args()
+    if args.self_test_api:
+        from hytrans.api_selftest import run_api_self_test
+
+        try:
+            result = run_api_self_test()
+            if sys.stdout is not None:
+                print(json.dumps(result, ensure_ascii=True))
+            return 0
+        except Exception:
+            return 1
     configure_server(
         host=args.host,
         port=args.port,
         overlay_url=args.overlay_url,
         debug_log=args.debug_log,
         model_id=args.model_id,
+        backend=args.backend,
+        api_config=args.api_config,
     )
     configure_logging(args.debug_log)
     install_exception_hooks()
@@ -93,7 +110,7 @@ def main() -> int:
     server_thread: threading.Thread | None = None
     shutdown_requested = threading.Event()
     worker_url = f"http://{args.host}:{args.port}/worker.html"
-    configure_worker_opener(lambda: browser.start(worker_url))
+    configure_worker_opener(lambda: browser.start(worker_url) if args.backend == "local" else None)
     try:
         ensure_port_available(args.host, args.port)
         config = uvicorn.Config(
@@ -118,7 +135,7 @@ def main() -> int:
         if not wait_server_ready(args.host, args.port):
             raise RuntimeError("HYTrans server failed to start")
 
-        if not args.no_browser:
+        if args.backend == "local" and not args.no_browser:
             state.state = "WORKER_STARTING"
             browser.start(worker_url)
 

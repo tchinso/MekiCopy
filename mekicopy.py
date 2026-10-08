@@ -145,6 +145,16 @@ from mekicopy_settings import (
 from mekicopy_settings_window import SettingsWindow
 from meki_subtitle_window import MekiSubtitleWindow
 from hytrans.model_files import get_model_profile
+from hytrans.api_settings import (
+    ApiSettings,
+    BACKEND_LABELS,
+    api_settings_path,
+    fingerprint,
+    load_api_settings,
+    normalize_backend,
+    save_api_settings,
+    validate_provider_settings,
+)
 from mekicopy_theme import (
     BG,
     BORDER,
@@ -712,6 +722,9 @@ class MainWindow(tk.Tk):
         self._global_hotkey_paused = False
         self._global_hotkey_action_active = False
         self.settings = load_settings()
+        self._hytrans_config_fingerprint = fingerprint(
+            load_api_settings(), self.settings.hytrans_backend
+        )
         self.detached_process: subprocess.Popen | None = None
         self.settings_window: SettingsWindow | None = None
         self.hytrans_process: subprocess.Popen | None = None
@@ -2034,7 +2047,7 @@ class MainWindow(tk.Tk):
         if self._hytrans_restart_after_id is not None:
             messagebox.showinfo(
                 "MekiCopy",
-                "변경된 번역 모델로 HYTrans를 재시작하고 있습니다.",
+                "변경된 번역 설정으로 HYTrans를 재시작하고 있습니다.",
                 parent=self,
             )
             return True
@@ -2048,9 +2061,15 @@ class MainWindow(tk.Tk):
                 _validate_service_health("HYTrans", health)
                 raise RuntimeError("HYTrans service identity could not be verified")
             expected_profile = get_model_profile(self.settings.hytrans_model_id)
+            backend = normalize_backend(self.settings.hytrans_backend)
+            expected_model = (
+                expected_profile.model_id if backend == "local"
+                else load_api_settings().profiles[backend].model
+            )
             if (
-                health.get("model") != expected_profile.model_id
-                or health.get("dtype") != expected_profile.dtype
+                str(health.get("backend") or "local") != backend
+                or health.get("model") != expected_model
+                or (backend == "local" and health.get("dtype") != expected_profile.dtype)
             ):
                 if self._begin_hytrans_restart(
                     self.settings.hytrans_port,
@@ -2060,7 +2079,14 @@ class MainWindow(tk.Tk):
             self._send_hytrans_logging_config(log_errors=False)
             try:
                 ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=1)
-                if not (ready.get("workerConnected") or ready.get("ready")):
+                if backend != "local" and not ready.get("ready"):
+                    messagebox.showerror(
+                        "MekiCopy",
+                        f"HYTrans API 설정을 확인해 주세요:\n{ready.get('error') or ready.get('state') or '준비되지 않음'}",
+                        parent=self,
+                    )
+                    return False
+                if backend == "local" and not (ready.get("workerConnected") or ready.get("ready")):
                     _json_request(
                         f"{self._hytrans_base_url()}/worker/reopen",
                         {},
@@ -2111,6 +2137,10 @@ class MainWindow(tk.Tk):
             self._overlayer_show_url(),
             "--model",
             self.settings.hytrans_model_id,
+            "--backend",
+            normalize_backend(self.settings.hytrans_backend),
+            "--api-config",
+            str(api_settings_path()),
         ]
         if self.settings.debug_logging:
             command.append("--debug-log")
@@ -2136,7 +2166,8 @@ class MainWindow(tk.Tk):
             if notify:
                 messagebox.showinfo(
                     "MekiCopy",
-                    f"HYTrans 서버를 {action}.\n번역 모델: {self.settings.hytrans_model_id}",
+                    f"HYTrans 서버를 {action}.\n번역 방식: "
+                    f"{BACKEND_LABELS[normalize_backend(self.settings.hytrans_backend)]}",
                     parent=self,
                 )
             return True
@@ -2557,9 +2588,24 @@ class MainWindow(tk.Tk):
         after_id = button.after(1000, restore)
         setattr(button, "_mekicopy_feedback_after_id", after_id)
 
-    def apply_settings(self, settings: AppSettings, persist: bool) -> bool | None:
+    def apply_settings(
+        self, settings: AppSettings, persist: bool, *, api_settings: ApiSettings | None = None
+    ) -> bool | None:
         previous = self.settings
+        backend = normalize_backend(settings.hytrans_backend)
+        previous_api_settings = load_api_settings()
+        selected_api_settings = api_settings if api_settings is not None else previous_api_settings
+        if persist and backend != "local":
+            validation_error = validate_provider_settings(selected_api_settings.profiles[backend], backend)
+            if validation_error:
+                messagebox.showerror("MekiCopy", validation_error, parent=self.settings_window or self)
+                return None
+        current_fingerprint = fingerprint(selected_api_settings, backend)
         restart_reason_parts: list[str] = []
+        if normalize_backend(previous.hytrans_backend) != backend:
+            restart_reason_parts.append("backend")
+        if getattr(self, "_hytrans_config_fingerprint", current_fingerprint) != current_fingerprint:
+            restart_reason_parts.append("api-config")
         if previous.hytrans_model_id != settings.hytrans_model_id:
             restart_reason_parts.append("model")
         if previous.hytrans_port != settings.hytrans_port:
@@ -2623,7 +2669,22 @@ class MainWindow(tk.Tk):
             )
             return None
 
+        if persist and api_settings is not None and not save_api_settings(api_settings):
+            rolled_back = save_settings(previous)
+            if hotkey_changed:
+                restored, restore_error = self._configure_global_hotkey(previous, force=True)
+                if not restored:
+                    _log_runtime_error("restore_global_hotkey", restore_error)
+            if was_hotkey_paused:
+                self.pause_global_hotkey()
+            detail = "API 번역 설정을 저장하지 못했습니다. 쓰기 권한을 확인해 주세요."
+            if not rolled_back:
+                detail += "\n기존 일반 설정 복원에도 실패했습니다. 저장 경로를 확인해 주세요."
+            messagebox.showerror("MekiCopy", detail, parent=self.settings_window or self)
+            return None
+
         self.settings = settings
+        self._hytrans_config_fingerprint = current_fingerprint
         set_debug_enabled(self.settings.debug_logging)
         self.attributes("-topmost", self.settings.main_always_on_top)
         if self.subtitle_window is not None and self.subtitle_window.winfo_exists():

@@ -14,14 +14,19 @@ from hytrans.queue import TranslationQueue, TranslationQueueOverloadedError
 
 
 class HytransDefaultsTests(unittest.TestCase):
-    def test_mt15_is_the_default_and_mt2_remains_supported(self) -> None:
+    def test_mt15_is_the_only_supported_local_model(self) -> None:
         self.assertEqual(model_files.DEFAULT_MODEL_ID, "mt1.5")
         self.assertEqual(config.DTYPE, "q4")
         self.assertEqual(
             model_files.get_model_profile().model_id,
             "onnx-community/HY-MT1.5-1.8B-ONNX",
         )
-        self.assertIn("mt2", model_files.SUPPORTED_MODEL_IDS)
+        self.assertEqual(model_files.SUPPORTED_MODEL_IDS, ("mt1.5",))
+        self.assertEqual(model_files.normalize_model_id("mt2"), "mt1.5")
+        self.assertEqual(
+            model_files.normalize_model_id("tchinso/Hy-MT2-1.8B-onnx-q4f16"),
+            "mt1.5",
+        )
 
     def test_cli_uses_mt15_by_default_and_keeps_no_browser_alias(self) -> None:
         with mock.patch.object(sys, "argv", ["HYTrans.exe"]):

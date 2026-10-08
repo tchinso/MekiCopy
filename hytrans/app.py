@@ -23,8 +23,11 @@ from .config import (
     options,
     realtime_max_new_tokens,
     runtime_config,
+    selected_api_profile,
     translation_timeout_seconds,
 )
+from .api_client import ApiTranslationError, ApiTranslationQueue, ApiTranslator
+from .api_settings import validate_provider_settings
 from .logging_setup import configure_logging, debug, error
 from .model_cache import (
     model_cache_file_response,
@@ -43,6 +46,8 @@ app = FastAPI(title="HYTrans")
 state = AppState()
 translation_queue = TranslationQueue()
 queue_task: asyncio.Task | None = None
+api_translation_queue: ApiTranslationQueue | None = None
+api_active_requests = 0
 worker_opener: Callable[[], None] | None = None
 worker_open_task: asyncio.Task[None] | None = None
 shutdown_handler: Callable[[], None] | None = None
@@ -67,6 +72,8 @@ class TranslateBody(BaseModel):
     text: str
     overlayUrl: str | None = None
     realtime: bool = False
+    source: str | None = None
+    target: str | None = None
 
 
 class ClientLogBody(BaseModel):
@@ -95,6 +102,7 @@ def _json_response(ok: bool, text: str = "") -> dict[str, object]:
         "device": state.device,
         "model": state.model,
         "dtype": state.dtype,
+        "backend": options.backend,
     }
 
 
@@ -154,6 +162,18 @@ def _is_trusted_shutdown_origin(origin: str | None) -> bool:
         return False
 
 
+def _validate_api_caller(request: Request) -> None:
+    if options.backend == "local":
+        return
+    client_host = request.client.host if request.client else ""
+    if not _is_loopback_host(client_host):
+        raise HTTPException(status_code=403, detail="translation API is limited to loopback clients")
+    if not _is_trusted_shutdown_origin(request.headers.get("origin")):
+        raise HTTPException(status_code=403, detail="untrusted translation API origin")
+    if request.headers.get("sec-fetch-site", "").casefold() == "cross-site":
+        raise HTTPException(status_code=403, detail="cross-site translation API requests are blocked")
+
+
 def _clear_current_worker(websocket: WebSocket, reason: str) -> bool:
     """Move state to an error only when this websocket still owns the worker."""
     if not translation_queue.clear_worker(websocket, reason=reason):
@@ -187,7 +207,10 @@ async def _send_to_overlay(text: str, overlay_url: str | None = None) -> None:
     await asyncio.to_thread(_post_overlay_text, target, text)
 
 
-async def _translate_text(text: str, *, realtime: bool = False) -> str:
+async def _translate_text(text: str, *, realtime: bool = False,
+                          source: str | None = None, target: str | None = None) -> str:
+    if options.backend != "local":
+        return await _translate_api_text(text, source=source, target=target)
     if not state.worker_ready:
         error(
             "translate_not_ready",
@@ -257,9 +280,46 @@ async def _translate_text(text: str, *, realtime: bool = False) -> str:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+async def _translate_api_text(text: str, *, source: str | None = None,
+                              target: str | None = None) -> str:
+    global api_active_requests
+    if not state.worker_ready or api_translation_queue is None:
+        raise HTTPException(status_code=503, detail=state.error or "translation API is not configured")
+    for language in (source, target):
+        if language is not None and (not language.strip() or len(language) > 100):
+            raise HTTPException(status_code=400, detail="invalid source or target language")
+    api_active_requests += 1
+    state.state = "BUSY"
+    try:
+        # API reasoning models use output tokens for both reasoning and the
+        # translation. Preserve the bulk budget even for short realtime input.
+        result = await api_translation_queue.submit(
+            text, source=(source or "Japanese").strip(),
+            target=(target or "Korean").strip(), max_new_tokens=MAX_NEW_TOKENS,
+        )
+        state.error = None
+        debug("api_translation_success", f"backend: {options.backend}\ninput_chars: {len(text)}\noutput_chars: {len(result)}")
+        return result
+    except TranslationQueueOverloadedError:
+        raise HTTPException(status_code=429, detail="translation queue is busy; retry shortly") from None
+    except ApiTranslationError as exc:
+        state.error = str(exc)
+        error("api_translate", str(exc))
+        headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
+        raise HTTPException(status_code=exc.status_code, detail=str(exc), headers=headers) from None
+    except Exception:
+        # Transport internals and credentials never reach HTTP errors or logs.
+        state.error = "Translation API request failed"
+        error("api_translate", state.error)
+        raise HTTPException(status_code=502, detail=state.error) from None
+    finally:
+        api_active_requests -= 1
+        state.state = "BUSY" if api_active_requests else "READY"
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
-    global queue_task, translation_queue, worker_open_task
+    global queue_task, translation_queue, worker_open_task, api_translation_queue, api_active_requests
     # A FastAPI app object may be stopped and started again in the same
     # interpreter (embedded hosting and lifespan tests do this). ``stop``
     # permanently wakes the old queue, so each server lifetime needs a fresh
@@ -267,6 +327,7 @@ async def on_startup() -> None:
     translation_queue = TranslationQueue()
     worker_open_task = None
     state.state = "STARTING"
+    state.backend = options.backend
     state.worker_ready = False
     state.worker_connected = False
     state.device = None
@@ -277,6 +338,25 @@ async def on_startup() -> None:
     state.warning = None
     state.error = None
     state.started_at = time.time()
+    api_active_requests = 0
+    api_translation_queue = None
+    if options.backend != "local":
+        profile = selected_api_profile()
+        issue = validate_provider_settings(profile, options.backend) if profile else "API settings are unavailable"
+        state.device = "api"
+        state.device_detail = options.backend
+        state.model = profile.model.strip() if profile else ""
+        state.dtype = "api"
+        state.model_mode = "api"
+        state.error = issue
+        state.worker_ready = issue is None
+        state.state = "ERROR" if issue else "READY"
+        queue_task = None
+        if profile and issue is None:
+            api_translation_queue = ApiTranslationQueue(ApiTranslator(options.backend, profile))
+            api_translation_queue.start()
+        debug("startup", f"backend: {options.backend}\nport: {options.port}")
+        return
     queue_task = asyncio.create_task(
         translation_queue.run(default_max_new_tokens=MAX_NEW_TOKENS)
     )
@@ -286,9 +366,12 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    global queue_task
+    global queue_task, api_translation_queue
     state.state = "STOPPING"
     translation_queue.stop()
+    if api_translation_queue is not None:
+        await api_translation_queue.stop()
+        api_translation_queue = None
     if queue_task:
         queue_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -305,10 +388,11 @@ async def health(response: Response) -> dict[str, object]:
         "app": "HYTrans",
         "server": "running",
         "state": state.state,
+        "backend": options.backend,
         "workerConnected": state.worker_connected,
         "ready": state.worker_ready,
-        "model": profile.model_id,
-        "dtype": profile.dtype,
+        "model": state.model if options.backend != "local" else profile.model_id,
+        "dtype": "api" if options.backend != "local" else profile.dtype,
         # The per-process capability is readable by native loopback clients.
         # Same-origin policy prevents an unrelated website from reading it,
         # while /shutdown additionally checks Origin and the custom header.
@@ -339,6 +423,9 @@ async def ready() -> dict[str, object]:
 
 @app.post("/worker/reopen")
 async def reopen_worker() -> dict[str, object]:
+    if options.backend != "local":
+        return {"ok": state.worker_ready, "workerConnected": False,
+                "backend": options.backend, "state": state.state}
     if state.worker_connected:
         return {"ok": True, "workerConnected": True, "state": state.state}
     if worker_opener is None:
@@ -407,11 +494,15 @@ async def post_model_cache_file(url: str, request: Request) -> dict[str, object]
 
 @app.post("/model/prepare")
 async def prepare_model() -> dict[str, object]:
+    if options.backend != "local":
+        return {"ok": True, "state": "API", "backend": options.backend, "model": state.model}
     return await asyncio.to_thread(model_download_manager.start)
 
 
 @app.get("/model/status")
 async def model_status() -> dict[str, object]:
+    if options.backend != "local":
+        return {"state": "API", "complete": True, "backend": options.backend, "model": state.model}
     return await asyncio.to_thread(model_download_manager.status)
 
 
@@ -435,14 +526,15 @@ async def local_model_file(relative_path: str) -> FileResponse:
 
 @app.get("/translate", response_model=None)
 async def translate_get(
+    request: Request,
     text: str = "",
     format: str = "text",
     source: str | None = None,
     target: str | None = None,
 ) -> PlainTextResponse | dict[str, object]:
-    del source, target
+    _validate_api_caller(request)
     clean_text = _validate_text(text)
-    result = await _translate_text(clean_text)
+    result = await _translate_text(clean_text, source=source, target=target)
     if format == "json":
         return _json_response(True, result)
     return PlainTextResponse(result, media_type="text/plain; charset=utf-8")
@@ -451,19 +543,22 @@ async def translate_get(
 @app.post("/translate", response_model=None)
 async def translate_post(
     body: TranslateBody,
+    request: Request,
     format: str = "text",
 ) -> PlainTextResponse | dict[str, object]:
+    _validate_api_caller(request)
     clean_text = _validate_text(body.text)
-    result = await _translate_text(clean_text, realtime=body.realtime)
+    result = await _translate_text(clean_text, realtime=body.realtime, source=body.source, target=body.target)
     if format == "json":
         return _json_response(True, result)
     return PlainTextResponse(result, media_type="text/plain; charset=utf-8")
 
 
 @app.post("/translate-and-show")
-async def translate_and_show(body: TranslateBody) -> dict[str, object]:
+async def translate_and_show(body: TranslateBody, request: Request) -> dict[str, object]:
+    _validate_api_caller(request)
     clean_text = _validate_text(body.text)
-    result = await _translate_text(clean_text, realtime=body.realtime)
+    result = await _translate_text(clean_text, realtime=body.realtime, source=body.source, target=body.target)
     try:
         await _send_to_overlay(result, body.overlayUrl)
     except Exception as exc:
@@ -485,6 +580,9 @@ async def overlay_test(body: TranslateBody) -> dict[str, object]:
 
 @app.websocket("/ws/worker")
 async def worker_ws(websocket: WebSocket) -> None:
+    if options.backend != "local":
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     translation_queue.set_worker(websocket)
     state.worker_connected = True

@@ -20,6 +20,7 @@ import tkinter as tk
 from typing import Any, Callable
 
 from hytrans.model_files import get_model_profile
+from hytrans.api_settings import BACKEND_LABELS, load_api_settings, normalize_backend
 from meki_subtitle_paths import shared_stt_model_root
 from meki_subtitle_pipeline import (
     SubtitleCancelledError,
@@ -141,11 +142,15 @@ class MekiSubtitleWindow(tk.Toplevel):
         )
 
     def _refresh_translation_model_label(self) -> None:
+        backend = normalize_backend(getattr(self._settings, "hytrans_backend", "local"))
+        if backend != "local":
+            model = load_api_settings().profiles[backend].model
+            self.translation_model_var.set(f"{BACKEND_LABELS[backend]} · {model}")
+            return
         profile = get_model_profile(
             getattr(self._settings, "hytrans_model_id", "mt1.5")
         )
-        suffix = " (실험용)" if profile.key == "mt2" else " (기본)"
-        self.translation_model_var.set(f"{profile.display_label}{suffix}")
+        self.translation_model_var.set(f"{profile.display_label} (기본)")
 
     def refresh_settings(self, settings: Any) -> None:
         """Refresh defaults while idle after MekiCopy saves settings."""
@@ -547,7 +552,7 @@ class MekiSubtitleWindow(tk.Toplevel):
         return status, logs
 
     def _wait_for_hytrans_ready(self) -> str:
-        """Wait for the active HYTrans worker without blocking Tk."""
+        """Wait for the active local or API translator without blocking Tk."""
 
         import urllib.error
         import urllib.request
@@ -564,15 +569,18 @@ class MekiSubtitleWindow(tk.Toplevel):
                 request = urllib.request.Request(f"{base_url}/ready")
                 with urllib.request.urlopen(request, timeout=2) as response:
                     payload = json.loads(response.read().decode("utf-8"))
-                if payload.get("ready") and payload.get("workerConnected"):
+                backend = str(payload.get("backend") or "local")
+                if payload.get("ready") and (backend != "local" or payload.get("workerConnected")):
                     return base_url
                 state = str(payload.get("state") or "HYTrans 준비 중")
                 error = str(payload.get("error") or "").strip()
                 message = state if not error else f"{state}: {error}"
+                if backend != "local" and error and not payload.get("ready"):
+                    raise RuntimeError(f"HYTrans API 번역 설정을 확인해 주세요: {error}")
                 if message != last_message:
                     self._emit_status(0.66, f"HYTrans 번역 모델을 기다리고 있습니다: {message}")
                     last_message = message
-                if state.upper() == "ERROR" and not requested_reopen:
+                if backend == "local" and state.upper() == "ERROR" and not requested_reopen:
                     reopen = urllib.request.Request(
                         f"{base_url}/worker/reopen",
                         data=b"{}",

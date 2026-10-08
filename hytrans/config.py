@@ -9,6 +9,8 @@ from pydantic import BaseModel
 
 from service_ports import HYTRANS_DEFAULT_PORT, OVERLAYER_DEFAULT_PORT
 
+from .api_settings import ApiSettings, ProviderSettings, load_api_settings, normalize_backend
+
 from .model_files import (
     DEFAULT_MODEL_ID,
     MT15_PROFILE,
@@ -37,12 +39,8 @@ REALTIME_MAX_NEW_TOKENS = 768
 HOST = "127.0.0.1"
 DEFAULT_PORT = HYTRANS_DEFAULT_PORT
 DEFAULT_OVERLAY_URL = f"http://127.0.0.1:{OVERLAYER_DEFAULT_PORT}/show"
-# Kept for compatibility with external imports. Runtime requests use
-# translation_timeout_seconds(), which gives the larger MT2 model more time and
-# scales conservatively for long input instead of repeatedly killing a healthy,
-# merely slow private worker.
+# Runtime requests scale conservatively for long input.
 TRANSLATE_TIMEOUT_SECONDS = 120
-MT2_TRANSLATE_TIMEOUT_SECONDS = 240
 MAX_TRANSLATE_TIMEOUT_SECONDS = 600
 MAX_INPUT_CHARS = 8000
 
@@ -61,11 +59,7 @@ def translation_timeout_seconds(input_chars: int) -> int:
     """Return a bounded timeout suited to the active model and request size."""
 
     configured = _configured_translate_timeout()
-    base = configured or (
-        MT2_TRANSLATE_TIMEOUT_SECONDS
-        if selected_model_profile().key == "mt2"
-        else TRANSLATE_TIMEOUT_SECONDS
-    )
+    base = configured or TRANSLATE_TIMEOUT_SECONDS
     # Tokenization and generation cost grows with input size. Add at most three
     # minutes so malformed or stuck workers are still eventually recycled.
     input_allowance = min(180, math.ceil(max(0, input_chars) / 50))
@@ -83,6 +77,7 @@ def realtime_max_new_tokens(input_chars: int) -> int:
 
 
 class RuntimeConfig(BaseModel):
+    backend: str = "local"
     modelKey: str
     modelId: str
     revision: str
@@ -104,6 +99,9 @@ class ServerOptions:
     overlay_url: str = DEFAULT_OVERLAY_URL
     debug_log: bool = False
     model_id: str = DEFAULT_MODEL_ID
+    backend: str = "local"
+    api_config: str | None = None
+    api_settings: ApiSettings | None = None
 
 
 options = ServerOptions()
@@ -116,6 +114,8 @@ def configure_server(
     overlay_url: str = DEFAULT_OVERLAY_URL,
     debug_log: bool = False,
     model_id: str = DEFAULT_MODEL_ID,
+    backend: str = "local",
+    api_config: str | Path | None = None,
 ) -> None:
     profile = configure_model(model_id)
     options.host = host
@@ -123,6 +123,16 @@ def configure_server(
     options.overlay_url = overlay_url
     options.debug_log = debug_log
     options.model_id = profile.key
+    options.backend = normalize_backend(backend)
+    options.api_config = str(api_config) if api_config else None
+    options.api_settings = load_api_settings(api_config) if options.backend != "local" else None
+
+
+def selected_api_profile() -> ProviderSettings | None:
+    if options.backend == "local":
+        return None
+    settings = options.api_settings or load_api_settings(options.api_config)
+    return settings.profiles[options.backend]
 
 
 def selected_model_profile() -> ModelProfile:
@@ -134,6 +144,8 @@ def _model_path(profile: ModelProfile) -> Path:
 
 
 def detect_model_mode() -> str:
+    if options.backend != "local":
+        return "api"
     profile = selected_model_profile()
     if is_complete_model(_model_path(profile), profile):
         return "local"
@@ -152,6 +164,21 @@ def has_local_wasm_files() -> bool:
 
 
 def runtime_config() -> RuntimeConfig:
+    if options.backend != "local":
+        profile = selected_api_profile()
+        return RuntimeConfig(
+            backend=options.backend,
+            modelKey=options.backend,
+            modelId=profile.model.strip() if profile else "",
+            revision="",
+            dtype="api",
+            # Credentials and user prompts remain private to the Python API
+            # transport. A browser worker is never needed for this backend.
+            promptTemplate="",
+            modelMode="api",
+            modelFiles={},
+            debugLog=options.debug_log,
+        )
     profile = selected_model_profile()
     return RuntimeConfig(
         modelKey=profile.key,

@@ -45,7 +45,10 @@ MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일�
 
 ### 배포판(exe)을 사용하는 경우
 
-[Releases](https://github.com/tchinso/MekiCopy/releases)에서 최신 버전을 다운 받아`MekiCopy.exe`를 직접 실행합니다. 별도 설치 없이 동작합니다.
+[Releases](https://github.com/tchinso/MekiCopy/releases)에서 배포본을 받아 압축을 푼 뒤 `MekiCopy.exe`를 실행합니다. Python을 따로 설치할 필요가 없습니다.
+
+- **Lite:** 모든 앱과 API 번역 기능을 포함합니다. OCR·번역·음성 모델은 처음 사용할 때 다운로드하며, MagPie도 필요할 때 설치합니다.
+- **Full:** Lite와 동일한 실행 파일·기능에 미리 다운로드된 OCR·MT1.5·음성/VAD 모델과 MagPie만 추가합니다.
 
 ---
 
@@ -154,15 +157,28 @@ OCR로 인식한 텍스트를 자동으로 번역해 화면에 바로 표시하�
 | 설정 표시 | 모델 저장소 | 형식 |
 |---|---|---|
 | **MT1.5 (기본)** | `onnx-community/HY-MT1.5-1.8B-ONNX` | q4 |
-| MT2 (실험용) | `tchinso/Hy-MT2-1.8B-onnx-q4f16` | q4f16 |
 
-HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x 최신)과 `ONNX Runtime Web/WASM 1.27.0`을 private headless Chrome 또는 Edge worker에서 로컬로 읽습니다. 네트워크는 선택한 번역 모델을 처음 내려받을 때만 필요하며, 이후에는 `HYTrans/models`의 검증된 모델을 재사용합니다.
+로컬 MT1.5 모드의 HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x 최신)과 `ONNX Runtime Web/WASM 1.27.0`을 private headless Chrome 또는 Edge worker에서 로컬로 읽습니다. 네트워크는 선택한 번역 모델을 처음 내려받을 때만 필요하며, 이후에는 `HYTrans/models`의 검증된 모델을 재사용합니다.
 
-> **필수 조건:** Google Chrome 또는 Microsoft Edge가 설치되어 있어야 합니다.
+> **로컬 번역 필수 조건:** Google Chrome 또는 Microsoft Edge가 설치되어 있어야 합니다. API 번역에는 브라우저나 로컬 번역 모델이 필요하지 않습니다.
+
+### API 번역 설정
+
+`설정 → 번역`에서 서비스를 선택하고 API 설정을 엽니다. 각 서비스별 API 키, 선택 모델, 모델 목록(한 줄에 하나), 번역 프롬프트를 따로 보관합니다. 모델 ID는 목록에 없는 값도 직접 입력할 수 있습니다. 프롬프트의 `{source}`, `{target}`, `{text}`는 각각 원문 언어, 번역 언어, 원문으로 바뀌며 `{text}`는 반드시 포함해야 합니다. 기본 번역 방향은 일본어 → 한국어입니다.
+
+| 서비스 | 인증·필수 입력 | 공식 Chat Completions 주소 |
+|---|---|---|
+| Cloudflare Workers AI | API 토큰 + Account ID | `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions` |
+| DeepInfra | API 키 | `https://api.deepinfra.com/v1/openai/chat/completions` |
+| Groq | API 키 | `https://api.groq.com/openai/v1/chat/completions` |
+
+공식 문서: [Cloudflare](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/), [DeepInfra](https://docs.deepinfra.com/chat/overview), [Groq](https://console.groq.com/docs/api-reference). 세 서비스 모두 Bearer 인증과 `model`·`messages` JSON을 사용합니다. Cloudflare 토큰은 Workers AI 읽기/편집 권한이 필요합니다. 기본 추천 모델은 2026-10-08 공식 목록을 확인했으며, 이후 변경은 API 설정에서 반영할 수 있습니다.
+
+저장한 API 키는 Windows 사용자 계정에 묶인 DPAPI로 암호화해 `settings.cfg` 옆 `translation_api.json`에 보관합니다. 다른 Windows 계정이나 PC로 배포본을 옮기면 키를 다시 입력하세요. 키는 실행 인자·로그·서버 상태 응답에 포함하지 않습니다. 설정을 저장하면 OCR 오버레이, 일괄/실시간 음성 번역, MekiSubtitle 모두 같은 HYTrans 서비스와 프롬프트를 사용합니다. API 모드에서는 번역할 원문을 선택한 서비스로 전송합니다.
 
 ### 사용 방법
 
-1. `설정` 창을 열고 **번역 오버레이 모드** 섹션에서 `오버레이어 번역 모드 사용`을 체크한 뒤 기본 MT1.5 또는 실험용 MT2를 선택합니다.
+1. `설정` 창의 **번역** 탭에서 기본 로컬 MT1.5 또는 API 번역 서비스를 선택합니다. OCR 오버레이를 쓰려면 **번역 오버레이 모드**도 켭니다.
 2. `저장`을 누릅니다. `도구/설정` 탭의 `HYTrans 서버 실행`과 `MekiOverlayer 실행` 버튼이 활성화됩니다.
 3. `HYTrans 서버 실행` 버튼을 누릅니다.
    - HYTrans는 사용자에게 보이지 않는 private headless worker를 자동으로 시작합니다. 닫을 브라우저 창이 없습니다.
@@ -174,15 +190,15 @@ HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x �
 
 ### 연결 상태 확인
 
-`도구/설정` 탭의 `모든 도구 연결 상태확인` 버튼은 서비스 종류, HYTransWorker 연결, 번역 모델 준비 상태와 MekiOverlayer 표시 흐름을 실제 응답으로 확인합니다.
+`도구/설정` 탭의 `모든 도구 연결 상태확인` 버튼은 서비스 종류, 로컬 HYTransWorker/번역 모델 준비 또는 API 설정 상태와 MekiOverlayer 표시 흐름을 확인합니다. API 인증과 실제 서비스 가용성은 번역 요청의 응답으로 확인됩니다.
 
 ### 주의사항
 
 - HYTrans 서버가 준비되기 전에 `번역 후 표시`를 누르면 오류가 발생합니다. 비공개 worker의 모델 로딩이 완료될 때까지 기다리세요.
 - MekiCopy를 종료하면 HYTrans와 MekiOverlayer 프로세스도 함께 종료됩니다.
 - HYTrans와 MekiOverlayer 포트가 다른 프로그램과 충돌하면 설정에서 변경할 수 있습니다.
-- 실행 중 번역 모델이나 HYTrans 포트를 변경해 저장하면 기존 HYTrans를 정상 종료하고 포트가 해제된 뒤 새 설정으로 자동 재시작합니다.
-- 번역 시간 제한은 MT1.5 120초, MT2 240초를 기준으로 입력 길이에 따라 늘어나며 최대 600초입니다.
+- 실행 중 번역 서비스·API 키·모델·프롬프트·HYTrans 포트를 변경해 저장하면 기존 HYTrans를 정상 종료하고 새 설정으로 자동 재시작합니다.
+- 로컬 번역 시간 제한은 120초를 기준으로 입력 길이에 따라 늘어나며 최대 600초입니다. API 요청은 제한 시간·인증 실패·사용량 제한·빈 응답 또는 잘린 응답을 오류로 표시합니다.
 
 ---
 
@@ -190,7 +206,7 @@ HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x �
 
 `음성인식` 탭에서 다음 순서로 실행합니다.
 
-1. `HYTrans 실행`을 누르고 번역 모델 로딩이 끝날 때까지 기다립니다.
+1. `HYTrans 실행`을 누릅니다. 로컬 모드에서는 번역 모델 로딩이 끝날 때까지 기다리고, API 모드에서는 저장한 API 설정을 사용합니다.
 2. `MekiScript 실행`을 누릅니다.
 3. `MekiAudioCapture 실행`을 누릅니다.
 4. MekiAudioCapture에서 `녹음 시작`을 누르고 일본어 음성을 재생합니다.
@@ -208,7 +224,7 @@ MekiAudioCapture 창의 `실시간 음성 번역(저사양에서 비권장)`은 
 | HYTrans | 일본어 원문 단위별 한국어 번역 | 6996 |
 | MekiScript | 최근 원문·번역 누적 표시 및 스크롤 | 6999 |
 
-`모든 도구 연결 상태 확인`으로 세 앱의 HTTP 응답과 HYTransWorker/번역 모델 준비 상태를 한 번에 확인할 수 있습니다. 음성 모델은 기본 EXE 배포본에 포함되지 않습니다. MekiAudioCapture 또는 MekiSubtitle를 처음 사용할 때 선택 모델과 VAD를 공식 sherpa-onnx 릴리스에서 공용 `MekiAudioCapture/models` 캐시로 준비하며, 유효한 모델이 이미 있으면 다운로드하지 않습니다.
+`모든 도구 연결 상태 확인`으로 세 앱의 HTTP 응답과 HYTransWorker/번역 모델 준비 상태를 한 번에 확인할 수 있습니다. 음성 모델은 Lite에 포함되지 않으며 Full에는 미리 포함됩니다. MekiAudioCapture 또는 MekiSubtitle를 처음 사용할 때 선택 모델과 VAD를 공식 sherpa-onnx 릴리스에서 공용 `MekiAudioCapture/models` 캐시로 준비하며, 유효한 모델이 이미 있으면 다운로드하지 않습니다.
 
 MekiScript는 장시간 실행에서도 메모리 사용량이 계속 늘지 않도록 최근 2,048개 항목 또는 약 512 KiB의 대본만 유지하며, 더 오래된 내용은 자동으로 제거합니다.
 
@@ -258,7 +274,7 @@ MekiCopy가 직접 시작한 MekiAudioCapture·MekiScript·HYTrans·MekiOverlaye
 | 옵션 | 설명 |
 |---|---|
 | 오버레이어 번역 모드 사용 | 번역 오버레이 모드를 활성화합니다. |
-| HYTrans 번역 모델 | `MT1.5`(기본, q4) 또는 `MT2`(실험용, q4f16)를 선택합니다. 실행 중 변경하면 HYTrans가 자동 재시작됩니다. |
+| HYTrans 번역 방식 | 기본 로컬 `MT1.5`(q4), Cloudflare Workers AI, DeepInfra, Groq 중 선택합니다. API 키·모델 목록·번역 프롬프트는 API 설정에서 편집합니다. |
 | HYTrans 포트 | HYTrans 서버 포트 (기본값: 6996) |
 | MekiOverlayer 포트 | 오버레이 서버 포트 (기본값: 6997) |
 | MekiOverlayer를 항상 위로 | 오버레이 창을 항상 위에 표시합니다. |
@@ -319,6 +335,6 @@ MekiCopy.exe --pick-bookmark
 - **한국어 경로 문제:** Windows에서 실행 경로에 한글이 포함되어 Tcl/Tk가 직접 읽지 못하면 먼저 실행 파일 옆 `MekiCopyRuntime`을 사용하고, 그 경로도 사용할 수 없을 때 LocalAppData 또는 임시 폴더로 복사합니다.
 - **시스템 오류 로그:** 오류·미처리 예외·HTTP/IPC 실패·창 없는 EXE의 stderr는 각 실행 파일 옆 `error_log/`에 기록됩니다. 디버그 옵션이 꺼져도 오류 로그는 계속 기록되며, 프로그램 폴더가 읽기 전용일 때만 보조 경로를 사용합니다.
 - **GPU 가속:** NVIDIA CUDA 환경에서는 OCR이 CUDA 세션으로 실제 생성됐는지 확인한 뒤 GPU를 사용하며, 사용할 수 없으면 진단 로그에 상태를 남기고 CPU로 전환합니다. CUDA 요청이 완전히 CPU로 폴백된 경우에는 이미 만든 CPU 엔진을 재사용해 OCR 세션을 중복 생성하지 않습니다. HYTrans는 Chromium WebGPU의 고성능 하드웨어 어댑터를 우선 요청하며, 사용할 수 없으면 CPU/WASM으로 동작합니다.
-- **HYTrans 모델 저장소:** MT2와 MT1.5는 각각 `HYTrans/models/tchinso/Hy-MT2-1.8B-onnx-q4f16`, `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX`에 저장됩니다. MekiSubtitle도 이 검증된 공용 모델만 사용합니다. 고정 리비전의 크기와 SHA-256을 통과한 선택 모델만 로컬로 사용하며, 중단된 `.part` 다운로드는 다음 실행에서 이어받고 체크섬이 틀린 파일은 게시하지 않습니다. 프로그램 폴더가 읽기 전용일 때만 보조 경로를 사용합니다.
+- **HYTrans 모델 저장소:** 로컬 MT1.5는 `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX`에 저장됩니다. MekiSubtitle도 이 검증된 공용 모델만 사용합니다. 고정 리비전의 크기와 SHA-256을 통과한 선택 모델만 로컬로 사용하며, 중단된 `.part` 다운로드는 다음 실행에서 이어받고 체크섬이 틀린 파일은 게시하지 않습니다. 프로그램 폴더가 읽기 전용일 때만 보조 경로를 사용합니다.
 - **번역 입력 제한:** 한 번에 번역할 수 있는 텍스트는 최대 8,000자입니다.
 - **음성인식 모델 경로:** `MekiAudioCapture.exe` 옆의 `models` 폴더를 사용합니다. MekiSubtitle도 동일한 경로와 읽기 전용 설치용 보조 캐시를 사용하므로 STT/VAD 모델을 중복 저장하지 않습니다.

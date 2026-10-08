@@ -8,18 +8,28 @@ from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import copy_metadata
 
-# Full carries the OCR files locally. Lite intentionally has no model files;
-# MeikiOCR then uses its ordinary first-run Hugging Face download/cache path.
+# Both flavors use the same executable and runtime. Full-only OCR/model files
+# are attached by build_mekicopy.ps1 after the common application is built.
 datas = [('MekiCopy.ico', '.')]
-if os.environ.get('MEKICOPY_PACKAGE_FLAVOR', 'lite').casefold() == 'full':
-    datas.insert(0, ('runtime_models', 'runtime_models'))
 # Video subtitle generation uses the existing ReazonSubtitle FFmpeg payload,
 # but only model caches are shared at runtime.  Keep this media utility in the
 # MekiCopy bundle so a release does not depend on a developer-side PATH.
 spec_root = Path(SPECPATH).resolve()
-subtitle_ffmpeg = spec_root.parent / 'ReazonSubtitle' / 'assets' / 'ffmpeg'
-if subtitle_ffmpeg.is_dir():
-    datas.append((str(subtitle_ffmpeg), 'assets/ffmpeg'))
+configured_ffmpeg = os.environ.get('MEKICOPY_BUILD_FFMPEG_DIR', '').strip()
+ffmpeg_candidates = ([Path(configured_ffmpeg)] if configured_ffmpeg else []) + [
+    spec_root / 'assets' / 'ffmpeg',
+    spec_root.parent / 'ReazonSubtitle' / 'assets' / 'ffmpeg',
+    spec_root / 'MekiCopy-Lite' / 'MekiCopy' / '_internal' / 'assets' / 'ffmpeg',
+    spec_root / 'MekiCopy-Full' / 'MekiCopy' / '_internal' / 'assets' / 'ffmpeg',
+]
+subtitle_ffmpeg = next(
+    (path for path in ffmpeg_candidates
+     if all((path / tool).is_file() for tool in ('ffmpeg.exe', 'ffprobe.exe'))),
+    None,
+)
+if subtitle_ffmpeg is None:
+    raise RuntimeError('FFmpeg and FFprobe are required for the standalone bundle')
+datas.append((str(subtitle_ffmpeg), 'assets/ffmpeg'))
 binaries = []
 hiddenimports = [
     'mekicopy',

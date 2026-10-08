@@ -75,7 +75,8 @@ def _probe_service(expected_app: str, base_url: str, timeout: float = 2.0) -> st
         return state
 
     ready = _json_request(f"{base_url.rstrip('/')}/ready", timeout=timeout)
-    if ready.get("workerConnected") is not True:
+    backend = str(ready.get("backend") or health.get("backend") or "local")
+    if backend == "local" and ready.get("workerConnected") is not True:
         raise RuntimeError("HYTransWorker가 연결되어 있지 않습니다.")
     if ready.get("ready") is not True:
         worker_state = ready.get("state") or "모델 준비 중"
@@ -84,6 +85,9 @@ def _probe_service(expected_app: str, base_url: str, timeout: float = 2.0) -> st
         raise RuntimeError(f"HYTrans 번역 모델이 준비되지 않았습니다: {worker_state}{suffix}")
     state = str(ready.get("state") or "READY")
     details: list[str] = []
+    if backend != "local":
+        details.append(f"API={backend}")
+        details.append(f"model={ready.get('model') or health.get('model') or ''}")
     device = str(ready.get("device") or "").strip()
     device_detail = str(ready.get("deviceDetail") or "").strip()
     warning = str(ready.get("warning") or "").strip()
@@ -127,7 +131,7 @@ def request_translation_and_show(
     outside Tk's event loop. All URLs are captured by the caller before a
     background task starts, preventing settings edits from changing a request
     midway through execution. The default exceeds HYTrans's bounded 600-second
-    server timeout so a slow MT2 request receives the server's real response
+    server timeout so a slow translation receives the server's real response
     instead of failing first in the client.
     """
     hytrans_base = hytrans_url.rstrip("/")

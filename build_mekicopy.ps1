@@ -5,7 +5,9 @@ param(
     [ValidateSet("Lite", "Full")]
     [string]$PackageFlavor = "Lite",
     [string]$FullAssetsRoot = "",
-    [string]$FullMagpieRoot = ""
+    [string]$FullMagpieRoot = "",
+    [string]$FfmpegRoot = "",
+    [switch]$ReuseLiteBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -458,7 +460,7 @@ function Copy-ReleaseTree {
     )
 
     if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
-        throw "Full package source for $Description is missing: $SourceRoot"
+        throw "Package source for $Description is missing: $SourceRoot"
     }
 
     $source = (Resolve-Path -LiteralPath $SourceRoot).Path.TrimEnd('\', '/')
@@ -477,6 +479,20 @@ function Copy-ReleaseTree {
             Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
         }
     }
+}
+
+function Resolve-ReleaseAssetDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Candidates,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    foreach ($candidate in $Candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Container)) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    throw "Package source for $Description was not found. Checked: $($Candidates -join ', ')"
 }
 
 function Invoke-ExeSmokeTest {
@@ -633,6 +649,15 @@ Assert-RuntimeAssetManifest `
 
 $script:PythonExe = Resolve-BuildPython -RequestedPython $PythonExe
 Write-Host "Using build Python: $script:PythonExe"
+$liteBuildRoot = Join-Path $PSScriptRoot "MekiCopy-Lite"
+if ($ReuseLiteBuild) {
+    if ($PackageFlavor -ne "Full") {
+        throw "-ReuseLiteBuild is available only for -PackageFlavor Full."
+    }
+    Invoke-CheckedPython @(
+        ".\release_packaging.py", "verify-lite", "--release", $liteBuildRoot
+    )
+}
 $versionProbe = @'
 import sys
 import tkinter
@@ -641,7 +666,7 @@ print(f"Tk {tkinter.TkVersion}")
 '@
 Invoke-CheckedPythonScript $versionProbe
 
-if (-not $SkipDependencyInstall) {
+if (-not $SkipDependencyInstall -and -not $ReuseLiteBuild) {
     Invoke-CheckedPython @("-m", "pip", "install", "--upgrade", "pip==$PipVersion")
     Invoke-CheckedPython @(
         "-m", "pip", "install", "--upgrade", "--upgrade-strategy", "eager",
@@ -729,8 +754,10 @@ print("Pinned build dependencies and Tk are ready")
 '@
 Invoke-CheckedPythonScript $dependencyProbe
 
-Write-Host "Running source regression tests..."
-Invoke-CheckedPython @("-m", "unittest", "discover", "-s", "tests", "-v")
+if (-not $ReuseLiteBuild) {
+    Write-Host "Running source regression tests..."
+    Invoke-CheckedPython @("-m", "unittest", "discover", "-s", "tests", "-v")
+}
 
 if ($PackageFlavor -eq "Full") {
     $modelDir = Join-Path $PSScriptRoot "runtime_models\meikiocr"
@@ -786,7 +813,30 @@ for repo_id, filename in missing_models:
 
 # MekiSubtitle needs only video decoding tools from the former standalone
 # ReazonSubtitle app. Translation/STT/VAD models remain shared runtime caches.
-$subtitleFfmpegRoot = Join-Path (Split-Path $PSScriptRoot -Parent) "ReazonSubtitle\assets\ffmpeg"
+$subtitleFfmpegCandidates = @()
+if ($FfmpegRoot) {
+    $subtitleFfmpegCandidates += $FfmpegRoot
+}
+if ($FullAssetsRoot) {
+    $subtitleFfmpegCandidates += (Join-Path $FullAssetsRoot "ffmpeg")
+}
+$subtitleFfmpegCandidates += @(
+    (Join-Path $PSScriptRoot "assets\ffmpeg"),
+    (Join-Path (Split-Path $PSScriptRoot -Parent) "ReazonSubtitle\assets\ffmpeg"),
+    (Join-Path $PSScriptRoot "MekiCopy-Lite\MekiCopy\_internal\assets\ffmpeg"),
+    (Join-Path $PSScriptRoot "MekiCopy-Full\MekiCopy\_internal\assets\ffmpeg")
+)
+$subtitleFfmpegRoot = $null
+foreach ($candidate in $subtitleFfmpegCandidates) {
+    if ((Test-Path -LiteralPath (Join-Path $candidate "ffmpeg.exe") -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $candidate "ffprobe.exe") -PathType Leaf)) {
+        $subtitleFfmpegRoot = (Resolve-Path -LiteralPath $candidate).Path
+        break
+    }
+}
+if (-not $subtitleFfmpegRoot) {
+    throw "MekiSubtitle requires FFmpeg and FFprobe. Pass -FfmpegRoot with their directory."
+}
 foreach ($subtitleTool in @("ffmpeg.exe", "ffprobe.exe")) {
     $subtitleToolPath = Join-Path $subtitleFfmpegRoot $subtitleTool
     if (-not (Test-Path -LiteralPath $subtitleToolPath -PathType Leaf)) {
@@ -794,7 +844,9 @@ foreach ($subtitleTool in @("ffmpeg.exe", "ffprobe.exe")) {
     }
 }
 
-Remove-WorkspaceDirectory "build"
+if (-not $ReuseLiteBuild) {
+    Remove-WorkspaceDirectory "build"
+}
 $releaseName = "MekiCopy-$PackageFlavor"
 $stagingRelativePath = Join-Path `
     ".release-staging" `
@@ -810,23 +862,31 @@ $specs = @(
     ".\MekiDisplay.spec",
     ".\MekiAudioCapture.spec"
 )
-$previousPackageFlavor = $env:MEKICOPY_PACKAGE_FLAVOR
-$env:MEKICOPY_PACKAGE_FLAVOR = $PackageFlavor
-try {
-    foreach ($spec in $specs) {
-        Invoke-CheckedPython @(
-            "-m", "PyInstaller", "--noconfirm", "--clean",
-            "--distpath", $distRoot,
-            $spec
-        )
-    }
+if ($ReuseLiteBuild) {
+    Copy-ReleaseTree `
+        -SourceRoot $liteBuildRoot `
+        -TargetRoot $distRoot `
+        -Description "verified Lite application runtime"
 }
-finally {
-    if ($null -eq $previousPackageFlavor) {
-        Remove-Item Env:MEKICOPY_PACKAGE_FLAVOR -ErrorAction SilentlyContinue
+else {
+    $previousBuildFfmpegRoot = $env:MEKICOPY_BUILD_FFMPEG_DIR
+    $env:MEKICOPY_BUILD_FFMPEG_DIR = $subtitleFfmpegRoot
+    try {
+        foreach ($spec in $specs) {
+            Invoke-CheckedPython @(
+                "-m", "PyInstaller", "--noconfirm", "--clean",
+                "--distpath", $distRoot,
+                $spec
+            )
+        }
     }
-    else {
-        $env:MEKICOPY_PACKAGE_FLAVOR = $previousPackageFlavor
+    finally {
+        if ($null -eq $previousBuildFfmpegRoot) {
+            Remove-Item Env:MEKICOPY_BUILD_FFMPEG_DIR -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:MEKICOPY_BUILD_FFMPEG_DIR = $previousBuildFfmpegRoot
+        }
     }
 }
 
@@ -839,6 +899,12 @@ $mekiCopyRoot = Split-Path -Parent $mekiCopyExe
 $hyTransRoot = Split-Path -Parent $hyTransExe
 $displayRoot = Split-Path -Parent $overlayerExe
 $audioCaptureRoot = Split-Path -Parent $audioCaptureExe
+if ($PackageFlavor -eq "Full") {
+    Copy-ReleaseTree `
+        -SourceRoot (Join-Path $PSScriptRoot "runtime_models\meikiocr") `
+        -TargetRoot (Join-Path $mekiCopyRoot "_internal\runtime_models\meikiocr") `
+        -Description "MeikiOCR models"
+}
 $expectedExecutables = @($mekiCopyExe, $hyTransExe, $overlayerExe, $scriptExe, $audioCaptureExe)
 foreach ($exe in $expectedExecutables) {
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
@@ -985,142 +1051,46 @@ if ($PackageFlavor -eq "Lite") {
     }
 }
 
-# Only Full may receive a prepared source-side HYTrans cache. Lite must remain
-# download-on-first-use even when a developer's source checkout is warmed.
-if ($PackageFlavor -eq "Full") {
-$verifyPreparedHyTransModels = @'
-import json
-from pathlib import Path
-
-from hytrans.model_files import MODEL_PROFILES, is_complete_model
-
-models_root = Path("models")
-verified = []
-for key, profile in MODEL_PROFILES.items():
-    target = models_root.joinpath(*profile.model_id.split("/"))
-    if target.is_dir() and is_complete_model(target, profile):
-        verified.append(key)
-print(json.dumps(verified))
-'@
-$verifiedModelOutput = $verifyPreparedHyTransModels | & $script:PythonExe -
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to validate prepared HYTrans models"
-}
-$verifiedHyTransModelKeys = @($verifiedModelOutput | ConvertFrom-Json)
-
-$hyTransPreparedModels = @(
-    @{
-        Key = "mt2"
-        RelativePath = "tchinso\Hy-MT2-1.8B-onnx-q4f16"
-        RequiredFiles = @(
-            "chat_template.jinja",
-            "config.json",
-            "generation_config.json",
-            "special_tokens_map.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "onnx\model_q4f16.onnx"
-        )
-    },
-    @{
-        Key = "mt1.5"
-        RelativePath = "onnx-community\HY-MT1.5-1.8B-ONNX"
-        RequiredFiles = @(
-            "config.json",
-            "generation_config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "onnx\model_q4.onnx",
-            "onnx\model_q4.onnx_data"
-        )
-    }
-)
-foreach ($preparedModel in $hyTransPreparedModels) {
-    if ($verifiedHyTransModelKeys -notcontains $preparedModel.Key) {
-        continue
-    }
-    $hyTransModelSource = Join-Path `
-        (Join-Path $PSScriptRoot "models") `
-        $preparedModel.RelativePath
-    $hasPreparedHyTransModel = Test-Path `
-        -LiteralPath $hyTransModelSource `
-        -PathType Container
-    if ($hasPreparedHyTransModel) {
-        foreach ($relativeFile in $preparedModel.RequiredFiles) {
-            if (-not (Test-Path -LiteralPath (Join-Path $hyTransModelSource $relativeFile) -PathType Leaf)) {
-                $hasPreparedHyTransModel = $false
-                break
-            }
-        }
-    }
-    if (-not $hasPreparedHyTransModel) {
-        continue
-    }
-
-    $hyTransModelTarget = Join-Path `
-        (Join-Path $hyTransRoot "models") `
-        $preparedModel.RelativePath
-    Get-ChildItem -LiteralPath $hyTransModelSource -Recurse -File | ForEach-Object {
-        $relativeFile = $_.FullName.Substring($hyTransModelSource.Length).TrimStart("\")
-        $targetFile = Join-Path $hyTransModelTarget $relativeFile
-        New-Item -ItemType Directory -Path (Split-Path -Parent $targetFile) -Force | Out-Null
-        if ($_.Name -eq ".hytrans-model-manifest.json") {
-            Copy-Item -LiteralPath $_.FullName -Destination $targetFile -Force
-        }
-        else {
-            try {
-                New-Item -ItemType HardLink -Path $targetFile -Target $_.FullName -Force | Out-Null
-            }
-            catch {
-                Copy-Item -LiteralPath $_.FullName -Destination $targetFile -Force
-            }
-        }
-    }
-    Write-Host "Prepared local HYTrans model: $hyTransModelTarget"
-}
-}
-
 if ($PackageFlavor -eq "Full") {
     $defaultFullAssetsRoot = Join-Path (Split-Path $PSScriptRoot -Parent) "ReazonSubtitle\assets"
     $fullModelAssetsRoot = if ($FullAssetsRoot) { $FullAssetsRoot } else { $defaultFullAssetsRoot }
-    if (-not (Test-Path -LiteralPath $fullModelAssetsRoot -PathType Container)) {
-        throw "Full package model assets were not found: $fullModelAssetsRoot"
-    }
-    $fullModelAssetsRoot = (Resolve-Path -LiteralPath $fullModelAssetsRoot).Path
+    $previousFullRoot = Join-Path $PSScriptRoot "MekiCopy-Full"
 
     # MekiSubtitle uses its companion-owned copies below; it never receives
     # a separate STT/VAD/translation cache inside MekiCopy itself.
     $fullAssetCopies = @(
         @{
-            Source = Join-Path $fullModelAssetsRoot "sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8"
-            Target = Join-Path $audioCaptureRoot "models\sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8"
+            SourceRelative = "sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8"
+            TargetRelative = "MekiAudioCapture\models\sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8"
             Description = "Parakeet NeMo CTC STT model"
         },
         @{
-            Source = Join-Path $fullModelAssetsRoot "reazonspeech-ja"
-            Target = Join-Path $audioCaptureRoot "models\reazonspeech-ja"
+            SourceRelative = "reazonspeech-ja"
+            TargetRelative = "MekiAudioCapture\models\reazonspeech-ja"
             Description = "ReazonSpeech STT model"
         },
         @{
-            Source = Join-Path $fullModelAssetsRoot "vad"
-            Target = Join-Path $audioCaptureRoot "models\vad"
+            SourceRelative = "vad"
+            TargetRelative = "MekiAudioCapture\models\vad"
             Description = "Silero VAD model"
         },
         @{
-            Source = Join-Path $fullModelAssetsRoot "onnx-community\HY-MT1.5-1.8B-ONNX"
-            Target = Join-Path $hyTransRoot "models\onnx-community\HY-MT1.5-1.8B-ONNX"
+            SourceRelative = "onnx-community\HY-MT1.5-1.8B-ONNX"
+            TargetRelative = "HYTrans\models\onnx-community\HY-MT1.5-1.8B-ONNX"
             Description = "HY-MT1.5 translation model"
-        },
-        @{
-            Source = Join-Path $fullModelAssetsRoot "tchinso\Hy-MT2-1.8B-onnx-q4f16"
-            Target = Join-Path $hyTransRoot "models\tchinso\Hy-MT2-1.8B-onnx-q4f16"
-            Description = "HY-MT2 experimental translation model"
         }
     )
     foreach ($asset in $fullAssetCopies) {
+        $assetSource = Resolve-ReleaseAssetDirectory `
+            -Candidates @(
+                (Join-Path $fullModelAssetsRoot $asset.SourceRelative),
+                (Join-Path (Join-Path $PSScriptRoot "models") $asset.SourceRelative),
+                (Join-Path $previousFullRoot $asset.TargetRelative)
+            ) `
+            -Description $asset.Description
         Copy-ReleaseTree `
-            -SourceRoot $asset.Source `
-            -TargetRoot $asset.Target `
+            -SourceRoot $assetSource `
+            -TargetRoot (Join-Path $distRoot $asset.TargetRelative) `
             -Description $asset.Description
     }
 
@@ -1193,10 +1163,13 @@ if (-not $SkipSmokeTests) {
     $env:MEKICOPY_FORCE_DATA_DIR = "1"
     Write-Host "Running executable smoke tests..."
     Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-runtime")
-    Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-ui")
-    Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-tray-stress")
-    Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-detached-button")
-    Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-detached-survival")
+    if (-not $ReuseLiteBuild) {
+        Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-ui")
+        Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-tray-stress")
+        Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-detached-button")
+        Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-detached-survival")
+        Invoke-ExeSmokeTest $hyTransExe @("--self-test-api")
+    }
 
     $expectedHyTransModelMode = if ($PackageFlavor -eq "Full") { "local" } else { "remote" }
     $hyTransPort = Get-FreeTcpPort
@@ -1212,27 +1185,29 @@ if (-not $SkipSmokeTests) {
         } `
         -GracefulShutdown
 
-    $hyTransMt2Port = Get-FreeTcpPort
-    Invoke-HealthSmokeTest `
-        -ExePath $hyTransExe `
-        -Arguments @("--port", "$hyTransMt2Port", "--no-browser", "--model", "mt2") `
-        -Port $hyTransMt2Port `
-        -ExpectedConfig @{
-            modelId = "tchinso/Hy-MT2-1.8B-onnx-q4f16"
-            dtype = "q4f16"
-            hasLocalWasm = $true
-            modelMode = $expectedHyTransModelMode
-        } `
-        -GracefulShutdown
+    if (-not $ReuseLiteBuild) {
+        $overlayerPort = Get-FreeTcpPort
+        Invoke-HealthSmokeTest `
+            $overlayerExe `
+            @("--port", "$overlayerPort") `
+            $overlayerPort
 
-    $overlayerPort = Get-FreeTcpPort
-    Invoke-HealthSmokeTest `
-        $overlayerExe `
-        @("--port", "$overlayerPort") `
-        $overlayerPort
+        Invoke-ExeSmokeTest $audioCaptureExe @("--self-test")
+        Invoke-ExeSmokeTest $audioCaptureExe @("--self-test-ui")
+        Invoke-ExeSmokeTest $scriptExe @("--self-test")
 
-    Invoke-ExeSmokeTest $audioCaptureExe @("--self-test")
-    Invoke-ExeSmokeTest $audioCaptureExe @("--self-test-ui")
+        $scriptPort = Get-FreeTcpPort
+        Invoke-HealthSmokeTest `
+            $scriptExe `
+            @("--port", "$scriptPort") `
+            $scriptPort
+
+        $audioPort = Get-FreeTcpPort
+        Invoke-HealthSmokeTest `
+            $audioCaptureExe `
+            @("--port", "$audioPort", "--self-test-server") `
+            $audioPort
+    }
     if ($PackageFlavor -eq "Full") {
         # Verify the copied, pre-downloaded STT/VAD assets from inside the
         # frozen companion.  Lite intentionally has no model payload and
@@ -1245,19 +1220,6 @@ if (-not $SkipSmokeTests) {
             $audioCaptureExe `
             @("--self-test-models", "--stt-model", "reazonspeech", "--precision", "fp32")
     }
-    Invoke-ExeSmokeTest $scriptExe @("--self-test")
-
-    $scriptPort = Get-FreeTcpPort
-    Invoke-HealthSmokeTest `
-        $scriptExe `
-        @("--port", "$scriptPort") `
-        $scriptPort
-
-    $audioPort = Get-FreeTcpPort
-    Invoke-HealthSmokeTest `
-        $audioCaptureExe `
-        @("--port", "$audioPort", "--self-test-server") `
-        $audioPort
 }
 
 if (-not $SkipSmokeTests) {
@@ -1288,7 +1250,26 @@ setlocal
 cd /d "%~dp0MekiCopy"
 start "" "MekiCopy.exe"
 '@
-Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding ASCII
+if (-not $ReuseLiteBuild) {
+    Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding ASCII
+}
+if ($ReuseLiteBuild) {
+    Invoke-CheckedPython @(
+        ".\release_packaging.py", "verify-parity", "--release", $distRoot,
+        "--lite", $liteBuildRoot
+    )
+}
+$manifestArguments = @(
+    ".\release_packaging.py", "manifest", "--release", $distRoot,
+    "--flavor", $PackageFlavor
+)
+if ($ReuseLiteBuild) {
+    $manifestArguments += @("--lite", $liteBuildRoot)
+}
+if (-not $SkipSmokeTests) {
+    $manifestArguments += "--smoke-tested"
+}
+Invoke-CheckedPython $manifestArguments
 
 $releaseRoot = Join-Path $PSScriptRoot $releaseName
 $releaseArchivePath = Join-Path $PSScriptRoot "$releaseName-one-dir.zip"
