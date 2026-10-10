@@ -811,6 +811,8 @@ class SettingsWindow(tk.Toplevel):
         backend = BACKEND_IDS_BY_LABEL.get(self.hytrans_backend_var.get(), "local")
         if backend == "local":
             text = "로컬 모델: " + HYTRANS_MODEL_LABELS[DEFAULT_MODEL_ID]
+        elif backend == "translator_api":
+            text = "브라우저 내장 Translator API · 일본어 → 한국어 (첫 사용 시 모델 다운로드)"
         else:
             profile = self.api_settings.profiles[backend]
             text = f"API 모델: {profile.model or '(모델 ID를 입력하세요)'}"

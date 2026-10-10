@@ -47,8 +47,8 @@ MekiAudioCapture + MekiScript를 사용하면 컴퓨터에서 재생되는 일�
 
 [Releases](https://github.com/tchinso/MekiCopy/releases)에서 배포본을 받아 압축을 푼 뒤 `MekiCopy.exe`를 실행합니다. Python을 따로 설치할 필요가 없습니다.
 
-- **Lite:** 모든 앱과 API 번역 기능을 포함합니다. OCR·번역·음성 모델은 처음 사용할 때 다운로드하며, MagPie도 필요할 때 설치합니다.
-- **Full:** Lite와 동일한 실행 파일·기능에 미리 다운로드된 OCR·MT1.5·음성/VAD 모델과 MagPie만 추가합니다.
+- **Lite:** 모든 앱과 MT1.5·TranslatorAPI·클라우드 API 번역 기능을 포함합니다. OCR·MT1.5·음성 모델은 처음 사용할 때 다운로드하며, MagPie도 필요할 때 설치합니다.
+- **Full:** Lite와 동일한 실행 파일·기능에 미리 다운로드된 OCR·MT1.5·음성/VAD 모델과 MagPie를 추가합니다. TranslatorAPI의 언어 모델은 브라우저가 관리하므로 Full ZIP에도 포함되지 않습니다.
 
 ---
 
@@ -160,7 +160,9 @@ OCR로 인식한 텍스트를 자동으로 번역해 화면에 바로 표시하�
 
 로컬 MT1.5 모드의 HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x 최신)과 `ONNX Runtime Web/WASM 1.27.0`을 private headless Chrome 또는 Edge worker에서 로컬로 읽습니다. 네트워크는 선택한 번역 모델을 처음 내려받을 때만 필요하며, 이후에는 `HYTrans/models`의 검증된 모델을 재사용합니다.
 
-> **로컬 번역 필수 조건:** Google Chrome 또는 Microsoft Edge가 설치되어 있어야 합니다. API 번역에는 브라우저나 로컬 번역 모델이 필요하지 않습니다.
+**TranslatorAPI**는 Chrome 또는 Edge에 내장된 [Translator API](https://learn.microsoft.com/en-us/microsoft-edge/web-platform/translator-api)를 사용하는 별도의 로컬 번역 방식입니다. 일본어 → 한국어 번역에 별도 API 키나 MT1.5 모델 파일이 필요하지 않습니다. 브라우저에서 해당 언어 쌍을 사용할 수 있어야 하며, 브라우저가 언어 모델을 처음 준비할 때 네트워크 연결과 대기 시간이 필요할 수 있습니다. 언어 모델의 저장과 다운로드는 브라우저가 관리합니다. [Chrome 설명](https://developer.chrome.com/docs/ai/translator-api)도 참고하세요.
+
+> **로컬 번역 필수 조건:** MT1.5와 TranslatorAPI에는 Google Chrome 또는 Microsoft Edge가 설치되어 있어야 합니다. 클라우드 API 번역에는 브라우저나 로컬 번역 모델이 필요하지 않습니다.
 
 ### API 번역 설정
 
@@ -178,12 +180,13 @@ OCR로 인식한 텍스트를 자동으로 번역해 화면에 바로 표시하�
 
 ### 사용 방법
 
-1. `설정` 창의 **번역** 탭에서 기본 로컬 MT1.5 또는 API 번역 서비스를 선택합니다. OCR 오버레이를 쓰려면 **번역 오버레이 모드**도 켭니다.
+1. `설정` 창의 **번역** 탭에서 기본 로컬 MT1.5, TranslatorAPI 또는 클라우드 API 번역 서비스를 선택합니다. OCR 오버레이를 쓰려면 **번역 오버레이 모드**도 켭니다.
 2. `저장`을 누릅니다. `도구/설정` 탭의 `HYTrans 서버 실행`과 `MekiOverlayer 실행` 버튼이 활성화됩니다.
 3. `HYTrans 서버 실행` 버튼을 누릅니다.
    - HYTrans는 사용자에게 보이지 않는 private headless worker를 자동으로 시작합니다. 닫을 브라우저 창이 없습니다.
-   - HYTrans가 선택한 모델을 `HYTrans/models/<제작자>/<모델명>`에 직접 다운로드한 뒤 Worker가 로컬 모델을 로드합니다. **처음 실행 시 모델 다운로드에 시간이 걸립니다.**
-   - 완전한 로컬 모델이 이미 있으면 네트워크에 접속하거나 다시 다운로드하지 않습니다. Worker에는 `다운로드 중`과 `로컬 모델 로드 중`이 구분되어 표시됩니다.
+   - MT1.5에서는 HYTrans가 선택한 모델을 `HYTrans/models/<제작자>/<모델명>`에 직접 다운로드한 뒤 Worker가 로컬 모델을 로드합니다. **처음 실행 시 모델 다운로드에 시간이 걸립니다.**
+   - MT1.5 모델이 이미 있으면 네트워크에 접속하거나 다시 다운로드하지 않습니다. Worker에는 `다운로드 중`과 `로컬 모델 로드 중`이 구분되어 표시됩니다.
+   - TranslatorAPI에서는 브라우저가 지원 여부를 확인하고 필요한 언어 모델을 준비합니다. 사용 가능 여부와 다운로드 시간은 설치된 브라우저에 따라 달라집니다.
 4. `MekiOverlayer 실행` 버튼을 누릅니다.
 5. 확정 영역을 설정한 뒤 `번역 후 표시` 버튼을 누릅니다.
 6. OCR → 번역 → MekiOverlayer 표시가 자동으로 이루어집니다.
@@ -274,7 +277,7 @@ MekiCopy가 직접 시작한 MekiAudioCapture·MekiScript·HYTrans·MekiOverlaye
 | 옵션 | 설명 |
 |---|---|
 | 오버레이어 번역 모드 사용 | 번역 오버레이 모드를 활성화합니다. |
-| HYTrans 번역 방식 | 기본 로컬 `MT1.5`(q4), Cloudflare Workers AI, DeepInfra, Groq 중 선택합니다. API 키·모델 목록·번역 프롬프트는 API 설정에서 편집합니다. |
+| HYTrans 번역 방식 | 기본 로컬 `MT1.5`(q4), 브라우저 내장 `TranslatorAPI`, Cloudflare Workers AI, DeepInfra, Groq 중 선택합니다. 클라우드 서비스의 API 키·모델 목록·번역 프롬프트는 API 설정에서 편집합니다. |
 | HYTrans 포트 | HYTrans 서버 포트 (기본값: 6996) |
 | MekiOverlayer 포트 | 오버레이 서버 포트 (기본값: 6997) |
 | MekiOverlayer를 항상 위로 | 오버레이 창을 항상 위에 표시합니다. |

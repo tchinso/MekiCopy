@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HYTrans Translator API Worker</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 80px 16px 16px;
+      font-family: system-ui, sans-serif;
+      background: #111;
+      color: #eee;
+    }
+    #translator-start-button {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      width: 240px;
+      height: 44px;
+      border: 1px solid #83bfff;
+      border-radius: 8px;
+      background: #1765b5;
+      color: white;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #translator-start-button:disabled {
+      opacity: .65;
+      cursor: default;
+    }
+    .progress {
+      width: 100%;
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #2a2a2a;
+    }
+    #progress-bar {
+      width: 0%;
+      height: 100%;
+      background: #4fa3ff;
+      transition: width 160ms ease;
+    }
+    #progress-text {
+      margin: 8px 0 12px;
+      color: #b8c7d9;
+      font-size: 13px;
+    }
+    #status {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <button id="translator-start-button" type="button">Translator API 모델 시작</button>
+  <div class="progress" aria-hidden="true"><div id="progress-bar"></div></div>
+  <div id="progress-text" role="status">브라우저 번역 모델을 확인하는 중...</div>
+  <pre id="status">HYTrans Translator API worker starting...</pre>
+  <script type="module" src="/assets/translator_api_worker.js"></script>
+</body>
+</html>

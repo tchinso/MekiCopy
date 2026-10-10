@@ -76,7 +76,7 @@ def _probe_service(expected_app: str, base_url: str, timeout: float = 2.0) -> st
 
     ready = _json_request(f"{base_url.rstrip('/')}/ready", timeout=timeout)
     backend = str(ready.get("backend") or health.get("backend") or "local")
-    if backend == "local" and ready.get("workerConnected") is not True:
+    if backend in {"local", "translator_api"} and ready.get("workerConnected") is not True:
         raise RuntimeError("HYTransWorker가 연결되어 있지 않습니다.")
     if ready.get("ready") is not True:
         worker_state = ready.get("state") or "모델 준비 중"
@@ -85,7 +85,9 @@ def _probe_service(expected_app: str, base_url: str, timeout: float = 2.0) -> st
         raise RuntimeError(f"HYTrans 번역 모델이 준비되지 않았습니다: {worker_state}{suffix}")
     state = str(ready.get("state") or "READY")
     details: list[str] = []
-    if backend != "local":
+    if backend == "translator_api":
+        details.append("Browser Translator API")
+    elif backend != "local":
         details.append(f"API={backend}")
         details.append(f"model={ready.get('model') or health.get('model') or ''}")
     device = str(ready.get("device") or "").strip()

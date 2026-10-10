@@ -1,5 +1,6 @@
 param(
     [switch]$SkipDependencyInstall,
+    [switch]$SkipSourceTests,
     [switch]$SkipSmokeTests,
     [string]$PythonExe = "",
     [ValidateSet("Lite", "Full")]
@@ -200,6 +201,8 @@ function Assert-RuntimeAssetManifest {
         "onnxruntime-web.ThirdPartyNotices.txt",
         "worker.html",
         "worker.js",
+        "translator_api_worker.html",
+        "translator_api_worker.js",
         "wasm/ort-wasm-simd-threaded.asyncify.mjs",
         "wasm/ort-wasm-simd-threaded.asyncify.wasm",
         "wasm/ort-wasm-simd-threaded.jsep.mjs",
@@ -754,7 +757,7 @@ print("Pinned build dependencies and Tk are ready")
 '@
 Invoke-CheckedPythonScript $dependencyProbe
 
-if (-not $ReuseLiteBuild) {
+if (-not $ReuseLiteBuild -and -not $SkipSourceTests) {
     Write-Host "Running source regression tests..."
     Invoke-CheckedPython @("-m", "unittest", "discover", "-s", "tests", "-v")
 }
@@ -1023,6 +1026,14 @@ Assert-ArtifactFile `
     -Description "HYTrans worker script"
 Assert-ArtifactFile `
     -AppRoot $hyTransRoot `
+    -RelativePath "_internal\assets\translator_api_worker.html" `
+    -Description "HYTrans TranslatorAPI worker page"
+Assert-ArtifactFile `
+    -AppRoot $hyTransRoot `
+    -RelativePath "_internal\assets\translator_api_worker.js" `
+    -Description "HYTrans TranslatorAPI worker script"
+Assert-ArtifactFile `
+    -AppRoot $hyTransRoot `
     -RelativePath "_internal\assets\transformers.min.js" `
     -Description "HYTrans transformers loader"
 Assert-RuntimeAssetManifest `
@@ -1184,6 +1195,21 @@ if (-not $SkipSmokeTests) {
             modelMode = $expectedHyTransModelMode
         } `
         -GracefulShutdown
+
+    if (-not $ReuseLiteBuild) {
+        $translatorApiPort = Get-FreeTcpPort
+        Invoke-HealthSmokeTest `
+            -ExePath $hyTransExe `
+            -Arguments @("--port", "$translatorApiPort", "--backend", "translator_api", "--no-browser") `
+            -Port $translatorApiPort `
+            -ExpectedConfig @{
+                backend = "translator_api"
+                modelId = "Browser Translator API"
+                dtype = "browser"
+                modelMode = "on-device"
+            } `
+            -GracefulShutdown
+    }
 
     if (-not $ReuseLiteBuild) {
         $overlayerPort = Get-FreeTcpPort

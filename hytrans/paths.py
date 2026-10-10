@@ -22,6 +22,8 @@ _REQUIRED_RUNTIME_ASSETS = {
     "onnxruntime-web.ThirdPartyNotices.txt",
     "worker.html",
     "worker.js",
+    "translator_api_worker.html",
+    "translator_api_worker.js",
     "wasm/ort-wasm-simd-threaded.asyncify.mjs",
     "wasm/ort-wasm-simd-threaded.asyncify.wasm",
     "wasm/ort-wasm-simd-threaded.jsep.mjs",

@@ -148,6 +148,7 @@ from hytrans.model_files import get_model_profile
 from hytrans.api_settings import (
     ApiSettings,
     BACKEND_LABELS,
+    PROVIDERS,
     api_settings_path,
     fingerprint,
     load_api_settings,
@@ -2063,8 +2064,9 @@ class MainWindow(tk.Tk):
             expected_profile = get_model_profile(self.settings.hytrans_model_id)
             backend = normalize_backend(self.settings.hytrans_backend)
             expected_model = (
-                expected_profile.model_id if backend == "local"
-                else load_api_settings().profiles[backend].model
+                expected_profile.model_id if backend == "local" else
+                "Browser Translator API" if backend == "translator_api" else
+                load_api_settings().profiles[backend].model
             )
             if (
                 str(health.get("backend") or "local") != backend
@@ -2079,14 +2081,14 @@ class MainWindow(tk.Tk):
             self._send_hytrans_logging_config(log_errors=False)
             try:
                 ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=1)
-                if backend != "local" and not ready.get("ready"):
+                if backend in PROVIDERS and not ready.get("ready"):
                     messagebox.showerror(
                         "MekiCopy",
                         f"HYTrans API 설정을 확인해 주세요:\n{ready.get('error') or ready.get('state') or '준비되지 않음'}",
                         parent=self,
                     )
                     return False
-                if backend == "local" and not (ready.get("workerConnected") or ready.get("ready")):
+                if backend in {"local", "translator_api"} and not (ready.get("workerConnected") or ready.get("ready")):
                     _json_request(
                         f"{self._hytrans_base_url()}/worker/reopen",
                         {},
@@ -2595,7 +2597,7 @@ class MainWindow(tk.Tk):
         backend = normalize_backend(settings.hytrans_backend)
         previous_api_settings = load_api_settings()
         selected_api_settings = api_settings if api_settings is not None else previous_api_settings
-        if persist and backend != "local":
+        if persist and backend in PROVIDERS:
             validation_error = validate_provider_settings(selected_api_settings.profiles[backend], backend)
             if validation_error:
                 messagebox.showerror("MekiCopy", validation_error, parent=self.settings_window or self)

@@ -5,6 +5,7 @@ from contextlib import suppress
 import ipaddress
 import json
 from pathlib import Path
+import re
 import secrets
 import time
 import urllib.error
@@ -27,7 +28,7 @@ from .config import (
     translation_timeout_seconds,
 )
 from .api_client import ApiTranslationError, ApiTranslationQueue, ApiTranslator
-from .api_settings import validate_provider_settings
+from .api_settings import BROWSER_BACKENDS, PROVIDERS, validate_provider_settings
 from .logging_setup import configure_logging, debug, error
 from .model_cache import (
     model_cache_file_response,
@@ -49,6 +50,7 @@ queue_task: asyncio.Task | None = None
 api_translation_queue: ApiTranslationQueue | None = None
 api_active_requests = 0
 worker_opener: Callable[[], None] | None = None
+worker_activator: Callable[[], None] | None = None
 worker_open_task: asyncio.Task[None] | None = None
 shutdown_handler: Callable[[], None] | None = None
 shutdown_token: str | None = None
@@ -111,6 +113,11 @@ def configure_worker_opener(opener: Callable[[], None] | None) -> None:
     worker_opener = opener
 
 
+def configure_worker_activator(activator: Callable[[], None] | None) -> None:
+    global worker_activator
+    worker_activator = activator
+
+
 async def _open_worker_singleflight() -> None:
     """Coalesce concurrent timeout recovery and explicit reopen requests."""
     global worker_open_task
@@ -163,7 +170,7 @@ def _is_trusted_shutdown_origin(origin: str | None) -> bool:
 
 
 def _validate_api_caller(request: Request) -> None:
-    if options.backend == "local":
+    if options.backend not in PROVIDERS:
         return
     client_host = request.client.host if request.client else ""
     if not _is_loopback_host(client_host):
@@ -207,10 +214,34 @@ async def _send_to_overlay(text: str, overlay_url: str | None = None) -> None:
     await asyncio.to_thread(_post_overlay_text, target, text)
 
 
+_LANGUAGE_NAMES = {
+    "japanese": "ja",
+    "korean": "ko",
+    "english": "en",
+    "chinese": "zh",
+    "french": "fr",
+    "german": "de",
+    "spanish": "es",
+    "russian": "ru",
+}
+
+
+def _translator_language_tag(value: str | None, *, default: str) -> str:
+    raw = (default if value is None else value).strip()
+    language = _LANGUAGE_NAMES.get(raw.casefold(), raw)
+    if not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", language):
+        raise HTTPException(status_code=400, detail="Translator API languages must use BCP 47 tags")
+    return language
+
+
 async def _translate_text(text: str, *, realtime: bool = False,
                           source: str | None = None, target: str | None = None) -> str:
-    if options.backend != "local":
+    if options.backend in PROVIDERS:
         return await _translate_api_text(text, source=source, target=target)
+    source_language = target_language = None
+    if options.backend == "translator_api":
+        source_language = _translator_language_tag(source, default="ja")
+        target_language = _translator_language_tag(target, default="ko")
     if not state.worker_ready:
         error(
             "translate_not_ready",
@@ -229,6 +260,8 @@ async def _translate_text(text: str, *, realtime: bool = False,
             text=text,
             timeout=translation_timeout_seconds(len(text)),
             max_new_tokens=max_new_tokens,
+            source_language=source_language,
+            target_language=target_language,
         )
         result = result.strip()
         if not result:
@@ -340,7 +373,7 @@ async def on_startup() -> None:
     state.started_at = time.time()
     api_active_requests = 0
     api_translation_queue = None
-    if options.backend != "local":
+    if options.backend in PROVIDERS:
         profile = selected_api_profile()
         issue = validate_provider_settings(profile, options.backend) if profile else "API settings are unavailable"
         state.device = "api"
@@ -360,6 +393,12 @@ async def on_startup() -> None:
     queue_task = asyncio.create_task(
         translation_queue.run(default_max_new_tokens=MAX_NEW_TOKENS)
     )
+    if options.backend == "translator_api":
+        state.model = "Browser Translator API"
+        state.dtype = "browser"
+        state.model_mode = "on-device"
+        debug("startup", f"backend: translator_api\nport: {options.port}")
+        return
     profile = active_model_profile()
     debug("startup", f"model: {profile.model_id}\nport: {options.port}")
 
@@ -392,7 +431,8 @@ async def health(response: Response) -> dict[str, object]:
         "workerConnected": state.worker_connected,
         "ready": state.worker_ready,
         "model": state.model if options.backend != "local" else profile.model_id,
-        "dtype": "api" if options.backend != "local" else profile.dtype,
+        "dtype": ("api" if options.backend in PROVIDERS else
+                  "browser" if options.backend == "translator_api" else profile.dtype),
         # The per-process capability is readable by native loopback clients.
         # Same-origin policy prevents an unrelated website from reading it,
         # while /shutdown additionally checks Origin and the custom header.
@@ -423,7 +463,7 @@ async def ready() -> dict[str, object]:
 
 @app.post("/worker/reopen")
 async def reopen_worker() -> dict[str, object]:
-    if options.backend != "local":
+    if options.backend not in BROWSER_BACKENDS:
         return {"ok": state.worker_ready, "workerConnected": False,
                 "backend": options.backend, "state": state.state}
     if state.worker_connected:
@@ -494,6 +534,9 @@ async def post_model_cache_file(url: str, request: Request) -> dict[str, object]
 
 @app.post("/model/prepare")
 async def prepare_model() -> dict[str, object]:
+    if options.backend == "translator_api":
+        return {"ok": state.worker_ready, "state": state.state,
+                "backend": options.backend, "model": state.model}
     if options.backend != "local":
         return {"ok": True, "state": "API", "backend": options.backend, "model": state.model}
     return await asyncio.to_thread(model_download_manager.start)
@@ -501,6 +544,9 @@ async def prepare_model() -> dict[str, object]:
 
 @app.get("/model/status")
 async def model_status() -> dict[str, object]:
+    if options.backend == "translator_api":
+        return {"state": state.state, "complete": state.worker_ready,
+                "backend": options.backend, "model": state.model}
     if options.backend != "local":
         return {"state": "API", "complete": True, "backend": options.backend, "model": state.model}
     return await asyncio.to_thread(model_download_manager.status)
@@ -509,6 +555,11 @@ async def model_status() -> dict[str, object]:
 @app.get("/worker.html")
 async def worker_html() -> FileResponse:
     return FileResponse(assets_dir() / "worker.html")
+
+
+@app.get("/translator_api_worker.html")
+async def translator_api_worker_html() -> FileResponse:
+    return FileResponse(assets_dir() / "translator_api_worker.html")
 
 
 @app.api_route("/models/{relative_path:path}", methods=["GET", "HEAD"])
@@ -580,7 +631,10 @@ async def overlay_test(body: TranslateBody) -> dict[str, object]:
 
 @app.websocket("/ws/worker")
 async def worker_ws(websocket: WebSocket) -> None:
-    if options.backend != "local":
+    if options.backend not in BROWSER_BACKENDS:
+        await websocket.close(code=1008)
+        return
+    if not _is_trusted_shutdown_origin(websocket.headers.get("origin")):
         await websocket.close(code=1008)
         return
     await websocket.accept()
@@ -607,17 +661,30 @@ async def worker_ws(websocket: WebSocket) -> None:
                 state.state = "WORKER_LOADING"
                 debug("worker_loading", str(message.get("message", "")))
 
+            elif msg_type == "activation_required" and options.backend == "translator_api":
+                if worker_activator is None:
+                    error("translator_api_activation", "browser activator is unavailable")
+                else:
+                    try:
+                        await asyncio.to_thread(worker_activator)
+                    except Exception as exc:
+                        error("translator_api_activation", exc)
+
             elif msg_type == "ready":
-                profile = active_model_profile()
                 reported_model = str(message.get("model") or "")
                 reported_dtype = str(message.get("dtype") or "")
+                if options.backend == "translator_api":
+                    expected_model, expected_dtype = "Browser Translator API", "browser"
+                else:
+                    profile = active_model_profile()
+                    expected_model, expected_dtype = profile.model_id, profile.dtype
                 if (
-                    reported_model != profile.model_id
-                    or reported_dtype != profile.dtype
+                    reported_model != expected_model
+                    or reported_dtype != expected_dtype
                 ):
                     detail = (
                         "worker profile mismatch: "
-                        f"expected {profile.model_id}/{profile.dtype}, "
+                        f"expected {expected_model}/{expected_dtype}, "
                         f"received {reported_model}/{reported_dtype}"
                     )
                     _clear_current_worker(websocket, detail)

@@ -1,0 +1,1431 @@
+
+=== DEBUG ===
+time: 2026-10-10T10:47:14.551+09:00
+component: HYTrans
+stage: logging
+pid: 1488
+thread: MainThread
+debug logging enabled: True
+
+=== DEBUG ===
+time: 2026-10-10T10:47:14.984+09:00
+component: HYTrans
+stage: startup
+pid: 1488
+thread: HYTransServer
+backend: translator_api
+port: 17096
+
+=== DEBUG ===
+time: 2026-10-10T10:47:16.237+09:00
+component: HYTrans
+stage: private_worker_start
+pid: 1488
+thread: MainThread
+C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+--headless=new
+--edge-skip-compat-layer-relaunch
+--user-data-dir=C:\Users\chuum\OneDrive\문서\GitHub\MekiCopy\ChromeProfile\translator-api-msedge-17096
+--no-first-run
+--no-default-browser-check
+--disable-extensions
+--disable-background-mode
+--disable-background-timer-throttling
+--disable-renderer-backgrounding
+--disable-backgrounding-occluded-windows
+--window-size=800,600
+--remote-debugging-port=0
+http://127.0.0.1:17096/translator_api_worker.html
+
+=== DEBUG ===
+time: 2026-10-10T10:47:23.457+09:00
+component: HYTrans
+stage: worker_connected
+pid: 1488
+thread: HYTransServer
+websocket connected
+
+=== DEBUG ===
+time: 2026-10-10T10:47:23.624+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+HYTrans에 연결되었습니다. Translator API를 확인합니다.
+
+=== DEBUG ===
+time: 2026-10-10T10:47:23.636+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 모델 다운로드를 시작하려면 위 버튼을 클릭하세요.
+
+=== DEBUG ===
+time: 2026-10-10T10:47:24.005+09:00
+component: HYTrans
+stage: translator_api_activation
+pid: 1488
+thread: MainThread
+trusted browser click delivered
+
+=== DEBUG ===
+time: 2026-10-10T10:47:24.080+09:00
+component: HYTrans
+stage: main
+pid: 1488
+thread: MainThread
+server running on 127.0.0.1:17096
+
+=== DEBUG ===
+time: 2026-10-10T10:47:24.638+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델을 준비하는 중...
+
+=== DEBUG ===
+time: 2026-10-10T10:47:41.958+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (0%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:42.272+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (5%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:43.471+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (11%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:43.796+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (16%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:44.144+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (21%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:44.679+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (28%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:45.792+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (33%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:46.095+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (38%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:46.380+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (43%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:46.666+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (48%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:47.477+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (54%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:47.796+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (60%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:48.634+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (65%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:49.415+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (71%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:50.160+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (76%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:51.134+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (81%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:54.073+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (84%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:56.366+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (85%)
+
+=== DEBUG ===
+time: 2026-10-10T10:47:58.393+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (86%)
+
+=== DEBUG ===
+time: 2026-10-10T10:48:00.408+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (86%)
+
+=== DEBUG ===
+time: 2026-10-10T10:48:02.432+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (86%)
+
+=== DEBUG ===
+time: 2026-10-10T10:48:04.498+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (88%)
+
+=== DEBUG ===
+time: 2026-10-10T10:48:06.406+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (93%)
+
+=== DEBUG ===
+time: 2026-10-10T10:48:08.023+09:00
+component: HYTrans
+stage: worker_loading
+pid: 1488
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (98%)
+
+=== DEBUG ===
+time: 2026-10-10T10:48:23.556+09:00
+component: HYTrans
+stage: worker_ready
+pid: 1488
+thread: HYTransServer
+{"type": "ready", "device": "browser", "model": "Browser Translator API", "dtype": "browser", "modelMode": "on-device"}
+
+=== DEBUG ===
+time: 2026-10-10T10:48:31.612+09:00
+component: HYTrans
+stage: queue_submit
+pid: 1488
+thread: HYTransServer
+id: 26f20e50-ba07-4dbb-80ff-01b0e18475a6
+chars: 17
+max_new_tokens: 2048
+
+=== DEBUG ===
+time: 2026-10-10T10:48:31.917+09:00
+component: HYTrans
+stage: translation_success
+pid: 1488
+thread: HYTransServer
+input_chars: 17
+output_chars: 20
+max_new_tokens: 2048
+realtime: False
+
+=== DEBUG ===
+time: 2026-10-10T10:48:41.566+09:00
+component: HYTrans
+stage: worker_disconnected
+pid: 1488
+thread: HYTransServer
+websocket disconnected
+
+=== DEBUG ===
+time: 2026-10-10T10:50:34.719+09:00
+component: HYTrans
+stage: logging
+pid: 39360
+thread: MainThread
+debug logging enabled: True
+
+=== DEBUG ===
+time: 2026-10-10T10:50:34.832+09:00
+component: HYTrans
+stage: startup
+pid: 39360
+thread: HYTransServer
+backend: translator_api
+port: 17096
+
+=== DEBUG ===
+time: 2026-10-10T10:50:35.348+09:00
+component: HYTrans
+stage: private_worker_start
+pid: 39360
+thread: MainThread
+C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+--headless=new
+--edge-skip-compat-layer-relaunch
+--user-data-dir=C:\Users\chuum\OneDrive\문서\GitHub\MekiCopy\ChromeProfile\translator-api-msedge-17096
+--no-first-run
+--no-default-browser-check
+--disable-extensions
+--disable-background-mode
+--disable-background-timer-throttling
+--disable-renderer-backgrounding
+--disable-backgrounding-occluded-windows
+--window-size=800,600
+--remote-debugging-port=0
+http://127.0.0.1:17096/translator_api_worker.html
+
+=== DEBUG ===
+time: 2026-10-10T10:50:38.841+09:00
+component: HYTrans
+stage: worker_connected
+pid: 39360
+thread: HYTransServer
+websocket connected
+
+=== DEBUG ===
+time: 2026-10-10T10:50:38.894+09:00
+component: HYTrans
+stage: worker_loading
+pid: 39360
+thread: HYTransServer
+HYTrans에 연결되었습니다. Translator API를 확인합니다.
+
+=== DEBUG ===
+time: 2026-10-10T10:50:38.897+09:00
+component: HYTrans
+stage: worker_loading
+pid: 39360
+thread: HYTransServer
+ja → ko 브라우저 모델을 준비하는 중...
+
+=== DEBUG ===
+time: 2026-10-10T10:50:38.933+09:00
+component: HYTrans
+stage: translator_api_activation
+pid: 39360
+thread: MainThread
+trusted browser click delivered
+
+=== DEBUG ===
+time: 2026-10-10T10:50:38.945+09:00
+component: HYTrans
+stage: main
+pid: 39360
+thread: MainThread
+server running on 127.0.0.1:17096
+
+=== DEBUG ===
+time: 2026-10-10T10:50:44.592+09:00
+component: HYTrans
+stage: worker_loading
+pid: 39360
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (0%)
+
+=== DEBUG ===
+time: 2026-10-10T10:50:44.594+09:00
+component: HYTrans
+stage: worker_loading
+pid: 39360
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (100%)
+
+=== DEBUG ===
+time: 2026-10-10T10:50:44.600+09:00
+component: HYTrans
+stage: worker_ready
+pid: 39360
+thread: HYTransServer
+{"type": "ready", "device": "browser", "model": "Browser Translator API", "dtype": "browser", "modelMode": "on-device"}
+
+=== DEBUG ===
+time: 2026-10-10T10:50:54.972+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:50:55.164+09:00
+component: HYTrans
+stage: worker_disconnected
+pid: 39360
+thread: HYTransServer
+websocket disconnected
+
+=== DEBUG ===
+time: 2026-10-10T10:50:55.824+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:50:56.327+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:50:56.329+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:50:56.833+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:50:56.835+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:50:57.337+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:50:57.339+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:50:57.842+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:50:57.845+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:50:58.348+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:50:58.350+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:50:58.853+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:50:58.856+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:50:59.359+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:50:59.361+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:50:59.863+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:50:59.865+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:00.368+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:00.370+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:00.872+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:00.874+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:01.377+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:01.379+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:01.884+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:01.886+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:02.389+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:02.391+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:02.894+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:02.896+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:03.399+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:03.401+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:03.904+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:03.906+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:04.409+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:04.411+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:04.914+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:04.916+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:05.419+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:05.421+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:05.924+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:05.926+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:06.428+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:06.432+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:06.939+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:06.941+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:07.443+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:07.445+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:07.950+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:07.952+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:08.457+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:08.460+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:08.963+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:08.966+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:09.470+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:09.472+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:09.974+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:09.976+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:10.479+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:10.481+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:10.983+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:10.986+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:11.488+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:11.489+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:11.992+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:11.994+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:12.497+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:12.500+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:13.003+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:13.008+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:13.512+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:13.515+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:14.018+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:14.021+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:14.525+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:14.526+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:15.030+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:15.032+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:15.534+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:15.537+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:16.039+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:16.041+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:16.543+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:16.546+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:17.049+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:17.051+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:17.554+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:17.556+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:18.059+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:18.061+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:18.564+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:18.566+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:19.070+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:19.073+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:19.576+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:19.578+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:20.081+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:20.084+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:20.587+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:20.590+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:21.099+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:21.102+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:21.604+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:21.606+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:22.109+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:22.111+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:22.613+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:22.616+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:23.119+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+stopping private browser
+
+=== DEBUG ===
+time: 2026-10-10T10:51:23.121+09:00
+component: HYTrans
+stage: shutdown
+pid: 39360
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:33.954+09:00
+component: HYTrans
+stage: logging
+pid: 24424
+thread: MainThread
+debug logging enabled: True
+
+=== DEBUG ===
+time: 2026-10-10T10:51:34.063+09:00
+component: HYTrans
+stage: startup
+pid: 24424
+thread: HYTransServer
+backend: translator_api
+port: 17096
+
+=== DEBUG ===
+time: 2026-10-10T10:51:34.538+09:00
+component: HYTrans
+stage: private_worker_start
+pid: 24424
+thread: MainThread
+C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+--headless=new
+--edge-skip-compat-layer-relaunch
+--user-data-dir=C:\Users\chuum\OneDrive\문서\GitHub\MekiCopy\ChromeProfile\translator-api-msedge-17096
+--no-first-run
+--no-default-browser-check
+--disable-extensions
+--disable-background-mode
+--disable-background-timer-throttling
+--disable-renderer-backgrounding
+--disable-backgrounding-occluded-windows
+--window-size=800,600
+--remote-debugging-port=0
+http://127.0.0.1:17096/translator_api_worker.html
+
+=== DEBUG ===
+time: 2026-10-10T10:51:37.850+09:00
+component: HYTrans
+stage: worker_connected
+pid: 24424
+thread: HYTransServer
+websocket connected
+
+=== DEBUG ===
+time: 2026-10-10T10:51:37.890+09:00
+component: HYTrans
+stage: worker_loading
+pid: 24424
+thread: HYTransServer
+HYTrans에 연결되었습니다. Translator API를 확인합니다.
+
+=== DEBUG ===
+time: 2026-10-10T10:51:37.893+09:00
+component: HYTrans
+stage: worker_loading
+pid: 24424
+thread: HYTransServer
+ja → ko 브라우저 모델을 준비하는 중...
+
+=== DEBUG ===
+time: 2026-10-10T10:51:37.992+09:00
+component: HYTrans
+stage: translator_api_activation
+pid: 24424
+thread: MainThread
+trusted browser click delivered
+
+=== DEBUG ===
+time: 2026-10-10T10:51:38.002+09:00
+component: HYTrans
+stage: main
+pid: 24424
+thread: MainThread
+server running on 127.0.0.1:17096
+
+=== DEBUG ===
+time: 2026-10-10T10:51:42.926+09:00
+component: HYTrans
+stage: worker_loading
+pid: 24424
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (0%)
+
+=== DEBUG ===
+time: 2026-10-10T10:51:42.929+09:00
+component: HYTrans
+stage: worker_loading
+pid: 24424
+thread: HYTransServer
+ja → ko 브라우저 모델 다운로드 중 (100%)
+
+=== DEBUG ===
+time: 2026-10-10T10:51:42.932+09:00
+component: HYTrans
+stage: worker_ready
+pid: 24424
+thread: HYTransServer
+{"type": "ready", "device": "browser", "model": "Browser Translator API", "dtype": "browser", "modelMode": "on-device"}
+
+=== DEBUG ===
+time: 2026-10-10T10:51:58.204+09:00
+component: HYTrans
+stage: worker_disconnected
+pid: 24424
+thread: HYTransServer
+websocket disconnected
+
+=== DEBUG ===
+time: 2026-10-10T10:51:59.329+09:00
+component: HYTrans
+stage: shutdown
+pid: 24424
+thread: MainThread
+private browser stopped
+
+=== DEBUG ===
+time: 2026-10-10T10:51:59.832+09:00
+component: HYTrans
+stage: shutdown
+pid: 24424
+thread: MainThread
+HYTrans server thread exited

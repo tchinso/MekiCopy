@@ -25,6 +25,8 @@ class TranslationJob:
     future: asyncio.Future[str]
     created_at: float
     max_new_tokens: int | None = None
+    source_language: str | None = None
+    target_language: str | None = None
     abandoned: bool = False
     worker_ws: Any = None
 
@@ -194,6 +196,8 @@ class TranslationQueue:
         timeout: int,
         *,
         max_new_tokens: int | None = None,
+        source_language: str | None = None,
+        target_language: str | None = None,
     ) -> str:
         if not self.worker_available:
             raise RuntimeError("worker is not connected")
@@ -204,6 +208,8 @@ class TranslationQueue:
             future=loop.create_future(),
             created_at=time.time(),
             max_new_tokens=max_new_tokens,
+            source_language=source_language,
+            target_language=target_language,
         )
         try:
             # Do not await capacity here.  A full browser-worker queue is an
@@ -292,6 +298,10 @@ class TranslationQueue:
                         "text": job.text,
                         "max_new_tokens": job.max_new_tokens or default_max_new_tokens,
                     }
+                    if job.source_language is not None:
+                        payload["sourceLanguage"] = job.source_language
+                    if job.target_language is not None:
+                        payload["targetLanguage"] = job.target_language
                     await worker.send_text(json.dumps(payload, ensure_ascii=False))
                     await asyncio.shield(job.future)
                 except asyncio.CancelledError:

@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from service_ports import HYTRANS_DEFAULT_PORT, OVERLAYER_DEFAULT_PORT
 
-from .api_settings import ApiSettings, ProviderSettings, load_api_settings, normalize_backend
+from .api_settings import ApiSettings, PROVIDERS, ProviderSettings, load_api_settings, normalize_backend
 
 from .model_files import (
     DEFAULT_MODEL_ID,
@@ -125,11 +125,11 @@ def configure_server(
     options.model_id = profile.key
     options.backend = normalize_backend(backend)
     options.api_config = str(api_config) if api_config else None
-    options.api_settings = load_api_settings(api_config) if options.backend != "local" else None
+    options.api_settings = load_api_settings(api_config) if options.backend in PROVIDERS else None
 
 
 def selected_api_profile() -> ProviderSettings | None:
-    if options.backend == "local":
+    if options.backend not in PROVIDERS:
         return None
     settings = options.api_settings or load_api_settings(options.api_config)
     return settings.profiles[options.backend]
@@ -144,6 +144,8 @@ def _model_path(profile: ModelProfile) -> Path:
 
 
 def detect_model_mode() -> str:
+    if options.backend == "translator_api":
+        return "on-device"
     if options.backend != "local":
         return "api"
     profile = selected_model_profile()
@@ -164,6 +166,18 @@ def has_local_wasm_files() -> bool:
 
 
 def runtime_config() -> RuntimeConfig:
+    if options.backend == "translator_api":
+        return RuntimeConfig(
+            backend="translator_api",
+            modelKey="translator_api",
+            modelId="Browser Translator API",
+            revision="",
+            dtype="browser",
+            promptTemplate="",
+            modelMode="on-device",
+            modelFiles={},
+            debugLog=options.debug_log,
+        )
     if options.backend != "local":
         profile = selected_api_profile()
         return RuntimeConfig(

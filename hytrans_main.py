@@ -15,11 +15,12 @@ from app_identity import set_windows_app_id
 from hytrans.app import (
     app,
     configure_shutdown_handler,
+    configure_worker_activator,
     configure_worker_opener,
     state,
 )
 from hytrans.browser import BrowserManager
-from hytrans.api_settings import BACKEND_LABELS
+from hytrans.api_settings import BACKEND_LABELS, BROWSER_BACKENDS
 from hytrans.config import DEFAULT_OVERLAY_URL, DEFAULT_PORT, HOST, configure_server
 from hytrans.logging_setup import configure_logging, debug, error
 from hytrans.model_files import DEFAULT_MODEL_ID, SUPPORTED_MODEL_IDS
@@ -109,8 +110,18 @@ def main() -> int:
     server: uvicorn.Server | None = None
     server_thread: threading.Thread | None = None
     shutdown_requested = threading.Event()
-    worker_url = f"http://{args.host}:{args.port}/worker.html"
-    configure_worker_opener(lambda: browser.start(worker_url) if args.backend == "local" else None)
+    worker_page = (
+        "translator_api_worker.html" if args.backend == "translator_api" else "worker.html"
+    )
+    worker_url = f"http://{args.host}:{args.port}/{worker_page}"
+    configure_worker_opener(
+        lambda: browser.start(worker_url, translator_api=args.backend == "translator_api")
+        if args.backend in BROWSER_BACKENDS else None
+    )
+    configure_worker_activator(
+        lambda: browser.activate_translator_api(worker_url)
+        if args.backend == "translator_api" else None
+    )
     try:
         ensure_port_available(args.host, args.port)
         config = uvicorn.Config(
@@ -119,6 +130,7 @@ def main() -> int:
             port=args.port,
             log_level="warning",
             access_log=False,
+            timeout_graceful_shutdown=5,
         )
         server = uvicorn.Server(config)
         configure_shutdown_handler(
@@ -135,17 +147,20 @@ def main() -> int:
         if not wait_server_ready(args.host, args.port):
             raise RuntimeError("HYTrans server failed to start")
 
-        if args.backend == "local" and not args.no_browser:
+        if args.backend in BROWSER_BACKENDS and not args.no_browser:
             state.state = "WORKER_STARTING"
-            browser.start(worker_url)
+            browser.start(worker_url, translator_api=args.backend == "translator_api")
 
         debug("main", f"server running on {args.host}:{args.port}")
+        browser_stopped_for_shutdown = False
         while server_thread.is_alive():
-            if shutdown_requested.is_set():
+            if shutdown_requested.is_set() and not browser_stopped_for_shutdown:
                 # Release the private worker profile and ONNX resources before the
                 # listening port disappears. MekiCopy waits for that port to
                 # close before launching the replacement HYTrans instance.
                 if browser.stop():
+                    browser_stopped_for_shutdown = True
+                    debug("shutdown", "private browser stopped")
                     server.should_exit = True
                 else:
                     debug(
@@ -154,6 +169,7 @@ def main() -> int:
                         "open so the restart controller can force-stop it",
                     )
             time.sleep(0.5)
+        debug("shutdown", "HYTrans server thread exited")
         return 0
     except KeyboardInterrupt:
         return 0
@@ -167,6 +183,7 @@ def main() -> int:
             server_thread.join(timeout=10)
         browser.stop()
         configure_shutdown_handler(None)
+        configure_worker_activator(None)
         configure_worker_opener(None)
 
 

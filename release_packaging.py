@@ -40,7 +40,7 @@ def source_fingerprint(source_root: Path) -> str:
     # The browser runtime manifest already includes hashes of the large WASM
     # payloads. The build validates it against those files before packaging.
     inputs.update((source_root / "assets").glob("*.html"))
-    inputs.update((source_root / "assets").glob("worker*.js"))
+    inputs.update((source_root / "assets").glob("*.js"))
     inputs.add(source_root / "assets" / "runtime_manifest.json")
     digest = hashlib.sha256()
     for path in sorted(inputs, key=lambda item: item.relative_to(source_root).as_posix()):

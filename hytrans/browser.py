@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import threading
+import time
+import urllib.request
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .logging_setup import debug
 from .paths import chrome_profile_dir
@@ -16,38 +20,38 @@ def _creation_flags() -> int:
 
 
 class BrowserManager:
-    """Own the private, headless Chromium runtime used by Transformers.js.
-
-    HYTrans still uses the verified bundled JavaScript/ONNX runtime, but it no
-    longer opens a user-facing app window.  That makes the worker lifecycle
-    belong to HYTrans itself, so a user cannot accidentally close the model
-    runtime while translation is in progress.
-    """
+    """Own the private headless Chromium runtime used by browser backends."""
 
     def __init__(self) -> None:
         self.process: subprocess.Popen | None = None
         self._profile_dir: Path | None = None
+        self._persistent_profile = False
         self._lock = threading.RLock()
 
-    def find_chrome(self) -> str | None:
-        candidates = [
+    def find_chrome(self, *, prefer_edge: bool = False) -> str | None:
+        chrome_candidates = [
             shutil.which("chrome"),
             shutil.which("chrome.exe"),
-            shutil.which("msedge"),
-            shutil.which("msedge.exe"),
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+        edge_candidates = [
+            shutil.which("msedge"),
+            shutil.which("msedge.exe"),
             r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         ]
+        candidates = (edge_candidates + chrome_candidates if prefer_edge
+                      else chrome_candidates + edge_candidates)
         for item in candidates:
             if item and Path(item).exists():
                 return str(item)
         return None
 
     @staticmethod
-    def _worker_command(chrome: str, url: str, profile: Path) -> list[str]:
-        return [
+    def _worker_command(chrome: str, url: str, profile: Path,
+                        *, translator_api: bool = False) -> list[str]:
+        command = [
             chrome,
             "--headless=new",
             # Prevent Edge's compatibility relaunch from escaping the private
@@ -57,25 +61,30 @@ class BrowserManager:
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-extensions",
-            "--disable-background-networking",
             "--disable-background-mode",
             "--disable-background-timer-throttling",
             "--disable-renderer-backgrounding",
             "--disable-backgrounding-occluded-windows",
-            # Keep the previous WebGPU-first behavior while allowing the
-            # worker to fall back to WASM/CPU when no usable adapter exists.
-            "--enable-unsafe-webgpu",
-            "--enable-features=Vulkan",
-            "--disable-gpu-sandbox",
-            # The worker never renders user-facing content. Refuse Chromium's
-            # software rasterizer so an emulated SwiftShader path cannot be
-            # reported as GPU translation while consuming the game's CPU.
-            "--disable-software-rasterizer",
             "--window-size=800,600",
-            url,
         ]
+        if translator_api:
+            # The browser owns and downloads its language-pair models. CDP is
+            # used only to deliver the real click required for a first install.
+            command.append("--remote-debugging-port=0")
+        else:
+            # Keep MT1.5 WebGPU-first, with WASM/CPU fallback. Do not report
+            # software rasterization as GPU translation.
+            command.extend((
+                "--disable-background-networking",
+                "--enable-unsafe-webgpu",
+                "--enable-features=Vulkan",
+                "--disable-gpu-sandbox",
+                "--disable-software-rasterizer",
+            ))
+        command.append(url)
+        return command
 
-    def start(self, url: str) -> None:
+    def start(self, url: str, *, translator_api: bool = False) -> None:
         with self._lock:
             # Reopening after a websocket/model failure must release the old
             # ONNX/WebGPU process tree first.  Merely replacing the Popen handle
@@ -84,25 +93,129 @@ class BrowserManager:
             if not self._stop_locked():
                 raise RuntimeError("the previous HYTrans worker did not stop")
 
-            chrome = self.find_chrome()
+            chrome = self.find_chrome(prefer_edge=translator_api)
             if not chrome:
                 raise RuntimeError("Chrome or Edge was not found")
 
             profile_root = chrome_profile_dir()
             profile_root.mkdir(parents=True, exist_ok=True)
-            # A per-process profile prevents a stopped/relaunched HYTrans
-            # worker from sharing Chromium state with another companion that
-            # is translating at the same time.
-            profile = profile_root / f"worker-{os.getpid()}-{uuid.uuid4().hex}"
-            profile.mkdir(parents=False, exist_ok=False)
-            args = self._worker_command(chrome, url, profile)
+            if translator_api:
+                # Browser-managed translation models live in the profile. Use
+                # a stable, private profile per executable and HYTrans port so
+                # restarting the server does not force another model download.
+                port = urlsplit(url).port or 0
+                profile = profile_root / f"translator-api-{Path(chrome).stem.lower()}-{port}"
+                profile.mkdir(parents=False, exist_ok=True)
+            else:
+                # MT1.5 does not need browser-owned state; keep its isolated,
+                # disposable worker profile.
+                profile = profile_root / f"worker-{os.getpid()}-{uuid.uuid4().hex}"
+                profile.mkdir(parents=False, exist_ok=False)
+            self._persistent_profile = translator_api
+            args = self._worker_command(chrome, url, profile, translator_api=translator_api)
             debug("private_worker_start", "\n".join(args))
             self._profile_dir = profile
             try:
+                if translator_api:
+                    # A crashed predecessor can leave its CDP port file or
+                    # process behind. Only this profile is owned by HYTrans.
+                    self._stop_profile_processes_locked()
+                    (profile / "DevToolsActivePort").unlink(missing_ok=True)
                 self.process = subprocess.Popen(args, creationflags=_creation_flags())
+                if translator_api:
+                    try:
+                        self._activate_translator_api(profile, url)
+                    except Exception as exc:
+                        # A warm model can still initialize without a click.
+                        # The page reports an actionable error if it needs one.
+                        debug("translator_api_activation", str(exc))
             except Exception:
+                self._stop_locked()
                 self._remove_stopped_profile_locked()
                 raise
+
+    def _activate_translator_api(self, profile: Path, url: str) -> None:
+        """Deliver a trusted Chromium click to start an initial model download."""
+        from websockets.sync.client import connect
+
+        deadline = time.monotonic() + 15
+        port_file = profile / "DevToolsActivePort"
+        port: int | None = None
+        while time.monotonic() < deadline:
+            if self.process is None or self.process.poll() is not None:
+                raise RuntimeError("browser exited before Translator API activation")
+            try:
+                port = int(port_file.read_text(encoding="ascii").splitlines()[0])
+                break
+            except (OSError, ValueError, IndexError):
+                time.sleep(0.1)
+        if port is None:
+            raise RuntimeError("browser debugging endpoint did not open")
+
+        target_url = f"http://127.0.0.1:{port}/json/list"
+        websocket_url: str | None = None
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(target_url, timeout=2) as response:
+                    targets = json.load(response)
+                websocket_url = next(
+                    (item["webSocketDebuggerUrl"] for item in targets
+                     if item.get("type") == "page" and item.get("url") == url),
+                    None,
+                )
+                if websocket_url:
+                    break
+            except (OSError, ValueError, KeyError):
+                pass
+            time.sleep(0.1)
+        if websocket_url is None:
+            raise RuntimeError("Translator API browser page did not open")
+
+        with connect(websocket_url, open_timeout=3, close_timeout=1) as socket:
+            request_id = 0
+
+            def call(method: str, params: dict[str, object]) -> dict[str, object]:
+                nonlocal request_id
+                request_id += 1
+                socket.send(json.dumps({"id": request_id, "method": method, "params": params}))
+                while True:
+                    response = json.loads(socket.recv(timeout=3))
+                    if response.get("id") == request_id:
+                        if "error" in response:
+                            raise RuntimeError(str(response["error"]))
+                        return response.get("result", {})
+
+            expression = (
+                "(() => { const b = document.getElementById('translator-start-button'); "
+                "if (!b || b.dataset.armed !== 'true') return null; "
+                "const r = b.getBoundingClientRect(); "
+                "return {x: r.left + r.width / 2, y: r.top + r.height / 2, "
+                "disabled: b.disabled}; })()"
+            )
+            while time.monotonic() < deadline:
+                result = call("Runtime.evaluate", {
+                    "expression": expression, "returnByValue": True,
+                })
+                location = result.get("result", {}).get("value")
+                if isinstance(location, dict):
+                    if location.get("disabled"):
+                        return
+                    x, y = location["x"], location["y"]
+                    for event_type in ("mousePressed", "mouseReleased"):
+                        call("Input.dispatchMouseEvent", {
+                            "type": event_type, "x": x, "y": y,
+                            "button": "left", "clickCount": 1,
+                        })
+                    debug("translator_api_activation", "trusted browser click delivered")
+                    return
+                time.sleep(0.1)
+        raise RuntimeError("Translator API start button was not ready")
+
+    def activate_translator_api(self, url: str) -> None:
+        with self._lock:
+            if self.process is None or self._profile_dir is None or not self._persistent_profile:
+                raise RuntimeError("Translator API browser is not running")
+            self._activate_translator_api(self._profile_dir, url)
 
     def stop(self) -> bool:
         with self._lock:
@@ -140,6 +253,10 @@ class BrowserManager:
         if profile is None:
             return
         self._profile_dir = None
+        persistent = self._persistent_profile
+        self._persistent_profile = False
+        if persistent:
+            return
         try:
             root = chrome_profile_dir().resolve()
             resolved = profile.resolve()

@@ -143,6 +143,9 @@ class MekiSubtitleWindow(tk.Toplevel):
 
     def _refresh_translation_model_label(self) -> None:
         backend = normalize_backend(getattr(self._settings, "hytrans_backend", "local"))
+        if backend == "translator_api":
+            self.translation_model_var.set(f"{BACKEND_LABELS[backend]} · 일본어 → 한국어")
+            return
         if backend != "local":
             model = load_api_settings().profiles[backend].model
             self.translation_model_var.set(f"{BACKEND_LABELS[backend]} · {model}")
@@ -570,17 +573,17 @@ class MekiSubtitleWindow(tk.Toplevel):
                 with urllib.request.urlopen(request, timeout=2) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 backend = str(payload.get("backend") or "local")
-                if payload.get("ready") and (backend != "local" or payload.get("workerConnected")):
+                if payload.get("ready") and (backend not in {"local", "translator_api"} or payload.get("workerConnected")):
                     return base_url
                 state = str(payload.get("state") or "HYTrans 준비 중")
                 error = str(payload.get("error") or "").strip()
                 message = state if not error else f"{state}: {error}"
-                if backend != "local" and error and not payload.get("ready"):
+                if backend not in {"local", "translator_api"} and error and not payload.get("ready"):
                     raise RuntimeError(f"HYTrans API 번역 설정을 확인해 주세요: {error}")
                 if message != last_message:
                     self._emit_status(0.66, f"HYTrans 번역 모델을 기다리고 있습니다: {message}")
                     last_message = message
-                if backend == "local" and state.upper() == "ERROR" and not requested_reopen:
+                if backend in {"local", "translator_api"} and state.upper() == "ERROR" and not requested_reopen:
                     reopen = urllib.request.Request(
                         f"{base_url}/worker/reopen",
                         data=b"{}",
