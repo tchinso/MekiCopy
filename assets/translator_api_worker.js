@@ -1,6 +1,10 @@
 // Browser Translator API runs in this document, not in a Web Worker.
 // API shape: https://learn.microsoft.com/en-us/microsoft-edge/web-platform/translator-api
 const DEFAULT_PAIR = Object.freeze({ sourceLanguage: "ja", targetLanguage: "ko" });
+const MANUAL_ACTIVATION = /(?:\?|&)manual=1(?:&|$)/.test(location.search || "");
+const AVAILABILITY_TIMEOUT_MS = 30_000;
+const MODEL_IDLE_TIMEOUT_MS = 120_000;
+const ACTIVATION_TIMEOUT_MS = MANUAL_ACTIVATION ? 5 * 60_000 : 30_000;
 const sessions = new Map();
 const creations = new Map();
 
@@ -88,6 +92,14 @@ function onDownloadProgress(pair, event) {
   }
 }
 
+function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 function createSessionNow(pair) {
   const key = pairKey(pair);
   if (sessions.has(key)) {
@@ -107,6 +119,22 @@ function createSessionNow(pair) {
   setProgress(0, `${pairLabel(pair)} 브라우저 모델 준비 중`);
   setStatus(`${pairLabel(pair)} 브라우저 모델을 준비하는 중...`);
 
+  let timedOut = false;
+  let finished = false;
+  let lastDownloadedBytes = -1;
+  let timer;
+  let rejectTimeout;
+  const timeout = new Promise((_, reject) => { rejectTimeout = reject; });
+  const renewTimeout = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (finished) return;
+      timedOut = true;
+      rejectTimeout(new Error(`${pairLabel(pair)} Translator API 모델 준비가 2분 동안 진행되지 않았습니다. 인터넷 연결과 브라우저 저장 공간을 확인한 뒤 다시 시도하세요.`));
+    }, MODEL_IDLE_TIMEOUT_MS);
+  };
+  renewTimeout();
+
   // Call create() before returning from a trusted click. Awaiting even one
   // promise first would lose the activation needed for an initial download.
   let creation;
@@ -115,25 +143,44 @@ function createSessionNow(pair) {
       sourceLanguage: pair.sourceLanguage,
       targetLanguage: pair.targetLanguage,
       monitor(monitor) {
-        monitor.addEventListener("downloadprogress", (event) => onDownloadProgress(pair, event));
+        monitor.addEventListener("downloadprogress", (event) => {
+          if (!timedOut && !finished && !disposed) {
+            const downloadedBytes = Number(event.loaded);
+            if (Number.isFinite(downloadedBytes) && downloadedBytes > 0 &&
+                downloadedBytes !== lastDownloadedBytes) {
+              renewTimeout();
+            }
+            lastDownloadedBytes = downloadedBytes;
+            onDownloadProgress(pair, event);
+          }
+        });
       },
     });
   } catch (error) {
+    clearTimeout(timer);
     return Promise.reject(error);
   }
 
-  const tracked = Promise.resolve(creation).then((session) => {
+  const result = Promise.resolve(creation).then((session) => {
+    finished = true;
+    clearTimeout(timer);
     if (!session || typeof session.translate !== "function") {
       throw new Error("브라우저가 올바른 Translator 세션을 반환하지 않았습니다.");
     }
-    if (disposed) {
+    if (disposed || timedOut) {
       session.destroy?.();
-      throw new Error("worker page closed while loading the translator");
+      throw new Error("worker page closed or model initialization timed out");
     }
     sessions.set(key, session);
     setProgress(100, `${pairLabel(pair)} 브라우저 모델 준비 완료`);
     return session;
-  }).finally(() => {
+  }, (error) => {
+    finished = true;
+    clearTimeout(timer);
+    throw error;
+  });
+  const tracked = Promise.race([result, timeout]).finally(() => {
+    clearTimeout(timer);
     creations.delete(key);
   });
   creations.set(key, tracked);
@@ -145,8 +192,18 @@ function waitForTrustedClick(pair) {
   let waiter = gestureWaiters.get(key);
   if (!waiter) {
     let resolve;
-    const promise = new Promise((done) => { resolve = done; });
-    waiter = { promise, resolve };
+    let reject;
+    const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+    waiter = { promise, resolve, reject };
+    waiter.timer = setTimeout(() => {
+      if (gestureWaiters.get(key) === waiter) {
+        gestureWaiters.delete(key);
+        const duration = MANUAL_ACTIVATION ? "5분" : "30초";
+        const failure = new Error(`${pairLabel(pair)} Translator API 모델 시작 버튼에 ${duration} 동안 응답이 없습니다. 브라우저를 다시 시작해 주세요.`);
+        failure.name = "ActivationTimeoutError";
+        reject(failure);
+      }
+    }, ACTIVATION_TIMEOUT_MS);
     gestureWaiters.set(key, waiter);
   }
   pendingGesturePair = pair;
@@ -168,7 +225,10 @@ async function checkAvailability(pair) {
   }
   let availability;
   try {
-    availability = await api.availability(pair);
+    availability = await withTimeout(
+      api.availability(pair), AVAILABILITY_TIMEOUT_MS,
+      `${pairLabel(pair)} Translator API 사용 가능 여부 확인이 30초 동안 응답하지 않았습니다. 브라우저를 다시 시작해 주세요.`,
+    );
   } catch (error) {
     throw new Error(`${pairLabel(pair)} Translator API 사용 가능 여부를 확인하지 못했습니다: ${errorDetail(error)}`);
   }
@@ -248,6 +308,14 @@ async function handleTranslateRequest(request) {
     }
     sendToServer({ type: "result", id: request.id, text: translated.trim() });
   } catch (error) {
+    if (!MANUAL_ACTIVATION && error?.name === "NotAllowedError") {
+      sendToServer({
+        type: "manual_activation_required",
+        message: errorDetail(error),
+        sourceLanguage: pair.sourceLanguage,
+        targetLanguage: pair.targetLanguage,
+      });
+    }
     sendToServer({ type: "error", id: request.id, message: actionableError(error, pair) });
   }
 }
@@ -273,6 +341,18 @@ function connectWebSocket() {
       }
       if (request?.type === "translate") {
         workChain = workChain.then(() => handleTranslateRequest(request));
+      } else if (request?.type === "activation_error") {
+        const pair = {
+          sourceLanguage: request.sourceLanguage || pendingGesturePair.sourceLanguage,
+          targetLanguage: request.targetLanguage || pendingGesturePair.targetLanguage,
+        };
+        const key = pairKey(pair);
+        const waiter = gestureWaiters.get(key);
+        if (waiter) {
+          gestureWaiters.delete(key);
+          clearTimeout(waiter.timer);
+          waiter.reject(new Error(`Translator API 모델 시작 버튼을 자동으로 클릭하지 못했습니다: ${errorDetail(request.message)}`));
+        }
       }
     };
     current.onerror = () => {
@@ -312,6 +392,18 @@ function failStartup(error) {
   startupFailed = true;
   pendingGesturePair = DEFAULT_PAIR;
   const message = actionableError(error, DEFAULT_PAIR);
+  if (!MANUAL_ACTIVATION &&
+      (error?.name === "NotAllowedError" || error?.name === "ActivationTimeoutError")) {
+    setStatus("브라우저에서 직접 모델 시작 버튼을 누를 수 있도록 창을 여는 중...", false);
+    sendToServer({
+      type: "manual_activation_required",
+      message,
+      sourceLanguage: DEFAULT_PAIR.sourceLanguage,
+      targetLanguage: DEFAULT_PAIR.targetLanguage,
+    });
+    button.disabled = true;
+    return;
+  }
   setStatus(`ERROR: ${message}`, false);
   sendToServer({ type: "fatal", message });
   button.disabled = false;
@@ -354,6 +446,7 @@ button.addEventListener("click", () => {
   const waiter = gestureWaiters.get(key);
   if (waiter) {
     gestureWaiters.delete(key);
+    clearTimeout(waiter.timer);
     waiter.resolve({ creation });
   }
 
@@ -383,6 +476,10 @@ window.addEventListener("pagehide", () => {
     try { session.destroy?.(); } catch (_error) { /* Page is closing. */ }
   }
   sessions.clear();
+  for (const waiter of gestureWaiters.values()) {
+    clearTimeout(waiter.timer);
+    waiter.reject(new Error("worker page closed while waiting for a Translator API click"));
+  }
   gestureWaiters.clear();
   socket?.close();
 });

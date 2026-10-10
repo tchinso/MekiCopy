@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -112,6 +113,45 @@ class TranslatorApiBrowserProfileTests(unittest.TestCase):
                     self.assertEqual(command[-1], url)
                 self.assertEqual(activate.call_count, 3)
 
+    def test_interactive_fallback_opens_visible_app_and_skips_cdp(self) -> None:
+        url = "http://127.0.0.1:6996/translator_api_worker.html"
+        browser = BrowserManager()
+        commands: list[list[str]] = []
+        prompt_done = threading.Event()
+
+        def launch(command: list[str], **_kwargs: object) -> _FakeBrowserProcess:
+            commands.append(command)
+            return _FakeBrowserProcess()
+
+        with tempfile.TemporaryDirectory(prefix="hytrans-translator-profile-") as temporary:
+            with (
+                mock.patch("hytrans.browser.chrome_profile_dir", return_value=Path(temporary)),
+                mock.patch.object(BrowserManager, "find_chrome", return_value="msedge.exe"),
+                mock.patch("hytrans.browser.subprocess.Popen", side_effect=launch),
+                mock.patch("hytrans.browser.subprocess.run", return_value=mock.Mock(returncode=0)),
+                mock.patch.object(BrowserManager, "_activate_translator_api") as activate,
+                mock.patch("hytrans.browser._show_interactive_prompt", side_effect=prompt_done.set) as prompt,
+            ):
+                browser.start(url, translator_api=True)
+                original_profile = browser._profile_dir
+                self.assertEqual(activate.call_count, 1)
+
+                browser.start(url, translator_api=True, interactive=True)
+                self.assertTrue(prompt_done.wait(timeout=1))
+                self.assertEqual(browser._profile_dir, original_profile)
+                browser.activate_translator_api(url)
+                self.assertEqual(activate.call_count, 1)
+                interactive_command = commands[-1]
+                self.assertNotIn("--headless=new", interactive_command)
+                self.assertNotIn("--remote-debugging-port=0", interactive_command)
+                self.assertEqual(interactive_command[-1], f"--app={url}?manual=1")
+                self.assertIn(f"--user-data-dir={original_profile}", interactive_command)
+
+                self.assertTrue(browser.stop())
+                browser.start(url, translator_api=True, interactive=True)
+                self.assertTrue(browser.stop())
+                self.assertEqual(prompt.call_count, 1)
+
 
 class _WorkerSocket:
     def __init__(self) -> None:
@@ -215,6 +255,84 @@ class TranslatorApiWorkerTests(unittest.IsolatedAsyncioTestCase):
                 worker_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await worker_task
+
+    async def test_activation_failure_is_reported_to_waiting_worker(self) -> None:
+        worker = _WorkerSocket()
+        with mock.patch.object(
+            server, "worker_activator", side_effect=RuntimeError("CDP click failed")
+        ):
+            worker_task = asyncio.create_task(server.worker_ws(worker))
+            try:
+                await asyncio.wait_for(worker.accepted.wait(), timeout=2)
+                await worker.send({
+                    "type": "activation_required",
+                    "sourceLanguage": "ja",
+                    "targetLanguage": "ko",
+                })
+                reply = await asyncio.wait_for(worker.outgoing.get(), timeout=2)
+                self.assertEqual(reply, {
+                    "type": "activation_error",
+                    "message": "CDP click failed",
+                    "sourceLanguage": "ja",
+                    "targetLanguage": "ko",
+                })
+            finally:
+                await worker.incoming.put(None)
+                await asyncio.wait_for(worker_task, timeout=2)
+
+    async def test_failed_automatic_click_switches_to_interactive_worker(self) -> None:
+        worker = _WorkerSocket()
+        interactive_opener = mock.Mock()
+        with (
+            mock.patch.object(server, "worker_activator", side_effect=RuntimeError("CDP click failed")),
+            mock.patch.object(server, "worker_interactive_opener", interactive_opener),
+        ):
+            worker_task = asyncio.create_task(server.worker_ws(worker))
+            await asyncio.wait_for(worker.accepted.wait(), timeout=2)
+            await worker.send({"type": "activation_required"})
+            await asyncio.wait_for(worker_task, timeout=2)
+        interactive_opener.assert_called_once_with()
+        self.assertFalse(server.state.worker_connected)
+        self.assertFalse(server.state.worker_ready)
+
+        replacement = _WorkerSocket()
+        replacement_task = asyncio.create_task(server.worker_ws(replacement))
+        try:
+            await asyncio.wait_for(replacement.accepted.wait(), timeout=2)
+            await replacement.send({
+                "type": "ready", "model": "Browser Translator API",
+                "dtype": "browser", "device": "browser",
+            })
+            await self._wait_ready()
+            self.assertEqual(server.state.state, "READY")
+        finally:
+            await replacement.incoming.put(None)
+            await asyncio.wait_for(replacement_task, timeout=2)
+
+    async def test_browser_can_request_interactive_worker_after_click_rejection(self) -> None:
+        worker = _WorkerSocket()
+        interactive_opener = mock.Mock()
+        with mock.patch.object(server, "worker_interactive_opener", interactive_opener):
+            worker_task = asyncio.create_task(server.worker_ws(worker))
+            await asyncio.wait_for(worker.accepted.wait(), timeout=2)
+            await worker.send({
+                "type": "manual_activation_required",
+                "message": "user activation required",
+            })
+            await asyncio.wait_for(worker_task, timeout=2)
+        interactive_opener.assert_called_once_with()
+        self.assertFalse(server.state.worker_connected)
+        self.assertEqual(server.state.error, "user activation required")
+
+    async def test_loading_worker_expires_even_while_socket_stays_open(self) -> None:
+        worker = _WorkerSocket()
+        with mock.patch.object(server, "TRANSLATOR_API_STARTUP_TIMEOUT_SECONDS", 0.02):
+            await asyncio.wait_for(server.worker_ws(worker), timeout=2)
+        self.assertEqual(worker.close_code, 1011)
+        self.assertFalse(server.state.worker_connected)
+        self.assertFalse(server.state.worker_ready)
+        self.assertEqual(server.state.state, "ERROR")
+        self.assertIn("did not become ready", server.state.error or "")
 
 
 if __name__ == "__main__":

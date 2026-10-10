@@ -19,13 +19,33 @@ def _creation_flags() -> int:
     return int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
 
 
+def _show_interactive_prompt() -> None:
+    """Explain the real browser click needed for a private Translator API model."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "열린 Translator API 브라우저에서 모델 시작 버튼을 클릭하세요. "
+            "번역을 사용하는 동안 창을 닫지 마세요.",
+            "HYTrans Translator API",
+            0x00050040,  # MB_SETFOREGROUND | MB_TOPMOST | MB_ICONINFORMATION
+        )
+    except Exception as exc:
+        debug("translator_api_prompt", str(exc))
+
+
 class BrowserManager:
-    """Own the private headless Chromium runtime used by browser backends."""
+    """Own the private Chromium runtime used by browser backends."""
 
     def __init__(self) -> None:
         self.process: subprocess.Popen | None = None
         self._profile_dir: Path | None = None
         self._persistent_profile = False
+        self._interactive = False
+        self._manual_prompt_shown = False
         self._lock = threading.RLock()
 
     def find_chrome(self, *, prefer_edge: bool = False) -> str | None:
@@ -50,10 +70,10 @@ class BrowserManager:
 
     @staticmethod
     def _worker_command(chrome: str, url: str, profile: Path,
-                        *, translator_api: bool = False) -> list[str]:
+                        *, translator_api: bool = False,
+                        interactive: bool = False) -> list[str]:
         command = [
             chrome,
-            "--headless=new",
             # Prevent Edge's compatibility relaunch from escaping the private
             # profile/Popen handle that HYTrans owns and shuts down.
             "--edge-skip-compat-layer-relaunch",
@@ -67,10 +87,13 @@ class BrowserManager:
             "--disable-backgrounding-occluded-windows",
             "--window-size=800,600",
         ]
+        if not interactive:
+            command.insert(1, "--headless=new")
         if translator_api:
             # The browser owns and downloads its language-pair models. CDP is
             # used only to deliver the real click required for a first install.
-            command.append("--remote-debugging-port=0")
+            if not interactive:
+                command.append("--remote-debugging-port=0")
         else:
             # Keep MT1.5 WebGPU-first, with WASM/CPU fallback. Do not report
             # software rasterization as GPU translation.
@@ -81,10 +104,17 @@ class BrowserManager:
                 "--disable-gpu-sandbox",
                 "--disable-software-rasterizer",
             ))
-        command.append(url)
+        if interactive:
+            separator = "&" if "?" in url else "?"
+            command.append(f"--app={url}{separator}manual=1")
+        else:
+            command.append(url)
         return command
 
-    def start(self, url: str, *, translator_api: bool = False) -> None:
+    def start(self, url: str, *, translator_api: bool = False,
+              interactive: bool = False) -> None:
+        if interactive and not translator_api:
+            raise ValueError("interactive browser mode requires Translator API")
         with self._lock:
             # Reopening after a websocket/model failure must release the old
             # ONNX/WebGPU process tree first.  Merely replacing the Popen handle
@@ -112,7 +142,13 @@ class BrowserManager:
                 profile = profile_root / f"worker-{os.getpid()}-{uuid.uuid4().hex}"
                 profile.mkdir(parents=False, exist_ok=False)
             self._persistent_profile = translator_api
-            args = self._worker_command(chrome, url, profile, translator_api=translator_api)
+            if not interactive:
+                self._manual_prompt_shown = False
+            self._interactive = interactive
+            args = self._worker_command(
+                chrome, url, profile,
+                translator_api=translator_api, interactive=interactive,
+            )
             debug("private_worker_start", "\n".join(args))
             self._profile_dir = profile
             try:
@@ -120,9 +156,17 @@ class BrowserManager:
                     # A crashed predecessor can leave its CDP port file or
                     # process behind. Only this profile is owned by HYTrans.
                     self._stop_profile_processes_locked()
-                    (profile / "DevToolsActivePort").unlink(missing_ok=True)
+                    if not interactive:
+                        (profile / "DevToolsActivePort").unlink(missing_ok=True)
                 self.process = subprocess.Popen(args, creationflags=_creation_flags())
-                if translator_api:
+                if interactive and not self._manual_prompt_shown:
+                    threading.Thread(
+                        target=_show_interactive_prompt,
+                        name="HYTransManualPrompt",
+                        daemon=True,
+                    ).start()
+                    self._manual_prompt_shown = True
+                if translator_api and not interactive:
                     try:
                         self._activate_translator_api(profile, url)
                     except Exception as exc:
@@ -215,6 +259,8 @@ class BrowserManager:
         with self._lock:
             if self.process is None or self._profile_dir is None or not self._persistent_profile:
                 raise RuntimeError("Translator API browser is not running")
+            if self._interactive:
+                return
             self._activate_translator_api(self._profile_dir, url)
 
     def stop(self) -> bool:
@@ -255,6 +301,7 @@ class BrowserManager:
         self._profile_dir = None
         persistent = self._persistent_profile
         self._persistent_profile = False
+        self._interactive = False
         if persistent:
             return
         try:

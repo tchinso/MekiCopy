@@ -160,7 +160,7 @@ OCR로 인식한 텍스트를 자동으로 번역해 화면에 바로 표시하�
 
 로컬 MT1.5 모드의 HYTrans는 프로그램에 포함된 고정 버전 `Transformers.js 4.2.0`(4.x 최신)과 `ONNX Runtime Web/WASM 1.27.0`을 private headless Chrome 또는 Edge worker에서 로컬로 읽습니다. 네트워크는 선택한 번역 모델을 처음 내려받을 때만 필요하며, 이후에는 `HYTrans/models`의 검증된 모델을 재사용합니다.
 
-**TranslatorAPI**는 Chrome 또는 Edge에 내장된 [Translator API](https://learn.microsoft.com/en-us/microsoft-edge/web-platform/translator-api)를 사용하는 별도의 로컬 번역 방식입니다. 일본어 → 한국어 번역에 별도 API 키나 MT1.5 모델 파일이 필요하지 않습니다. 브라우저에서 해당 언어 쌍을 사용할 수 있어야 하며, 브라우저가 언어 모델을 처음 준비할 때 네트워크 연결과 대기 시간이 필요할 수 있습니다. 언어 모델의 저장과 다운로드는 브라우저가 관리합니다. [Chrome 설명](https://developer.chrome.com/docs/ai/translator-api)도 참고하세요.
+**TranslatorAPI**는 Chrome 또는 Edge에 내장된 [Translator API](https://learn.microsoft.com/en-us/microsoft-edge/web-platform/translator-api)를 사용하는 별도의 로컬 번역 방식입니다. 일본어 → 한국어 번역에 별도 API 키나 MT1.5 모델 파일이 필요하지 않습니다. 브라우저에서 해당 언어 쌍을 사용할 수 있어야 하며, 브라우저가 언어 모델을 처음 준비할 때 네트워크 연결과 대기 시간이 필요할 수 있습니다. 모델 다운로드에 필요한 자동 클릭이 실패하면 TranslatorAPI 브라우저 창과 안내 팝업이 열립니다. 브라우저 창의 **모델 시작** 버튼을 직접 누르고, 번역을 사용하는 동안 그 창을 열어 두세요. 언어 모델의 저장과 다운로드는 브라우저가 관리합니다. [Chrome 설명](https://developer.chrome.com/docs/ai/translator-api)도 참고하세요.
 
 > **로컬 번역 필수 조건:** MT1.5와 TranslatorAPI에는 Google Chrome 또는 Microsoft Edge가 설치되어 있어야 합니다. 클라우드 API 번역에는 브라우저나 로컬 번역 모델이 필요하지 않습니다.
 

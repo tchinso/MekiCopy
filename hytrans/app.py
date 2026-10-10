@@ -51,9 +51,11 @@ api_translation_queue: ApiTranslationQueue | None = None
 api_active_requests = 0
 worker_opener: Callable[[], None] | None = None
 worker_activator: Callable[[], None] | None = None
+worker_interactive_opener: Callable[[], None] | None = None
 worker_open_task: asyncio.Task[None] | None = None
 shutdown_handler: Callable[[], None] | None = None
 shutdown_token: str | None = None
+TRANSLATOR_API_STARTUP_TIMEOUT_SECONDS = 10 * 60
 
 
 class ModelFileResponse(FileResponse):
@@ -116,6 +118,25 @@ def configure_worker_opener(opener: Callable[[], None] | None) -> None:
 def configure_worker_activator(activator: Callable[[], None] | None) -> None:
     global worker_activator
     worker_activator = activator
+
+
+def configure_worker_interactive_opener(opener: Callable[[], None] | None) -> None:
+    global worker_interactive_opener
+    worker_interactive_opener = opener
+
+
+async def _open_interactive_worker(websocket: WebSocket, reason: str) -> bool:
+    if worker_interactive_opener is None:
+        return False
+    debug("translator_api_manual_activation", reason)
+    _clear_current_worker(websocket, reason)
+    try:
+        await asyncio.to_thread(worker_interactive_opener)
+    except Exception as exc:
+        state.error = str(exc) or type(exc).__name__
+        error("translator_api_manual_activation", exc)
+        return False
+    return True
 
 
 async def _open_worker_singleflight() -> None:
@@ -647,10 +668,27 @@ async def worker_ws(websocket: WebSocket) -> None:
     state.warning = None
     state.error = None
     debug("worker_connected", "websocket connected")
+    startup_deadline = (
+        time.monotonic() + TRANSLATOR_API_STARTUP_TIMEOUT_SECONDS
+        if options.backend == "translator_api" else None
+    )
 
     try:
         while True:
-            raw = await websocket.receive_text()
+            if startup_deadline is not None and not state.worker_ready:
+                try:
+                    raw = await asyncio.wait_for(
+                        websocket.receive_text(),
+                        timeout=max(0, startup_deadline - time.monotonic()),
+                    )
+                except asyncio.TimeoutError:
+                    detail = "Translator API worker did not become ready within 10 minutes"
+                    if _clear_current_worker(websocket, detail):
+                        error("translator_api_startup_timeout", detail)
+                    await websocket.close(code=1011)
+                    return
+            else:
+                raw = await websocket.receive_text()
             if not translation_queue.is_current_worker(websocket):
                 debug("worker_stale", "ignoring message from replaced websocket")
                 return
@@ -662,13 +700,37 @@ async def worker_ws(websocket: WebSocket) -> None:
                 debug("worker_loading", str(message.get("message", "")))
 
             elif msg_type == "activation_required" and options.backend == "translator_api":
+                activation_error = None
                 if worker_activator is None:
-                    error("translator_api_activation", "browser activator is unavailable")
+                    activation_error = "browser activator is unavailable"
                 else:
                     try:
                         await asyncio.to_thread(worker_activator)
                     except Exception as exc:
-                        error("translator_api_activation", exc)
+                        activation_error = str(exc) or type(exc).__name__
+                if activation_error:
+                    error("translator_api_activation", activation_error)
+                    if await _open_interactive_worker(websocket, activation_error):
+                        return
+                    if translation_queue.is_current_worker(websocket):
+                        await websocket.send_text(json.dumps({
+                            "type": "activation_error",
+                            "message": activation_error,
+                            "sourceLanguage": message.get("sourceLanguage"),
+                            "targetLanguage": message.get("targetLanguage"),
+                        }))
+
+            elif msg_type == "manual_activation_required" and options.backend == "translator_api":
+                detail = str(message.get("message") or "a browser click is required")
+                if await _open_interactive_worker(websocket, detail):
+                    return
+                if translation_queue.is_current_worker(websocket):
+                    await websocket.send_text(json.dumps({
+                        "type": "activation_error",
+                        "message": detail,
+                        "sourceLanguage": message.get("sourceLanguage"),
+                        "targetLanguage": message.get("targetLanguage"),
+                    }))
 
             elif msg_type == "ready":
                 reported_model = str(message.get("model") or "")

@@ -16,6 +16,7 @@ from hytrans.app import (
     app,
     configure_shutdown_handler,
     configure_worker_activator,
+    configure_worker_interactive_opener,
     configure_worker_opener,
     state,
 )
@@ -122,6 +123,10 @@ def main() -> int:
         lambda: browser.activate_translator_api(worker_url)
         if args.backend == "translator_api" else None
     )
+    configure_worker_interactive_opener(
+        lambda: browser.start(worker_url, translator_api=True, interactive=True)
+        if args.backend == "translator_api" else None
+    )
     try:
         ensure_port_available(args.host, args.port)
         config = uvicorn.Config(
@@ -184,6 +189,7 @@ def main() -> int:
         browser.stop()
         configure_shutdown_handler(None)
         configure_worker_activator(None)
+        configure_worker_interactive_opener(None)
         configure_worker_opener(None)
 
 

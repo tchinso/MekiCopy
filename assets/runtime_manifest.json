@@ -49,13 +49,13 @@
                   },
                   {
                       "path":  "translator_api_worker.html",
-                      "size":  1635,
-                      "sha256":  "540cdff3aeb457d35d466fb48a9d30e5862153d0a886c4099df38fc43e2fc42f"
+                      "size":  1780,
+                      "sha256":  "c5a4cc924be76330d82a41a792497eb8866c64715d48185d64fce88f80826d9b"
                   },
                   {
                       "path":  "translator_api_worker.js",
-                      "size":  13212,
-                      "sha256":  "54cd549e9d0272cd301b56f0168ed453a3a59d1cd8e77ba2b033175f75c4a0cf"
+                      "size":  17227,
+                      "sha256":  "555618936526b92be7f010299023c5207041e7719ba6debfb837efb3ebdba124"
                   },
                   {
                       "path":  "wasm/ort-wasm-simd-threaded.asyncify.mjs",
