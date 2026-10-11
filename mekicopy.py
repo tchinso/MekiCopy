@@ -3223,9 +3223,9 @@ def main() -> None:
         from importlib.metadata import version
 
         meikiocr_version = version("meikiocr")
-        if meikiocr_version != "0.3.4":
+        if meikiocr_version != "0.3.5":
             raise RuntimeError(
-                f"unexpected meikiocr version: {meikiocr_version} (expected 0.3.4)"
+                f"unexpected meikiocr version: {meikiocr_version} (expected 0.3.5)"
             )
         engine = _get_ocr_engine()
         _log_runtime_message(

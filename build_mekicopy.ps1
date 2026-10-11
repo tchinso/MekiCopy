@@ -17,7 +17,7 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $PipVersion = "26.2.1"
 $RequirementsFile = Join-Path $PSScriptRoot "requirements-build.txt"
-$OnnxRuntimeGpuVersion = "1.30.0"
+$OnnxRuntimeGpuVersion = "1.31.0"
 
 function Test-BuildPython {
     param([Parameter(Mandatory = $true)][string]$Candidate)
@@ -187,10 +187,10 @@ function Assert-RuntimeAssetManifest {
         throw "$Description runtime manifest is invalid JSON: $manifestPath"
     }
 
-    if ($manifest.transformers.version -cne "4.2.0") {
+    if ($manifest.transformers.version -cne "4.3.0") {
         throw "$Description has an unexpected Transformers.js version"
     }
-    if ($manifest.onnxRuntimeWeb.version -cne "1.27.0") {
+    if ($manifest.onnxRuntimeWeb.version -cne "1.30.0") {
         throw "$Description has an unexpected ONNX Runtime Web version"
     }
 
@@ -710,19 +710,19 @@ root.withdraw()
 root.update_idletasks()
 root.destroy()
 expected = {
-    "meikiocr": "0.3.4",
+    "meikiocr": "0.3.5",
     "pyinstaller": "6.22.3",
     "mss": "10.2.0",
     "pillow": "12.3.0",
-    "numpy": "2.5.3",
+    "numpy": "2.5.4",
     "opencv-python-headless": "5.0.0.93",
-    "fastapi": "0.141.1",
-    "uvicorn": "0.53.0",
-    "pydantic": "2.13.5",
-    "typer": "0.27.2",
-    "huggingface-hub": "1.31.0",
-    "onnxruntime": "1.30.0",
-    "onnxruntime-gpu": "1.30.0",
+    "fastapi": "0.143.0",
+    "uvicorn": "0.54.0",
+    "pydantic": "2.14.0",
+    "typer": "0.27.3",
+    "huggingface-hub": "2.2.0",
+    "onnxruntime": "1.31.0",
+    "onnxruntime-gpu": "1.31.0",
     "sherpa-onnx": "1.13.8",
     "SoundCard": "0.4.6",
 }
@@ -736,7 +736,7 @@ if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
         "onnxruntime-gpu metadata is installed, but CUDAExecutionProvider is missing; "
         "the CPU wheel likely overwrote the GPU runtime"
     )
-# ONNX Runtime 1.30 uses CUDA 13's consolidated package layout. The CUDA
+# ONNX Runtime 1.31 uses CUDA 13's consolidated package layout. The CUDA
 # extras share ``nvidia.cu13`` while cuDNN remains in ``nvidia.cudnn``.
 # Checking the importable namespaces catches a partial extras install before
 # PyInstaller can silently create a CPU-only release.
@@ -944,7 +944,7 @@ Assert-ArtifactPattern `
     -FilePattern "onnxruntime_pybind11_state*.pyd" `
     -Description "MekiCopy ONNX Runtime Python extension"
 $cudaRuntimeArtifacts = @(
-    # ONNX Runtime 1.30 is built for CUDA 13. The CUDA extra wheels preserve
+    # ONNX Runtime 1.31 is built for CUDA 13. The CUDA extra wheels preserve
     # this single package-relative directory in the frozen one-dir bundle.
     @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "cublasLt64_13.dll"; Description = "NVIDIA cuBLASLt runtime" },
     @{ Directory = "_internal\nvidia\cu13\bin\x86_64"; Pattern = "cublas64_13.dll"; Description = "NVIDIA cuBLAS runtime" },

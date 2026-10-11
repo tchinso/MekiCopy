@@ -1,101 +1,101 @@
 {
-    "transformers":  {
-                         "package":  "@huggingface/transformers",
-                         "version":  "4.2.0",
-                         "sourceCommit":  "54652ba3366ccd1e3b64e689a96504309e6fb53b",
-                         "upstreamNpmIntegrity":  "sha512-8BRCoBMH0XsWaEIamuR0LrJGAfftgHAfb2Vrffy0VKlSAE/MnUJ5/h/zTfEP3fDIft+nk7TqB8xXEyABGitBjQ==",
-                         "buildOverride":  {
-                                               "onnxRuntimeWeb":  "1.27.0",
-                                               "node":  "24.19.0",
-                                               "pnpm":  "10.28.1"
-                                           }
-                     },
-    "onnxRuntimeWeb":  {
-                           "package":  "onnxruntime-web",
-                           "version":  "1.27.0",
-                           "commit":  "8f0278c77bf44b0cc83c098c6c722b92a36ac4b5",
-                           "npmIntegrity":  "sha512-ogDLsqIozHZwifPuN37OproAo0byX6t43/bP8GzeZWBWD6MOGExswFAx3up4NS/vvWBOg2u2PXomDt3rMmdQSg=="
-                       },
-    "files":  [
-                  {
-                      "path":  "transformers.min.js",
-                      "size":  558516,
-                      "sha256":  "b6d6d42645bc79dc7e96c4ca18f0f0420d42997b8c66b0479b19bf3d3b1a80c7"
-                  },
-                  {
-                      "path":  "transformers.LICENSE.txt",
-                      "size":  11358,
-                      "sha256":  "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
-                  },
-                  {
-                      "path":  "onnxruntime-web.LICENSE.txt",
-                      "size":  1073,
-                      "sha256":  "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
-                  },
-                  {
-                      "path":  "onnxruntime-web.ThirdPartyNotices.txt",
-                      "size":  325054,
-                      "sha256":  "0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2"
-                  },
-                  {
-                      "path":  "worker.html",
-                      "size":  1035,
-                      "sha256":  "a0d664815233db6c4cbd4c29cc900a478b2263d3338f3eece8e8cc1f9d28cabd"
-                  },
-                  {
-                      "path":  "worker.js",
-                      "size":  23740,
-                      "sha256":  "b38aafce1fe3c44c5b14194397a21ce2468f621e0fac762aaf66c6d993ea00c2"
-                  },
-                  {
-                      "path":  "translator_api_worker.html",
-                      "size":  1780,
-                      "sha256":  "c5a4cc924be76330d82a41a792497eb8866c64715d48185d64fce88f80826d9b"
-                  },
-                  {
-                      "path":  "translator_api_worker.js",
-                      "size":  17227,
-                      "sha256":  "555618936526b92be7f010299023c5207041e7719ba6debfb837efb3ebdba124"
-                  },
-                  {
-                      "path":  "wasm/ort-wasm-simd-threaded.asyncify.mjs",
-                      "size":  47507,
-                      "sha256":  "7236653b8565da4046e459cd0e274123419a1d9f1f8f18fd36c28058346ca655"
-                  },
-                  {
-                      "path":  "wasm/ort-wasm-simd-threaded.asyncify.wasm",
-                      "size":  24254953,
-                      "sha256":  "7e83cd6cee77e478bc96a7e91b198144fb5e4126287daf1f9b54bb195ebcd55a"
-                  },
-                  {
-                      "path":  "wasm/ort-wasm-simd-threaded.jsep.mjs",
-                      "size":  46614,
-                      "sha256":  "3ee381d20a80f51a788a1c4a5872f6f1d047538dd4342f4af00062de5f9ea4c6"
-                  },
-                  {
-                      "path":  "wasm/ort-wasm-simd-threaded.jsep.wasm",
-                      "size":  26827543,
-                      "sha256":  "78feeeb3d08f6bcee94d938ed322f69073bb8076b5f9d34697a574ffba8deb48"
-                  },
-                  {
-                      "path":  "wasm/ort-wasm-simd-threaded.jspi.mjs",
-                      "size":  44523,
-                      "sha256":  "47f5232865f07cc6a11e825cac8dfd9b75bdf5f4a0889bde077e753ae93d3913"
-                  },
-                  {
-                      "path":  "wasm/ort-wasm-simd-threaded.jspi.wasm",
-                      "size":  15046878,
-                      "sha256":  "7c28cdb40958a998f5aa0981d5cb8e57ac1e7e9b4d2f18a7d74e00dd9629d7a3"
-                  },
-                  {
-                      "path":  "wasm/ort-wasm-simd-threaded.mjs",
-                      "size":  24180,
-                      "sha256":  "0a1e718d99c41b22c21f2520ff4f9e883a6b5533856e398d21816ee8eb8185d3"
-                  },
-                  {
-                      "path":  "wasm/ort-wasm-simd-threaded.wasm",
-                      "size":  13479978,
-                      "sha256":  "d1ab1b94b16a65b29d710d0b587b29e7bed336827577623913479b8afe8113e6"
-                  }
-              ]
+  "transformers": {
+    "package": "@huggingface/transformers",
+    "version": "4.3.0",
+    "sourceCommit": "a1728dd363256efffb6e8678138cb6ad755d051d",
+    "upstreamNpmIntegrity": "sha512-fL1A/WUZwouPrOlYxU5dzIwD2T5J781JiB2jDR8bFe5DwCj0Gfudq+NEXCMno49kQgajHA7xQkrRLJlqG1veEA==",
+    "buildOverride": {
+      "onnxRuntimeWeb": "1.30.0",
+      "node": "24.19.0",
+      "pnpm": "11.25.0"
+    }
+  },
+  "onnxRuntimeWeb": {
+    "package": "onnxruntime-web",
+    "version": "1.30.0",
+    "commit": "f2c39fe2f838cf35ce7da92824f5a5e3ee6e88a7",
+    "npmIntegrity": "sha512-q0y+JrrtukXSzsBWEMccVfqX25LRmosXHF+CaRJmg8pZClzcV7svNc4rKY3jL02Vb7QmRMDs1SigqR4CXAfKYQ=="
+  },
+  "files": [
+    {
+      "path": "transformers.min.js",
+      "size": 581761,
+      "sha256": "c0b6879e3974d628b1a1553791ec7141d21038f68a16aeedc888628fe9eb0271"
+    },
+    {
+      "path": "transformers.LICENSE.txt",
+      "size": 11560,
+      "sha256": "3ddf9be5c28fe27dad143a5dc76eea25222ad1dd68934a047064e56ed2fa40c5"
+    },
+    {
+      "path": "onnxruntime-web.LICENSE.txt",
+      "size": 1073,
+      "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+    },
+    {
+      "path": "onnxruntime-web.ThirdPartyNotices.txt",
+      "size": 338088,
+      "sha256": "143764b952fdb1a7c69ce653bfba74a7744d6a8a573bfb73e235fba356c83de3"
+    },
+    {
+      "path": "worker.html",
+      "size": 1035,
+      "sha256": "a0d664815233db6c4cbd4c29cc900a478b2263d3338f3eece8e8cc1f9d28cabd"
+    },
+    {
+      "path": "worker.js",
+      "size": 23740,
+      "sha256": "52de25f9d114125c1fc9783b190585de3853496187884ddbdf3156b986835fa7"
+    },
+    {
+      "path": "translator_api_worker.html",
+      "size": 1780,
+      "sha256": "c5a4cc924be76330d82a41a792497eb8866c64715d48185d64fce88f80826d9b"
+    },
+    {
+      "path": "translator_api_worker.js",
+      "size": 17227,
+      "sha256": "555618936526b92be7f010299023c5207041e7719ba6debfb837efb3ebdba124"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.asyncify.mjs",
+      "size": 53057,
+      "sha256": "3d1c85995364bb643302fc6fd877a0c3ba5ae72401815e0f24828a53d9191e28"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.asyncify.wasm",
+      "size": 26781914,
+      "sha256": "39f9f0894d478800487ed9f7dbe92618498db320cf55c8e3d89adff8dce658da"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.jsep.mjs",
+      "size": 46851,
+      "sha256": "709853412fd1ffc34247af1e73569227b5b79629c5ca3f59cc39cf7e500e4947"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.jsep.wasm",
+      "size": 28312028,
+      "sha256": "3ad23231b5bd6d9dda55a7f84606315e0bf35b6750c28ee993c987c54cacab0f"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.jspi.mjs",
+      "size": 50918,
+      "sha256": "270e2c6da9f297239d301d329782b6446641cb1e16a77967690adcfca35f3268"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.jspi.wasm",
+      "size": 16758545,
+      "sha256": "a54c76f86b0f0d9572380cf1c6292a7b3903716ffcbcd6b0e5c7050bf430eb93"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.mjs",
+      "size": 24381,
+      "sha256": "e13f7f94fc51b4ca72b12faeb1ee95f4ace6dfbc8939bc718aabdc0a27c4299b"
+    },
+    {
+      "path": "wasm/ort-wasm-simd-threaded.wasm",
+      "size": 14239897,
+      "sha256": "3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2"
+    }
+  ]
 }

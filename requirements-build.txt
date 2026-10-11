@@ -1,18 +1,18 @@
-# Reproducible Windows build/runtime dependencies (verified 2026-09-14).
+# Reproducible Windows build/runtime dependencies (verified 2026-10-11).
 pyinstaller==6.22.3
-meikiocr==0.3.4
+meikiocr==0.3.5
 mss==10.2.0
 pillow==12.3.0
-numpy==2.5.3
+numpy==2.5.4
 opencv-python-headless==5.0.0.93
-fastapi==0.141.1
-uvicorn[standard]==0.53.0
-pydantic==2.13.5
-typer==0.27.2
-huggingface-hub==1.31.0
-onnxruntime==1.30.0
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.0
+typer==0.27.3
+huggingface-hub==2.2.0
+onnxruntime==1.31.0
 # Include the CUDA 13 and cuDNN runtime DLLs in the standalone application.
 # The NVIDIA display driver alone is not enough for ONNX Runtime's CUDA provider.
-onnxruntime-gpu[cuda,cudnn]==1.30.0
+onnxruntime-gpu[cuda,cudnn]==1.31.0
 sherpa-onnx==1.13.8
 soundcard==0.4.6

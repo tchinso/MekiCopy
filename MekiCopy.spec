@@ -54,7 +54,7 @@ binaries += cv2_binaries
 hiddenimports += cv2_hiddenimports
 # Install onnxruntime-gpu last before building; its import package is onnxruntime.
 binaries += collect_dynamic_libs('onnxruntime')
-# The CUDA provider DLL is not self-contained. ONNX Runtime 1.30's CUDA 13
+# The CUDA provider DLL is not self-contained. ONNX Runtime 1.31's CUDA 13
 # extras install the CUDA libraries under nvidia/cu13/bin/x86_64 and cuDNN
 # under nvidia/cudnn/bin. Preserve these package-relative paths because
 # onnxruntime.preload_dlls() searches that layout in a frozen bundle.
