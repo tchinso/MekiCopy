@@ -2,6 +2,26 @@
 
 검증일: 2026-10-20 (Windows x64, Python 3.12.14).
 
+## 작업 선택 및 번역 UX 개편
+
+- 시작 화면에서 화면 번역·소리 번역·영상 자막 생성을 선택하며, 각 작업에 필요한 도구와 설정만 표시한다. 작업 선택으로 돌아가면 실시간 OCR은 중지되고 화면 번역 단축키는 해제된다.
+- OCR 결과 복사와 오버레이 번역 모드 선택을 제거했다. GUI·분리 버튼·북마크 CLI는 모두 번역 후 표시하며, 기존 `overlay_translation_mode=false` 설정도 번역으로 전환한다.
+- 행동의 큰 버튼 하나가 수동 모드에서는 `번역 후 표시`, 실시간 모드에서는 `실시간 OCR 시작/중지`로 동작한다. 기존 버튼의 색과 232px 높이를 유지한다. 실시간 모드에서는 수동 번역·분리 버튼·전역 단축키를 차단한다.
+- 번역 서비스·API·hdTrans·포트 설정을 일반으로 옮겼다. `실시간/수동 번역` 탭에는 실시간 모드·간격과 요청한 수동 옵션 다섯 개를 배치했으며, 실시간 모드에서는 수동 옵션을 비활성화하고 기존 값은 보존한다.
+- 최종 전체 Python **298개 통과**. 실제 Windows hdTrans DLL 및 실시간 통합 검사를 포함한다. 로그: `.cache/ux-tests.log`. 변경되지 않은 브라우저 worker의 앞선 11개 통과 결과는 재사용했다.
+- 소스 `--self-test-ui`가 격리된 `.cache/ux-selftest` 설정으로 통과했다. 시작 선택 화면, 작업별 화면·탭, 작업 선택 복귀, 버튼 문구·높이, 분리 버튼 상태, 최소 창 크기, 트레이 복원과 설정 창을 검사한다.
+- Lite·Full 모두 빌드 종료 코드 **0**. Lite의 frozen UI·트레이·분리 버튼·OCR·각 서비스 검사와 Full의 실제 hdTrans·음성 모델 검사, 공통 파일 일치 및 manifest 검증을 통과했다. 로그: `.cache/ux-lite-build.log`, `.cache/ux-full-build.log`.
+- 최종 ZIP의 실제 SHA-256과 체크섬 파일, 내부 manifest·파일 목록·크기, 현재 소스 fingerprint `795ff723598dd9fbe86c5bf0bf2cdf2c39d88726da9b72fed8dedfa46ff05217`, 두 배포본의 `smokeTested=true`와 공통 실행 파일 해시 일치를 확인했다. Lite ZIP은 1,622,530,399 bytes, Full ZIP은 4,112,002,685 bytes다. 결과: `.cache/ux-release-verification.json`.
+- 교체 전 실행 중이던 Full 앱은 정상 종료했다. 종료 시 저장된 기존 설정은 `.cache/ux-previous-state/Full/MekiCopy/settings.cfg`에 보존했으며 배포 ZIP에는 포함하지 않았다.
+
+## 기본 설정 및 실시간 OCR 간격 변경
+
+- 기본값을 전역 단축키 OFF, 번역 서비스 hdTrans, 실시간 처리 ON, 최소 인식 간격 1초로 변경했다. 기존에 명시 저장한 유효 설정은 유지하며 누락된 설정에는 새 기본값을 적용한다. 실시간 처리 허용과 시작 버튼으로 실행하는 기존 구분은 유지한다.
+- 최소 인식 간격은 0.5 / 1 / 1.5 / 2 / 2.5초다. 제거된 3초 저장값은 기본 1초로 정규화한다. 성공한 실제 오버레이 표시 후 대기는 0.5초로 줄였으며 OCR 시작부터의 최소 간격도 함께 지킨다.
+- 최종 전체 Python **283개**, 브라우저 worker **11개**가 통과했다. 실제 Windows hdTrans DLL·실시간 통합 검사와 표시 완료 후 0.5초 예약 검사를 포함한다. 로그: `.cache/hdtrans/defaults-tests.log`, `.cache/hdtrans/defaults-worker-tests.log`.
+- Lite 빌드와 실행 검사가 통과했다. Full은 새 Lite 실행 파일을 재사용하여 네이티브 엔진·음성 모델 실행 검사, 공통 파일 일치, manifest, ZIP·SHA-256 생성을 통과했다. Full 최종 파일 교체는 기존 실행본의 잠금으로 최초 실패했으나 정상 종료 후 검증된 임시 결과를 다시 배치했다. 이전 실행 데이터와 배포 파일은 `.cache/hdtrans/previous-full-before-defaults-20261020-193054`에 보존했다. 로그: `.cache/hdtrans/defaults-lite-build.log`, `.cache/hdtrans/defaults-full-build.log`.
+- 두 최종 실행 파일 내부의 기본 설정·지원 간격·0.5초 스케줄러 동작을 확인했다. 두 ZIP의 파일 목록·크기·manifest, 현재 소스 fingerprint `898e18152ff61edb87fcde9daf2bd507eb2f262eabe08d0548eef1cd38727f83`, `smokeTested=true`, 실제 ZIP SHA-256과 체크섬 파일의 일치를 확인했다. 결과: `.cache/hdtrans/defaults-release-verification.json`.
+
 ## 설정 UI 및 코드 정리
 
 - `번역` 설정 탭 하단에 `실시간 처리 사용`과 `최소 인식 간격(초)`을 배치했다. 별도 실시간 OCR 하위 탭은 없으며 안내는 옆의 `?`에 마우스를 올릴 때만 표시한다. 마우스 이탈·탭 전환·창 숨김·위젯 파괴 시 도움말 창과 바인딩을 정리한다.

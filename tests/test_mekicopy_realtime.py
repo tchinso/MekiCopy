@@ -12,7 +12,7 @@ from unittest import mock
 
 import mekicopy_settings
 from mekicopy_realtime import (
-    REALTIME_INTERVALS, REALTIME_LOCK_LABEL, RealtimeOcrController,
+    REALTIME_INTERVALS, RealtimeOcrController,
     RealtimeResult, RealtimeSession, RealtimeUnavailableError, comparison_text, detached_translation_locked,
     is_duplicate, japanese_character_count, next_start, normalize_interval, perform_cycle,
 )
@@ -399,6 +399,7 @@ class RealtimeUiEntryTests(unittest.TestCase):
         clock = FakeClock()
         window = SimpleNamespace(
             settings=AppSettings(realtime_ocr_enabled=True),
+            _workflow_mode="screen",
             active_region=Region(0, 0, 100, 100), active_monitor=None, active_region_ratio=None,
             _closing=False, _realtime_requested=False,
             _realtime_service_ports=(AppSettings().hytrans_port, AppSettings().overlayer_port),
@@ -407,6 +408,7 @@ class RealtimeUiEntryTests(unittest.TestCase):
             _realtime_service_checked_at=time.monotonic(), _realtime_service_probe_at=0.0,
             _hytrans_config_fingerprint="initial", _task_runner=mock.Mock(),
             realtime_button=mock.Mock(), _set_capture_status=mock.Mock(),
+            _apply_overlay_mode_ui=mock.Mock(),
         )
         for name in ("_realtime_block_reason", "_realtime_process_snapshot", "_sync_realtime_ocr",
                      "_refresh_realtime_services"):
@@ -417,19 +419,19 @@ class RealtimeUiEntryTests(unittest.TestCase):
         )
         return window
 
-    def test_start_requires_all_options_region_and_both_services(self):
-        for overlay, region, enabled, hytrans, overlayer in product((False, True), repeat=5):
-            with self.subTest(overlay=overlay, region=region, enabled=enabled,
+    def test_start_requires_screen_mode_region_realtime_mode_and_both_services(self):
+        for screen, region, enabled, hytrans, overlayer in product((False, True), repeat=5):
+            with self.subTest(screen=screen, region=region, enabled=enabled,
                               hytrans=hytrans, overlayer=overlayer):
                 window = self.ready_window()
-                window.settings = replace(window.settings, overlay_translation_mode=overlay,
-                                          realtime_ocr_enabled=enabled)
+                window.settings = replace(window.settings, realtime_ocr_enabled=enabled)
+                window._workflow_mode = "screen" if screen else "audio"
                 if not region:
                     window.active_region = None
                 window._realtime_service_status = {"HYTrans": hytrans, "MekiOverlayer": overlayer}
                 self.app.MainWindow._on_toggle_realtime_ocr(window)
                 self.assertEqual(window._realtime_ocr.active,
-                                 all((overlay, region, enabled, hytrans, overlayer)))
+                                 all((screen, region, enabled, hytrans, overlayer)))
                 self.assertEqual(window.settings.realtime_ocr_enabled, enabled)
 
     def test_settings_enable_only_allows_explicit_start_and_stop_does_not_change_settings(self):
@@ -438,7 +440,7 @@ class RealtimeUiEntryTests(unittest.TestCase):
         self.assertFalse(window._realtime_ocr.active)
         self.app.MainWindow._on_toggle_realtime_ocr(window)
         self.assertTrue(window._realtime_ocr.translation_locked)
-        self.assertEqual(window.realtime_button.config.call_args.kwargs["text"], "실시간 OCR 중지")
+        window._apply_overlay_mode_ui.assert_called()
         # Stopping remains possible even if prerequisites became unavailable.
         window._realtime_service_status = {}
         self.app.MainWindow._on_toggle_realtime_ocr(window)
@@ -518,7 +520,7 @@ class RealtimeUiEntryTests(unittest.TestCase):
             # even while the closed child's Popen handle remains stored.
             callbacks["on_success"](args[1]())
         window._sync_realtime_ocr()
-        self.assertEqual(window.realtime_button.config.call_args.kwargs["state"], "normal")
+        self.assertEqual(window._realtime_block_reason(), "")
         self.assertFalse(window._realtime_ocr.active)
         self.app.MainWindow._on_toggle_realtime_ocr(window)
         self.assertTrue(window._realtime_ocr.active)
@@ -555,21 +557,31 @@ class RealtimeUiEntryTests(unittest.TestCase):
         self.assertFalse(window._realtime_ocr.root.pending)
 
     def test_manual_main_entry_is_blocked_without_capturing(self):
-        window = SimpleNamespace(_realtime_ocr=SimpleNamespace(translation_locked=True))
+        window = SimpleNamespace(settings=AppSettings(realtime_ocr_enabled=False),
+                                 _realtime_ocr=SimpleNamespace(translation_locked=True))
         with mock.patch.object(self.app, "capture_ocr_image") as capture:
             self.assertFalse(self.app.MainWindow._on_ocr_copy(window))
             capture.assert_not_called()
 
-    def test_actual_main_and_detached_labels_restore_on_mode_change(self):
-        window = SimpleNamespace(_realtime_ocr=SimpleNamespace(translation_locked=True),
-                                 settings=AppSettings())
-        self.assertEqual(self.app.MainWindow.ocr_action_label(window), REALTIME_LOCK_LABEL)
-        window._realtime_ocr.translation_locked = False
+    def test_unified_action_label_tracks_manual_start_and_stop(self):
+        window = SimpleNamespace(_realtime_ocr=SimpleNamespace(active=False),
+                                 settings=AppSettings(realtime_ocr_enabled=False))
         self.assertEqual(self.app.MainWindow.ocr_action_label(window), "번역 후 표시")
+        window.settings.realtime_ocr_enabled = True
+        self.assertEqual(self.app.MainWindow.ocr_action_label(window), "실시간 OCR 시작")
+        window._realtime_ocr.active = True
+        self.assertEqual(self.app.MainWindow.ocr_action_label(window), "실시간 OCR 중지")
+
+    def test_detached_manual_button_is_unavailable_throughout_realtime_mode(self):
         detached = SimpleNamespace(_realtime_locked=True, settings=AppSettings())
-        self.assertEqual(self.app.DetachedOcrButtonApp.ocr_action_label(detached), REALTIME_LOCK_LABEL)
+        self.assertEqual(self.app.DetachedOcrButtonApp.ocr_action_label(detached), "실시간 번역 모드 사용 중")
+        detached._realtime_locked = False
+        self.assertEqual(self.app.DetachedOcrButtonApp.ocr_action_label(detached), "실시간 번역 모드 사용 중")
+        detached.settings.realtime_ocr_enabled = False
+        self.assertEqual(self.app.DetachedOcrButtonApp.ocr_action_label(detached), "번역 후 표시")
+        # Old settings must never restore the removed clipboard-only action.
         detached.settings.overlay_translation_mode = False
-        self.assertEqual(self.app.DetachedOcrButtonApp.ocr_action_label(detached), "인식 후 복사")
+        self.assertEqual(self.app.DetachedOcrButtonApp.ocr_action_label(detached), "번역 후 표시")
 
     def test_global_hotkey_is_blocked_for_entire_active_session(self):
         window = SimpleNamespace(
@@ -611,12 +623,10 @@ class RealtimeUiEntryTests(unittest.TestCase):
             operation = self.app.MainWindow._prepare_realtime_operation(window, RealtimeSession(1), "同じ原文")
             result = operation()
         self.assertFalse(result.skipped)
-        with (mock.patch.object(self.app, "save_detached_region"),
-              mock.patch.object(self.app, "copy_text_to_clipboard") as copy):
+        with mock.patch.object(self.app, "save_detached_region"):
             self.assertTrue(self.app.MainWindow._on_realtime_result(window, result))
         self.assertEqual(window.active_region, corrected)
         self.assertEqual(window.active_monitor, "monitor")
-        copy.assert_not_called()
         self.assertEqual(translate.call_args.args[0], "同じ原文")
 
 

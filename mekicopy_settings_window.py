@@ -305,7 +305,6 @@ class SettingsWindow(tk.Toplevel):
             value=settings.global_hotkey_enabled
         )
         self.global_hotkey_var = tk.StringVar(value=settings.global_hotkey)
-        self.overlay_mode_var = tk.BooleanVar(value=settings.overlay_translation_mode)
         self.realtime_ocr_enabled_var = tk.BooleanVar(value=settings.realtime_ocr_enabled)
         self.realtime_ocr_interval_var = tk.StringVar(
             value=f"{settings.realtime_ocr_interval:g}"
@@ -361,10 +360,10 @@ class SettingsWindow(tk.Toplevel):
             value=settings.suppress_magpie_launch_notice
         )
         self.debug_logging_var = tk.BooleanVar(value=settings.debug_logging)
-        self.overlay_only_widgets: list[tk.Widget] = []
         self.detached_label_controls: list[tuple[tk.Widget, str]] = []
         self._color_buttons: list[tuple[tk.Button, tk.StringVar]] = []
         self._global_hotkey_controls: list[tk.Widget] = []
+        self._manual_translation_widgets: list[tk.Widget] = []
 
         self._build_ui()
         self.audio_stt_model_var.trace_add("write", self._on_audio_stt_model_changed)
@@ -372,13 +371,14 @@ class SettingsWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.transient(owner)
         self.attributes("-topmost", settings.main_always_on_top)
-        self.overlay_mode_var.trace_add("write", lambda *_: self._on_overlay_mode_changed())
+        self.realtime_ocr_enabled_var.trace_add(
+            "write", lambda *_: self._update_manual_translation_controls()
+        )
         self.global_hotkey_enabled_var.trace_add(
             "write", lambda *_: self._update_global_hotkey_controls()
         )
         self._update_mode_labels()
-        self._update_overlay_controls()
-        self._update_global_hotkey_controls()
+        self._update_manual_translation_controls()
         self.hytrans_backend_var.trace_add("write", lambda *_: self._update_translation_controls())
         self._update_translation_controls()
 
@@ -410,7 +410,7 @@ class SettingsWindow(tk.Toplevel):
         notebook.pack(fill=tk.BOTH, expand=True)
         pages = (
             ("일반", self._build_general_page),
-            ("번역", self._build_translation_page),
+            ("실시간/수동 번역", self._build_translation_page),
             ("번역 오버레이", self._build_overlay_page),
             ("음성인식", self._build_audio_page),
         )
@@ -435,25 +435,60 @@ class SettingsWindow(tk.Toplevel):
                 self.minimize_to_tray_var,
             ),
             ("MekiCopy를 항상 위로", self.main_topmost_var),
-            ("복사 완료를 간단하게 표시하기", self.simple_copy_complete_var),
+            ("분리된 '번역 후 표시' 버튼의 제목표시줄 숨김", self.detached_hide_titlebar_var),
         ]
         for text, variable in options:
             checkbox = tk.Checkbutton(general_tab, text=text, variable=variable, anchor="w")
             checkbox.pack(fill=tk.X, pady=4)
 
-        global_hotkey_frame = tk.LabelFrame(
+        self._build_translation_engine_controls(general_tab)
+
+        suppress_magpie_notice_checkbox = tk.Checkbutton(
             general_tab,
+            text="MagPie 실행 시 안내 띄우지 않기",
+            variable=self.suppress_magpie_notice_var,
+            anchor="w",
+        )
+        suppress_magpie_notice_checkbox.pack(fill=tk.X, pady=4)
+
+        debug_checkbox = tk.Checkbutton(
+            general_tab,
+            text="오류 분석을 위한 디버그 로그 켜기",
+            variable=self.debug_logging_var,
+            anchor="w",
+        )
+        debug_checkbox.pack(fill=tk.X, pady=(4, 8))
+
+    def _build_translation_page(self, translation_tab: tk.Frame) -> None:
+        self._build_realtime_controls(translation_tab)
+        manual_frame = tk.LabelFrame(
+            translation_tab, text="수동 번역", padx=10, pady=8
+        )
+        manual_frame.pack(fill=tk.X, pady=(10, 0))
+        simple_complete_checkbox = tk.Checkbutton(
+            manual_frame,
+            text="번역 완료를 간단하게 표시하기",
+            variable=self.simple_copy_complete_var,
+            anchor="w",
+        )
+        simple_complete_checkbox.pack(fill=tk.X, pady=4)
+        self._manual_translation_widgets.append(simple_complete_checkbox)
+
+        global_hotkey_frame = tk.LabelFrame(
+            manual_frame,
             text="전역 단축키",
             padx=10,
             pady=8,
         )
         global_hotkey_frame.pack(fill=tk.X, pady=(8, 4))
-        tk.Checkbutton(
+        global_hotkey_checkbox = tk.Checkbutton(
             global_hotkey_frame,
             text="전역 단축키 사용",
             variable=self.global_hotkey_enabled_var,
             anchor="w",
-        ).pack(fill=tk.X, pady=(0, 4))
+        )
+        global_hotkey_checkbox.pack(fill=tk.X, pady=(0, 4))
+        self._manual_translation_widgets.append(global_hotkey_checkbox)
         self.global_hotkey_action_label = tk.Label(
             global_hotkey_frame,
             anchor="w",
@@ -461,7 +496,8 @@ class SettingsWindow(tk.Toplevel):
         self.global_hotkey_action_label.pack(fill=tk.X, pady=(0, 4))
         global_hotkey_row = tk.Frame(global_hotkey_frame)
         global_hotkey_row.pack(fill=tk.X)
-        tk.Label(global_hotkey_row, text="실행 키").pack(side=tk.LEFT)
+        global_hotkey_key_label = tk.Label(global_hotkey_row, text="전역 단축키 설정")
+        global_hotkey_key_label.pack(side=tk.LEFT)
         self.global_hotkey_entry = tk.Entry(
             global_hotkey_row,
             width=18,
@@ -489,45 +525,35 @@ class SettingsWindow(tk.Toplevel):
             command=self._restore_default_global_hotkey,
         )
         self.global_hotkey_default_button.pack(anchor="e", pady=(4, 2))
-        tk.Label(
+        global_hotkey_help_label = tk.Label(
             global_hotkey_frame,
             text="입력칸을 클릭한 뒤 키를 누르세요. B 같은 일반 키도 단독으로 사용할 수 있습니다.",
             anchor="w",
             justify=tk.LEFT,
-        ).pack(fill=tk.X)
+        )
+        global_hotkey_help_label.pack(fill=tk.X)
+        self._manual_translation_widgets.extend([
+            self.global_hotkey_action_label,
+            global_hotkey_key_label,
+            global_hotkey_help_label,
+        ])
         self._global_hotkey_controls.extend(
             [self.global_hotkey_entry, self.global_hotkey_default_button]
         )
 
         detached_options = [
             ("버튼을 항상 위로", self.detached_topmost_var),
-            ("버튼의 제목표시줄 숨김", self.detached_hide_titlebar_var),
             ("버튼의 크기를 고정", self.detached_fixed_size_var),
         ]
         for suffix, variable in detached_options:
-            checkbox = tk.Checkbutton(general_tab, variable=variable, anchor="w")
+            checkbox = tk.Checkbutton(manual_frame, variable=variable, anchor="w")
             checkbox.pack(fill=tk.X, pady=4)
             self.detached_label_controls.append((checkbox, suffix))
+            self._manual_translation_widgets.append(checkbox)
 
-        suppress_magpie_notice_checkbox = tk.Checkbutton(
-            general_tab,
-            text="MagPie 실행 시 안내 띄우지 않기",
-            variable=self.suppress_magpie_notice_var,
-            anchor="w",
-        )
-        suppress_magpie_notice_checkbox.pack(fill=tk.X, pady=4)
-
-        debug_checkbox = tk.Checkbutton(
-            general_tab,
-            text="오류 분석을 위한 디버그 로그 켜기",
-            variable=self.debug_logging_var,
-            anchor="w",
-        )
-        debug_checkbox.pack(fill=tk.X, pady=(4, 8))
-
-    def _build_translation_page(self, translation_tab: tk.Frame) -> None:
-        translation_frame = tk.LabelFrame(translation_tab, text="HYTrans 번역", padx=10, pady=8)
-        translation_frame.pack(fill=tk.X)
+    def _build_translation_engine_controls(self, general_tab: tk.Frame) -> None:
+        translation_frame = tk.LabelFrame(general_tab, text="번역 엔진", padx=10, pady=8)
+        translation_frame.pack(fill=tk.X, pady=(8, 4))
         tk.Label(
             translation_frame,
             text="번역 오버레이와 음성인식 등 HYTrans를 사용하는 모든 번역에 적용됩니다.",
@@ -567,16 +593,14 @@ class SettingsWindow(tk.Toplevel):
             textvariable=self.hytrans_port_var,
         ).pack(side=tk.RIGHT)
 
-        self._build_realtime_controls(translation_tab)
-
     def _build_realtime_controls(self, parent: tk.Frame) -> None:
         frame = tk.LabelFrame(parent, text="실시간 OCR", padx=10, pady=8)
-        frame.pack(fill=tk.X, pady=(10, 0))
+        frame.pack(fill=tk.X)
         enabled_row = tk.Frame(frame)
         enabled_row.pack(fill=tk.X)
         tk.Checkbutton(
             enabled_row,
-            text="실시간 처리 사용",
+            text="실시간 번역 모드 사용",
             variable=self.realtime_ocr_enabled_var,
             anchor="w",
         ).pack(side=tk.LEFT)
@@ -584,14 +608,14 @@ class SettingsWindow(tk.Toplevel):
         help_icon.pack(side=tk.LEFT, padx=(4, 0))
         self.realtime_ocr_tooltip = Tooltip(
             help_icon,
-            "설정 저장 후 아래 조건을 모두 만족하면 영역 탭의\n"
+            "설정 저장 후 아래 조건을 모두 만족하면 화면 번역의\n"
             "'실시간 OCR 시작' 버튼으로 시작할 수 있습니다.\n\n"
-            "• '오버레이어 번역 모드 사용'이 켜져 있음\n"
             "• 확정된 OCR 영역이 있음\n"
-            "• HYTrans와 MekiOverlayer가 모두 실행 중\n"
-            "• '실시간 처리 사용'이 켜져 있음\n\n"
+            "• 번역 엔진(HyTrans)과 번역결과 표시기(MekiOverlayer)가 모두 실행 중\n"
+            "• '실시간 번역 모드 사용'이 켜져 있음\n\n"
             "조건을 만족하지 않게 되면 중지됩니다.\n"
-            "중지하려면 영역 탭의 '실시간 OCR 중지' 버튼을 누르세요.",
+            "중지하려면 '실시간 OCR 중지' 버튼을 누르세요.\n"
+            "실시간 모드를 끄면 '번역 후 표시' 버튼으로 수동 번역할 수 있습니다.",
         )
         interval_row = tk.Frame(frame)
         interval_row.pack(fill=tk.X, pady=(8, 0))
@@ -605,16 +629,8 @@ class SettingsWindow(tk.Toplevel):
         ).pack(side=tk.RIGHT)
 
     def _build_overlay_page(self, overlay_tab: tk.Frame) -> None:
-        overlay_frame = tk.LabelFrame(overlay_tab, text="번역 오버레이 모드", padx=10, pady=8)
+        overlay_frame = tk.LabelFrame(overlay_tab, text="번역결과 표시기 (MekiOverlayer)", padx=10, pady=8)
         overlay_frame.pack(fill=tk.BOTH, expand=True)
-
-        overlay_checkbox = tk.Checkbutton(
-            overlay_frame,
-            text="오버레이어 번역 모드 사용",
-            variable=self.overlay_mode_var,
-            anchor="w",
-        )
-        overlay_checkbox.pack(fill=tk.X, pady=3)
 
         overlayer_port_row = tk.Frame(overlay_frame)
         overlayer_port_row.pack(fill=tk.X, pady=3)
@@ -628,7 +644,6 @@ class SettingsWindow(tk.Toplevel):
             textvariable=self.overlayer_port_var,
         )
         overlayer_port_spin.pack(side=tk.RIGHT)
-        self.overlay_only_widgets.extend([overlayer_port_label, overlayer_port_spin])
 
         overlayer_options = [
             ("MekiOverlayer를 항상 위로", self.overlayer_topmost_var),
@@ -647,7 +662,6 @@ class SettingsWindow(tk.Toplevel):
                 anchor="w",
             )
             checkbox.pack(fill=tk.X, pady=3)
-            self.overlay_only_widgets.append(checkbox)
 
         overlayer_style = tk.LabelFrame(
             overlay_frame,
@@ -656,7 +670,6 @@ class SettingsWindow(tk.Toplevel):
             pady=8,
         )
         overlayer_style.pack(fill=tk.X, pady=(8, 2))
-        self.overlay_only_widgets.append(overlayer_style)
 
         bg_button = tk.Button(
             overlayer_style,
@@ -665,7 +678,6 @@ class SettingsWindow(tk.Toplevel):
         )
         bg_button.pack(fill=tk.X, pady=2)
         self._color_buttons.append((bg_button, self.overlayer_bg_color_var))
-        self.overlay_only_widgets.append(bg_button)
 
         opacity_row = tk.Frame(overlayer_style)
         opacity_row.pack(fill=tk.X, pady=2)
@@ -680,7 +692,6 @@ class SettingsWindow(tk.Toplevel):
             length=180,
         )
         opacity_scale.pack(side=tk.RIGHT)
-        self.overlay_only_widgets.extend([opacity_row, opacity_scale])
 
         text_color_button = tk.Button(
             overlayer_style,
@@ -691,7 +702,6 @@ class SettingsWindow(tk.Toplevel):
         )
         text_color_button.pack(fill=tk.X, pady=2)
         self._color_buttons.append((text_color_button, self.overlayer_text_color_var))
-        self.overlay_only_widgets.append(text_color_button)
 
         size_row = tk.Frame(overlayer_style)
         size_row.pack(fill=tk.X, pady=2)
@@ -704,7 +714,6 @@ class SettingsWindow(tk.Toplevel):
             textvariable=self.overlayer_text_size_var,
         )
         size_spin.pack(side=tk.RIGHT)
-        self.overlay_only_widgets.extend([size_row, size_spin])
 
         font_row = tk.Frame(overlayer_style)
         font_row.pack(fill=tk.X, pady=2)
@@ -732,7 +741,6 @@ class SettingsWindow(tk.Toplevel):
         if not font_names:
             font_menu.config(state=tk.DISABLED)
         font_menu.pack(side=tk.RIGHT)
-        self.overlay_only_widgets.extend([font_row, font_menu])
 
     def _build_audio_page(self, audio_tab: tk.Frame) -> None:
         audio_model_frame = tk.LabelFrame(audio_tab, text="음성인식", padx=10, pady=8)
@@ -890,7 +898,7 @@ class SettingsWindow(tk.Toplevel):
             style_color_button(button, color)
 
     def _mode_action_label(self) -> str:
-        return "번역 후 표시" if self.overlay_mode_var.get() else "인식 후 복사"
+        return "번역 후 표시"
 
     def _update_mode_labels(self) -> None:
         action_label = self._mode_action_label()
@@ -899,11 +907,21 @@ class SettingsWindow(tk.Toplevel):
         global_hotkey_label = getattr(self, "global_hotkey_action_label", None)
         if global_hotkey_label is not None:
             global_hotkey_label.configure(
-                text=f"전역 단축키를 누르면 현재 모드의 '{action_label}' 실행"
+                text=f"전역 단축키를 누르면 '{action_label}' 실행"
             )
 
+    def _update_manual_translation_controls(self) -> None:
+        state = tk.DISABLED if self.realtime_ocr_enabled_var.get() else tk.NORMAL
+        for widget in self._manual_translation_widgets:
+            widget.configure(state=state)
+        self._update_global_hotkey_controls()
+
     def _update_global_hotkey_controls(self) -> None:
-        state = tk.NORMAL if self.global_hotkey_enabled_var.get() else tk.DISABLED
+        enabled = (
+            not self.realtime_ocr_enabled_var.get()
+            and self.global_hotkey_enabled_var.get()
+        )
+        state = tk.NORMAL if enabled else tk.DISABLED
         for widget in self._global_hotkey_controls:
             widget.configure(state=state)
 
@@ -927,22 +945,6 @@ class SettingsWindow(tk.Toplevel):
         resume = getattr(self.owner, "resume_global_hotkey", None)
         if callable(resume):
             resume()
-
-    def _on_overlay_mode_changed(self) -> None:
-        self._update_mode_labels()
-        self._update_overlay_controls()
-
-    def _update_overlay_controls(self) -> None:
-        state = tk.NORMAL if self.overlay_mode_var.get() else tk.DISABLED
-        for widget in self.overlay_only_widgets:
-            try:
-                widget.configure(state=state)
-            except tk.TclError:
-                for child in widget.winfo_children():
-                    try:
-                        child.configure(state=state)
-                    except tk.TclError:
-                        pass
 
     def _read_port(self, variable: tk.IntVar, label: str) -> int:
         try:
@@ -1013,7 +1015,7 @@ class SettingsWindow(tk.Toplevel):
             detached_geometry=detached_geometry,
             detached_fixed_width=current.detached_fixed_width,
             detached_fixed_height=current.detached_fixed_height,
-            overlay_translation_mode=self.overlay_mode_var.get(),
+            overlay_translation_mode=True,
             realtime_ocr_enabled=self.realtime_ocr_enabled_var.get(),
             realtime_ocr_interval=normalize_interval(self.realtime_ocr_interval_var.get()),
             hytrans_backend=backend,

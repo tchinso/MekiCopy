@@ -17,6 +17,25 @@ from mekicopy_settings import AppSettings, load_settings, save_settings
 
 
 class TranslationSettingsPersistenceTests(unittest.TestCase):
+    def test_legacy_clipboard_mode_loads_as_translation_and_saves_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.cfg"
+            path.write_text(
+                "[settings]\noverlay_translation_mode = false\n"
+                "realtime_ocr_enabled = false\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(mekicopy_settings, "SETTINGS_FILE", str(path)):
+                settings = load_settings()
+        self.assertTrue(settings.overlay_translation_mode)
+        self.assertFalse(settings.realtime_ocr_enabled)
+        settings.overlay_translation_mode = False
+        with mock.patch.object(mekicopy_settings, "_write_state_text", return_value=True) as write:
+            self.assertTrue(save_settings(settings))
+        parser = configparser.ConfigParser()
+        parser.read_string(write.call_args.args[1])
+        self.assertTrue(parser.getboolean("settings", "overlay_translation_mode"))
+
     def test_legacy_settings_default_to_hdtrans_mt15(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.cfg"
@@ -114,18 +133,18 @@ class TranslationSettingsUiTests(unittest.TestCase):
         self.assertEqual(len(notebooks), 1)
         return notebooks[0]
 
-    def test_realtime_controls_are_at_bottom_of_translation_page(self) -> None:
+    def test_translation_mode_page_separates_realtime_and_manual_controls(self) -> None:
         main_notebook = self.notebook()
         top_tabs = {main_notebook.tab(tab, "text"): tab for tab in main_notebook.tabs()}
-        self.assertEqual(list(top_tabs), ["일반", "번역", "번역 오버레이", "음성인식"])
-        translation_page = self.window.nametowidget(top_tabs["번역"])
+        self.assertEqual(list(top_tabs), ["일반", "실시간/수동 번역", "번역 오버레이", "음성인식"])
+        translation_page = self.window.nametowidget(top_tabs["실시간/수동 번역"])
         sections = translation_page.interior.pack_slaves()
-        self.assertEqual([section.cget("text") for section in sections], ["HYTrans 번역", "실시간 OCR"])
-        controls = list(self.descendants(sections[-1]))
+        self.assertEqual([section.cget("text") for section in sections], ["실시간 OCR", "수동 번역"])
+        controls = list(self.descendants(sections[0]))
         enabled = next(
             widget for widget in controls
             if isinstance(widget, tk.Checkbutton)
-            and widget.cget("text") == "실시간 처리 사용"
+            and widget.cget("text") == "실시간 번역 모드 사용"
         )
         self.assertEqual(str(enabled.cget("variable")), str(self.window.realtime_ocr_enabled_var))
         interval = next(widget for widget in controls if isinstance(widget, ttk.Combobox))
@@ -148,6 +167,54 @@ class TranslationSettingsUiTests(unittest.TestCase):
         ]
         self.assertFalse(any("설정 저장 후" in label for label in all_labels))
 
+        general_page = self.window.nametowidget(top_tabs["일반"])
+        general_controls = list(self.descendants(general_page))
+        self.assertIn(self.window.hdtrans_settings_button, general_controls)
+        general_variables = {
+            str(widget.cget("variable")) for widget in general_controls
+            if isinstance(widget, tk.Checkbutton)
+        }
+        for variable in (
+            self.window.simple_copy_complete_var, self.window.global_hotkey_enabled_var,
+            self.window.detached_topmost_var, self.window.detached_fixed_size_var,
+        ):
+            self.assertNotIn(str(variable), general_variables)
+        all_checkboxes = [
+            str(widget.cget("text")) for widget in self.descendants(self.window)
+            if isinstance(widget, tk.Checkbutton)
+        ]
+        self.assertNotIn("오버레이어 번역 모드 사용", all_checkboxes)
+
+    def test_realtime_disables_manual_controls_and_restores_manual_preferences(self) -> None:
+        manual_variables = (
+            self.window.simple_copy_complete_var,
+            self.window.global_hotkey_enabled_var,
+            self.window.detached_topmost_var,
+            self.window.detached_fixed_size_var,
+        )
+        controls = [
+            widget for widget in self.descendants(self.window)
+            if isinstance(widget, tk.Checkbutton)
+            and str(widget.cget("variable")) in {str(variable) for variable in manual_variables}
+        ]
+        self.assertEqual(len(controls), 4)
+        self.window.global_hotkey_enabled_var.set(True)
+        self.window.detached_fixed_size_var.set(True)
+        self.window.global_hotkey_var.set("Ctrl+Alt+B")
+        for widget in [*controls, self.window.global_hotkey_entry, self.window.global_hotkey_default_button]:
+            self.assertEqual(str(widget.cget("state")), "disabled")
+        self.window.realtime_ocr_enabled_var.set(False)
+        for widget in [*controls, self.window.global_hotkey_entry, self.window.global_hotkey_default_button]:
+            self.assertEqual(str(widget.cget("state")), "normal")
+        self.window.realtime_ocr_enabled_var.set(True)
+        collected = self.window._collect_settings()
+        self.assertTrue(collected.global_hotkey_enabled)
+        self.assertTrue(collected.detached_fixed_size)
+        self.assertEqual(collected.global_hotkey, "Ctrl+Alt+B")
+        self.window.realtime_ocr_enabled_var.set(False)
+        self.window.global_hotkey_enabled_var.set(False)
+        self.assertEqual(str(self.window.global_hotkey_entry.cget("state")), "disabled")
+
     def _show_realtime_help(self):
         notebook = self.notebook()
         self.root.deiconify()
@@ -169,8 +236,8 @@ class TranslationSettingsUiTests(unittest.TestCase):
             if isinstance(widget, tk.Label)
         )
         for requirement in (
-            "오버레이어 번역 모드 사용", "확정된 OCR 영역",
-            "HYTrans와 MekiOverlayer가 모두 실행 중", "실시간 처리 사용",
+            "확정된 OCR 영역", "번역 엔진(HyTrans)", "번역결과 표시기(MekiOverlayer)",
+            "실시간 번역 모드 사용",
             "실시간 OCR 시작", "실시간 OCR 중지",
         ):
             self.assertIn(requirement, help_text)
@@ -203,7 +270,7 @@ class TranslationSettingsUiTests(unittest.TestCase):
         self.root.update()
 
     def test_realtime_settings_are_collected_with_overlay_settings(self) -> None:
-        self.window.overlay_mode_var.set(True)
+        self.root.settings.overlay_translation_mode = False
         self.window.realtime_ocr_enabled_var.set(True)
         self.window.realtime_ocr_interval_var.set("1.5")
         collected = self.window._collect_settings()

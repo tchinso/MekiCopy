@@ -18,6 +18,8 @@ from mekicopy_capture import (
     capture_region_result,
     configure_capture_runtime,
 )
+from mekicopy_companions import overlay_config_payload, request_translation_and_show
+from mekicopy_settings import load_settings
 from mekicopy_runtime import (
     _get_app_dir,
     _get_resource_dir,
@@ -364,28 +366,6 @@ def capture_ocr_image(left: int, top: int, width: int, height: int) -> Image.Ima
     return result.image
 
 
-def copy_text_to_clipboard(
-    text: str,
-    notify: bool = True,
-    parent: tk.Misc | None = None,
-) -> None:
-    _prepare_tk_library_paths()
-    clip_owner = parent
-    created_clip_owner = False
-    if clip_owner is None:
-        clip_owner = tk.Tk()
-        clip_owner.withdraw()
-        created_clip_owner = True
-
-    clip_owner.clipboard_clear()
-    clip_owner.clipboard_append(text)
-    clip_owner.update()
-    if created_clip_owner:
-        clip_owner.destroy()
-    if notify:
-        messagebox.showinfo("MekiCopy", "복사되었습니다!", parent=parent)
-
-
 def ocr_region(
     left: int,
     top: int,
@@ -415,18 +395,36 @@ def ocr_region(
         return None
 
 
-def ocr_and_copy(
+def ocr_and_translate(
     left: int,
     top: int,
     width: int,
     height: int,
     notify: bool = True,
     parent: tk.Misc | None = None,
-    on_copy_complete: Callable[[], None] | None = None,
+    on_translation_complete: Callable[[], None] | None = None,
 ) -> None:
+    """Translate a one-shot CLI/bookmark capture with the saved tool settings."""
+    _prepare_tk_library_paths()
+    settings = load_settings()
     text = ocr_region(left, top, width, height, parent=parent)
     if text is None:
         return
-    copy_text_to_clipboard(text, notify=notify, parent=parent)
-    if on_copy_complete:
-        on_copy_complete()
+    if not text.strip():
+        messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=parent)
+        return
+    try:
+        request_translation_and_show(
+            text,
+            hytrans_url=f"http://127.0.0.1:{settings.hytrans_port}",
+            overlayer_url=f"http://127.0.0.1:{settings.overlayer_port}",
+            overlayer_config=overlay_config_payload(settings),
+        )
+    except Exception as exc:
+        _log_runtime_error("ocr_and_translate", exc)
+        messagebox.showerror("MekiCopy", f"번역 표시 실패:\n{exc}", parent=parent)
+        return
+    if on_translation_complete:
+        on_translation_complete()
+    if notify and not settings.simple_copy_complete:
+        messagebox.showinfo("MekiCopy", "번역 결과를 표시했습니다.", parent=parent)

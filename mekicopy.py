@@ -73,8 +73,7 @@ from mekicopy_ocr import (
     _log_runtime_error,
     _log_runtime_message,
     capture_ocr_image,
-    copy_text_to_clipboard,
-    ocr_and_copy,
+    ocr_and_translate,
     recognize_image,
 )
 from mekicopy_hotkey import GlobalHotkeyManager
@@ -236,9 +235,11 @@ class DetachedOcrButtonApp:
         self.root.mainloop()
 
     def ocr_action_label(self) -> str:
-        if getattr(self, "_realtime_locked", False) and self.settings.overlay_translation_mode:
+        if self.settings.realtime_ocr_enabled:
+            return "실시간 번역 모드 사용 중"
+        if getattr(self, "_realtime_locked", False):
             return REALTIME_LOCK_LABEL
-        return "번역 후 표시" if self.settings.overlay_translation_mode else "인식 후 복사"
+        return "번역 후 표시"
 
     def _refresh_realtime_lock(self) -> None:
         self._realtime_locked = detached_translation_locked(
@@ -246,7 +247,7 @@ class DetachedOcrButtonApp:
         )
         if self.button.winfo_exists():
             self.button.config(text=self.ocr_action_label(), state=(
-                tk.DISABLED if self._realtime_locked and self.settings.overlay_translation_mode
+                tk.DISABLED if self._realtime_locked or self.settings.realtime_ocr_enabled
                 else tk.NORMAL
             ))
 
@@ -325,7 +326,7 @@ class DetachedOcrButtonApp:
             return
         self.settings = load_settings()
         self._refresh_realtime_lock()
-        if self._realtime_locked and self.settings.overlay_translation_mode:
+        if self._realtime_locked or self.settings.realtime_ocr_enabled:
             return
         region = load_detached_region()
         if not region:
@@ -360,10 +361,11 @@ class DetachedOcrButtonApp:
 
         self._start_ocr_task(
             image,
-            translate=self.settings.overlay_translation_mode,
+            translate=True,
         )
 
-    def _start_ocr_task(self, image: Image.Image, *, translate: bool) -> None:
+    def _start_ocr_task(self, image: Image.Image, *, translate: bool = True) -> None:
+        # Keep the legacy keyword for callers; OCR always translates now.
         settings = self.settings
         simple_feedback = settings.simple_copy_complete
         hytrans_url = f"http://127.0.0.1:{settings.hytrans_port}"
@@ -372,7 +374,7 @@ class DetachedOcrButtonApp:
 
         def operation() -> str:
             text = recognize_image(image)
-            if translate and text.strip():
+            if text.strip():
                 # A realtime session may have started while this manual OCR ran.
                 if detached_translation_locked(mekicopy_settings.STATE_DIR / REALTIME_STATE_FILENAME):
                     return ""
@@ -385,44 +387,25 @@ class DetachedOcrButtonApp:
             return text
 
         def on_success(text: str) -> None:
-            if translate:
-                if not text.strip():
-                    messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=self.root)
-                    return
-                if simple_feedback:
-                    self._show_feedback()
-                else:
-                    messagebox.showinfo(
-                        "MekiCopy",
-                        "번역 결과를 MekiOverlayer에 표시했습니다.",
-                        parent=self.root,
-                    )
-                return
-
-            try:
-                copy_text_to_clipboard(
-                    text,
-                    notify=not simple_feedback,
-                    parent=self.root,
-                )
-            except Exception as exc:
-                _log_runtime_error("detached_copy_text", exc)
-                messagebox.showerror("MekiCopy", f"클립보드 복사 실패:\n{exc}", parent=self.root)
+            if not text.strip():
+                messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=self.root)
                 return
             if simple_feedback:
                 self._show_feedback()
+            else:
+                messagebox.showinfo(
+                    "MekiCopy", "번역 결과를 MekiOverlayer에 표시했습니다.", parent=self.root,
+                )
 
         def on_error(exc: Exception) -> None:
-            stage = "detached_translate" if translate else "detached_ocr"
-            _log_runtime_error(stage, exc)
+            _log_runtime_error("detached_translate", exc)
             detail = str(exc)
             if isinstance(exc, urllib.error.HTTPError):
                 try:
                     detail = f"HTTP {exc.code}\n{exc.read().decode('utf-8', errors='replace')}"
                 except Exception:
                     detail = f"HTTP {exc.code}"
-            title = "번역 및 표시 실패" if translate else "OCR 실행 실패"
-            messagebox.showerror("MekiCopy", f"{title}:\n{detail}", parent=self.root)
+            messagebox.showerror("MekiCopy", f"번역 및 표시 실패:\n{detail}", parent=self.root)
 
         self._task_runner.submit(
             "detached_ocr",
@@ -477,7 +460,7 @@ class DetachedOcrButtonApp:
             settings.detached_fixed_size,
             settings.detached_fixed_width,
             settings.detached_fixed_height,
-            settings.overlay_translation_mode,
+            settings.realtime_ocr_enabled,
         )
 
     @staticmethod
@@ -744,61 +727,112 @@ class MainWindow(tk.Tk):
         self._schedule_global_hotkey_poll()
 
     def _build_ui(self) -> None:
-        header = tk.Label(
-            self,
-            text="MekiCopy",
-            font=TITLE_FONT,
-            bg=BG,
-            fg=ROSE,
+        self._workflow_mode: str | None = None
+        header = tk.Frame(self, bg=BG)
+        header.pack(fill=tk.X, padx=12, pady=(8, 6))
+        self.workflow_back_button = RoundedButton(
+            header, text="‹ 작업 선택", command=self._show_workflow_picker,
+            width=106, height=34,
         )
-        header.pack(pady=(8, 2))
+        self.workflow_title = tk.Label(header, text="MekiCopy", font=TITLE_FONT, bg=BG, fg=ROSE)
+        self.workflow_title.pack(side=tk.RIGHT, expand=True)
 
-        body = tk.Frame(self, bg=BG)
-        body.pack(padx=12, pady=(0, 12), fill=tk.BOTH, expand=True)
+        self.workflow_picker = tk.Frame(self, bg=BG, padx=24, pady=14)
+        tk.Label(
+            self.workflow_picker, text="무엇을 번역하시겠어요?",
+            font=("Malgun Gothic", 18, "bold"), bg=BG, fg=INK,
+        ).pack(anchor="w", pady=(4, 18))
+        self.workflow_buttons: dict[str, RoundedButton] = {}
+        for mode, label in (
+            ("screen", "화면에 나오는 일본어를 번역"),
+            ("audio", "스피커에서 나오는 음성을 번역"),
+            ("subtitle", "영상 파일에 대한 자막 생성"),
+        ):
+            button = RoundedButton(
+                self.workflow_picker, text=label,
+                command=lambda selected=mode: self._select_workflow(selected),
+                height=66, font=("Malgun Gothic", 12, "bold"),
+                variant="primary" if mode == "screen" else "normal", radius=22,
+            )
+            button.pack(fill=tk.X, pady=7)
+            self.workflow_buttons[mode] = button
 
+        self.workflow_body = tk.Frame(self, bg=BG)
         self.tab_buttons: dict[str, RoundedButton] = {}
         self.tab_frames: dict[str, tk.Frame] = {}
-        self.active_tab_name = "영역"
+        self.active_tab_name = "영역 설정"
 
-        tab_bar = tk.Frame(body, width=MAIN_TAB_BAR_WIDTH, bg=BG)
-        tab_bar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 12))
-        tab_bar.pack_propagate(False)
+        self.tab_bar = tk.Frame(self.workflow_body, width=MAIN_TAB_BAR_WIDTH, bg=BG)
+        self.tab_bar.pack_propagate(False)
 
-        content = tk.Frame(body, bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        content = tk.Frame(self.workflow_body, bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        self.workflow_content = content
         content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         for tab_name in (
-            "영역",
-            "캡쳐",
-            "음성인식",
-            "자막 생성",
-            "도구/설정",
-            "행동",
+            "영역 설정", "캡쳐 설정", "도구", "행동", "소리 번역", "영상 자막 생성", "설정",
         ):
             button = RoundedButton(
-                tab_bar,
+                self.tab_bar,
                 text=tab_name,
-                command=lambda name=tab_name: self._select_tab(name),
+                command=(self._on_open_settings if tab_name == "설정"
+                         else lambda name=tab_name: self._select_tab(name)),
                 anchor="w",
                 height=40,
                 radius=18,
             )
-            button.pack(fill=tk.X, pady=2)
             self.tab_buttons[tab_name] = button
 
             frame = tk.Frame(content, bg=SURFACE, padx=12, pady=12)
             self.tab_frames[tab_name] = frame
 
-        self._build_region_tab(self.tab_frames["영역"])
-        self._build_capture_tab(self.tab_frames["캡쳐"])
-        self._build_audio_tab(self.tab_frames["음성인식"])
-        self._build_subtitle_tab(self.tab_frames["자막 생성"])
-        self._build_tools_tab(self.tab_frames["도구/설정"])
+        self._build_region_tab(self.tab_frames["영역 설정"])
+        self._build_capture_tab(self.tab_frames["캡쳐 설정"])
+        self._build_audio_tab(self.tab_frames["소리 번역"])
+        self._build_subtitle_tab(self.tab_frames["영상 자막 생성"])
+        self._build_tools_tab(self.tab_frames["도구"])
         self._build_action_tab(self.tab_frames["행동"])
+        self._pack_tab_button(self.tab_frames["설정"], "설정 열기", self._on_open_settings)
 
         style_tree(self)
-        self._select_tab(self.active_tab_name)
+        self._show_workflow_picker()
         self._update_status()
+
+    def _show_workflow_picker(self) -> None:
+        self._workflow_mode = None
+        self._realtime_requested = False
+        self._sync_realtime_ocr()
+        self._configure_global_hotkey(self.settings)
+        self.workflow_body.pack_forget()
+        self.workflow_back_button.pack_forget()
+        self.workflow_title.config(text="MekiCopy")
+        self.workflow_picker.pack(fill=tk.BOTH, expand=True)
+
+    def _select_workflow(self, mode: str) -> None:
+        choices = {
+            "screen": ("화면 번역", ("영역 설정", "캡쳐 설정", "도구", "행동", "설정")),
+            "audio": ("소리 번역", ("소리 번역",)),
+            "subtitle": ("영상 자막 생성", ("영상 자막 생성",)),
+        }
+        title, tabs = choices[mode]
+        if self._workflow_mode != mode:
+            self._realtime_requested = False
+        self._workflow_mode = mode
+        self._sync_realtime_ocr()
+        self._configure_global_hotkey(self.settings)
+        self.workflow_picker.pack_forget()
+        self.workflow_title.config(text=title)
+        self.workflow_back_button.pack(side=tk.LEFT)
+        self.workflow_body.pack(padx=12, pady=(0, 12), fill=tk.BOTH, expand=True)
+        for name, button in self.tab_buttons.items():
+            button.pack_forget()
+            if name in tabs:
+                button.pack(fill=tk.X, pady=2)
+        if mode == "screen":
+            self.tab_bar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 12), before=self.workflow_content)
+        else:
+            self.tab_bar.pack_forget()
+        self._select_tab(tabs[0])
 
     def _build_region_tab(self, frame: tk.Frame) -> None:
         self.status_label = tk.Label(
@@ -820,10 +854,6 @@ class MainWindow(tk.Tk):
         ]
         for text, command in buttons:
             self._pack_tab_button(frame, text, command)
-
-        self.realtime_button = self._pack_tab_button(
-            frame, "실시간 OCR 시작", self._on_toggle_realtime_ocr,
-        )
 
     def _build_capture_tab(self, frame: tk.Frame) -> None:
         self.capture_status_label = tk.Label(
@@ -852,41 +882,34 @@ class MainWindow(tk.Tk):
     def _build_tools_tab(self, frame: tk.Frame) -> None:
         self.hytrans_button = self._pack_tab_button(
             frame,
-            "HYTrans 서버 실행",
+            "번역 엔진 실행",
             self._on_start_hytrans,
-        )
-        self.hdtrans_settings_button = self._pack_tab_button(
-            frame, "hdTrans 설정", self._on_hdtrans_settings,
-        )
-        self.hdtrans_settings_button.configure(
-            state=tk.NORMAL if self.settings.hytrans_backend == "hdtrans" else tk.DISABLED
         )
         self.overlayer_button = self._pack_tab_button(
             frame,
-            "MekiOverlayer 실행",
+            "번역결과 표시기 실행",
             self._on_start_overlayer,
         )
         self._pack_tab_button(
             frame,
-            "모든 도구 연결 상태확인",
+            "모든 도구 연결 상태 확인",
             self._on_test_overlay_connection,
         )
-        self._pack_tab_button(frame, "설정", self._on_open_settings)
-
     def _build_audio_tab(self, frame: tk.Frame) -> None:
-        self._pack_tab_button(frame, "MekiAudioCapture 실행", self._on_start_audio_capture)
-        self._pack_tab_button(frame, "HYTrans 실행", self._on_start_hytrans)
-        self._pack_tab_button(frame, "MekiScript 실행", self._on_start_script)
+        self._pack_tab_button(frame, "녹음 엔진 실행", self._on_start_audio_capture)
+        self._pack_tab_button(frame, "번역 엔진 실행", self._on_start_hytrans)
+        self._pack_tab_button(frame, "번역결과 표시기 실행", self._on_start_script)
         self._pack_tab_button(
             frame,
-            "모든 도구 연결 상태 확인",
+            "연결 상태 확인",
             self._on_test_audio_connection,
         )
+        self._pack_tab_button(frame, "설정", self._on_open_settings)
 
     def _build_subtitle_tab(self, frame: tk.Frame) -> None:
         tk.Label(
             frame,
-            text="MekiSubtitle",
+            text="영상 자막 생성",
             font=TITLE_FONT,
             bg=SURFACE,
             fg=ROSE,
@@ -894,17 +917,15 @@ class MainWindow(tk.Tk):
         tk.Label(
             frame,
             text=(
-                "영상의 원본 오디오를 FAST VAD와 일본어 STT로 처리한 뒤, "
-                "현재 HYTrans 설정으로 한국어 SRT를 만듭니다.\n\n"
-                "음성·VAD·번역 모델은 MekiAudioCapture와 HYTrans의 공용 "
-                "검증 캐시를 그대로 사용합니다."
+                "영상 파일의 일본어 음성을 인식하고 번역해 한국어 자막 파일을 만듭니다."
             ),
             justify="left",
             wraplength=330,
             bg=SURFACE,
             fg=INK,
         ).pack(pady=(0, 14), fill=tk.X)
-        self._pack_tab_button(frame, "MekiSubtitle 열기", self._on_open_meki_subtitle)
+        self._pack_tab_button(frame, "자막 제작 도구 열기", self._on_open_meki_subtitle)
+        self._pack_tab_button(frame, "설정", self._on_open_settings)
 
     def _on_open_meki_subtitle(self) -> None:
         window = self.subtitle_window
@@ -940,13 +961,18 @@ class MainWindow(tk.Tk):
         ocr_button_frame.pack_propagate(False)
         self.ocr_button = RoundedButton(
             ocr_button_frame,
-            text="인식 후 복사",
-            command=lambda: self._on_ocr_copy(source_button=self.ocr_button),
+            text="번역 후 표시",
+            command=self._on_translation_action,
             font=("Malgun Gothic", 18, "bold"),
             variant="primary",
             radius=28,
         )
         self.ocr_button.pack(fill=tk.BOTH, expand=True)
+        self.realtime_button = self.ocr_button
+        self.action_status_label = tk.Label(
+            frame, text="", bg=SURFACE, fg=INK, justify=tk.LEFT, wraplength=290,
+        )
+        self.action_status_label.pack(fill=tk.X, pady=(4, 0))
 
     def _pack_tab_button(
         self,
@@ -974,26 +1000,36 @@ class MainWindow(tk.Tk):
 
     def ocr_action_label(self) -> str:
         realtime = getattr(self, "_realtime_ocr", None)
-        if realtime is not None and realtime.translation_locked:
-            return REALTIME_LOCK_LABEL
-        if self.settings.overlay_translation_mode:
-            return "번역 후 표시"
-        return "인식 후 복사"
+        if self.settings.realtime_ocr_enabled:
+            return "실시간 OCR 중지" if realtime is not None and realtime.active else "실시간 OCR 시작"
+        return "번역 후 표시"
+
+    def _on_translation_action(self) -> None:
+        if self.settings.realtime_ocr_enabled:
+            self._on_toggle_realtime_ocr()
+        else:
+            self._on_ocr_copy(source_button=self.ocr_button)
 
     def _apply_overlay_mode_ui(self) -> None:
-        overlay_state = tk.NORMAL if self.settings.overlay_translation_mode else tk.DISABLED
-        for button_name in ("hytrans_button", "overlayer_button"):
-            button = getattr(self, button_name, None)
-            if button is not None and button.winfo_exists():
-                button.config(state=overlay_state)
         realtime = getattr(self, "_realtime_ocr", None)
-        locked = realtime is not None and realtime.translation_locked
-        self.ocr_button.config(text=self.ocr_action_label(), state=tk.DISABLED if locked else tk.NORMAL)
-        self.detach_button.config(text=f"'{self.ocr_action_label()}' 버튼 분리하기")
+        active = realtime is not None and realtime.active
+        realtime_mode = self.settings.realtime_ocr_enabled
+        reason = self._realtime_block_reason() if realtime_mode and realtime is not None else ""
+        self.ocr_button.config(
+            text=self.ocr_action_label(),
+            state=tk.DISABLED if realtime_mode and reason and not active else tk.NORMAL,
+        )
+        self.detach_button.config(
+            text="'번역 후 표시' 버튼 분리하기",
+            state=tk.DISABLED if realtime_mode else tk.NORMAL,
+        )
+        status_label = getattr(self, "action_status_label", None)
+        if status_label is not None:
+            status_label.config(text=(self.capture_status_text if active else reason))
 
     @staticmethod
     def _global_hotkey_configuration(settings: AppSettings) -> tuple[bool, str]:
-        return settings.global_hotkey_enabled, settings.global_hotkey
+        return settings.global_hotkey_enabled and not settings.realtime_ocr_enabled, settings.global_hotkey
 
     def _configure_global_hotkey(
         self,
@@ -1002,6 +1038,8 @@ class MainWindow(tk.Tk):
         force: bool = False,
     ) -> tuple[bool, str]:
         configuration = self._global_hotkey_configuration(settings)
+        if getattr(self, "_workflow_mode", "screen") != "screen":
+            configuration = (False, configuration[1])
         if self._global_hotkey_paused:
             self._global_hotkey_settings = configuration
             return True, ""
@@ -1061,6 +1099,8 @@ class MainWindow(tk.Tk):
         if (
             activations
             and self.settings.global_hotkey_enabled
+            and not self.settings.realtime_ocr_enabled
+            and getattr(self, "_workflow_mode", "screen") == "screen"
             and not self._global_hotkey_paused
             and not self._global_hotkey_action_active
             and not (getattr(self, "_realtime_ocr", None)
@@ -1102,6 +1142,9 @@ class MainWindow(tk.Tk):
         self.capture_status_text = text
         if hasattr(self, "capture_status_label") and self.capture_status_label.winfo_exists():
             self.capture_status_label.config(text=text)
+        label = getattr(self, "action_status_label", None)
+        if label is not None:
+            label.config(text=text)
 
     def _set_capture_status_from_last_result(self) -> None:
         result = get_capture_manager().last_result
@@ -1391,6 +1434,8 @@ class MainWindow(tk.Tk):
         messagebox.showinfo("MekiCopy", "인식 영역이 설정되었습니다!")
 
     def _on_detach_ocr_button(self) -> None:
+        if self.settings.realtime_ocr_enabled:
+            return
         if self.active_region:
             try:
                 save_detached_region(self.active_region)
@@ -2392,12 +2437,12 @@ class MainWindow(tk.Tk):
     def _realtime_block_reason(self, *, include_services: bool = True) -> str:
         if self._closing:
             return "프로그램 종료 중입니다."
-        if not self.settings.overlay_translation_mode:
-            return "오버레이어 번역 모드 사용을 켜세요."
+        if getattr(self, "_workflow_mode", "screen") != "screen":
+            return "화면 번역을 선택하세요."
         if self.active_region is None:
             return "먼저 OCR 영역을 확정하세요."
         if not self.settings.realtime_ocr_enabled:
-            return "번역 설정에서 실시간 처리 사용을 켜세요."
+            return "설정의 실시간/수동 번역에서 실시간 번역 모드 사용을 켜세요."
         if getattr(self, "_hytrans_restart_after_id", None) is not None:
             return "HYTrans 재시작이 끝날 때까지 기다리세요."
         if include_services:
@@ -2474,11 +2519,7 @@ class MainWindow(tk.Tk):
             translate=True,
             fingerprint=(target, repr(self.settings), getattr(self, "_hytrans_config_fingerprint", None)),
         )
-        if hasattr(self, "realtime_button"):
-            self.realtime_button.config(
-                text="실시간 OCR 중지" if realtime.active else "실시간 OCR 시작",
-                state=tk.NORMAL if realtime.active or not reason else tk.DISABLED,
-            )
+        self._apply_overlay_mode_ui()
         if was_active and reason:
             self._set_capture_status(f"실시간 OCR 중지: {reason}")
 
@@ -2565,11 +2606,9 @@ class MainWindow(tk.Tk):
                 save_detached_region(region)
                 self._update_status()
         if result.displayed_at is None:
-            # Clipboard ownership stays on Tk's thread and automatic mode is quiet.
-            copy_text_to_clipboard(result.text, notify=False, parent=self)
-            self._set_capture_status("실시간 OCR: 새 원문을 복사했습니다.")
-        else:
-            self._set_capture_status("실시간 OCR: 새 번역 표시 완료. 다음 인식을 기다립니다.")
+            self._set_capture_status("실시간 OCR: 번역 표시를 확인하지 못했습니다.")
+            return False
+        self._set_capture_status("실시간 OCR: 새 번역 표시 완료. 다음 인식을 기다립니다.")
         return True
 
     def _on_realtime_error(self, error: Exception) -> None:
@@ -2589,7 +2628,10 @@ class MainWindow(tk.Tk):
         on_finished: Callable[[], None] | None = None,
     ) -> bool:
         realtime = getattr(self, "_realtime_ocr", None)
-        if (realtime is not None and realtime.translation_locked) or self._task_runner.is_running("main_ocr"):
+        if (self.settings.realtime_ocr_enabled
+                or getattr(self, "_workflow_mode", "screen") != "screen"
+                or (realtime is not None and realtime.translation_locked)
+                or self._task_runner.is_running("main_ocr")):
             return False
         if not self.active_region:
             messagebox.showerror("MekiCopy", "설정된 영역이 없습니다.", parent=self)
@@ -2612,7 +2654,7 @@ class MainWindow(tk.Tk):
             image,
             source_button=source_button or self.ocr_button,
             simple_feedback=self.settings.simple_copy_complete,
-            translate=self.settings.overlay_translation_mode,
+            translate=True,
             on_finished=on_finished,
         )
 
@@ -2622,7 +2664,7 @@ class MainWindow(tk.Tk):
         *,
         source_button: tk.Button,
         simple_feedback: bool,
-        translate: bool,
+        translate: bool = True,
         on_finished: Callable[[], None] | None = None,
     ) -> bool:
         realtime = getattr(self, "_realtime_ocr", None)
@@ -2635,7 +2677,7 @@ class MainWindow(tk.Tk):
 
         def operation() -> str:
             text = recognize_image(image)
-            if translate and text.strip():
+            if text.strip():
                 request_translation_and_show(
                     text,
                     hytrans_url=hytrans_url,
@@ -2646,44 +2688,29 @@ class MainWindow(tk.Tk):
 
         def on_success(text: str) -> None:
             try:
-                if translate:
-                    if not text.strip():
-                        messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=self)
-                        return
-                    if simple_feedback:
-                        self._show_copy_feedback(source_button)
-                    else:
-                        messagebox.showinfo(
-                            "MekiCopy",
-                            "번역 결과를 MekiOverlayer에 표시했습니다.",
-                            parent=self,
-                        )
-                    return
-
-                try:
-                    copy_text_to_clipboard(text, notify=not simple_feedback, parent=self)
-                except Exception as exc:
-                    _log_runtime_error("ocr_copy_clipboard", exc)
-                    messagebox.showerror("MekiCopy", f"클립보드 복사 실패:\n{exc}", parent=self)
+                if not text.strip():
+                    messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=self)
                     return
                 if simple_feedback:
                     self._show_copy_feedback(source_button)
+                else:
+                    messagebox.showinfo(
+                        "MekiCopy", "번역 결과를 MekiOverlayer에 표시했습니다.", parent=self,
+                    )
             finally:
                 if on_finished is not None:
                     on_finished()
 
         def on_error(exc: Exception) -> None:
             try:
-                stage = "ocr_translate_and_show" if translate else "ocr"
-                _log_runtime_error(stage, exc)
+                _log_runtime_error("ocr_translate_and_show", exc)
                 detail = str(exc)
                 if isinstance(exc, urllib.error.HTTPError):
                     try:
                         detail = f"HTTP {exc.code}\n{exc.read().decode('utf-8', errors='replace')}"
                     except Exception:
                         detail = f"HTTP {exc.code}"
-                title = "번역 및 표시 실패" if translate else "OCR 실행 실패"
-                messagebox.showerror("MekiCopy", f"{title}:\n{detail}", parent=self)
+                messagebox.showerror("MekiCopy", f"번역 및 표시 실패:\n{detail}", parent=self)
             finally:
                 if on_finished is not None:
                     on_finished()
@@ -2741,6 +2768,7 @@ class MainWindow(tk.Tk):
     def apply_settings(
         self, settings: AppSettings, persist: bool, *, api_settings: ApiSettings | None = None
     ) -> bool | None:
+        settings = replace(settings, overlay_translation_mode=True)
         previous = self.settings
         backend = normalize_backend(settings.hytrans_backend)
         previous_api_settings = load_api_settings()
@@ -2844,8 +2872,7 @@ class MainWindow(tk.Tk):
             self.subtitle_window.refresh_settings(self.settings)
         self._apply_overlay_mode_ui()
         self._sync_realtime_ocr()
-        if self.settings.overlay_translation_mode:
-            self._send_overlayer_config(log_errors=False)
+        self._send_overlayer_config(log_errors=False)
         self._send_script_config(log_errors=False)
         self._send_audio_capture_config(log_errors=False)
         self._send_hytrans_logging_config(log_errors=False)
@@ -3075,7 +3102,7 @@ def main() -> None:
         if not bookmark:
             messagebox.showerror("MekiCopy", "북마크를 찾을 수 없습니다.")
             return
-        ocr_and_copy(bookmark.left, bookmark.top, bookmark.width, bookmark.height)
+        ocr_and_translate(bookmark.left, bookmark.top, bookmark.width, bookmark.height)
         return
     if args.pick_bookmark:
         run_picker_and_capture()

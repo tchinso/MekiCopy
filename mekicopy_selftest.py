@@ -247,16 +247,19 @@ def run_ui_self_test(
             raise RuntimeError(
                 f"main window height is {app.winfo_height()}, expected {window_height}"
             )
-        expected_tabs = {
-            "영역",
-            "캡쳐",
-            "음성인식",
-            "자막 생성",
-            "도구/설정",
-            "행동",
-        }
+        expected_tabs = {"영역 설정", "캡쳐 설정", "도구", "행동", "소리 번역", "영상 자막 생성", "설정"}
         if set(app.tab_frames) != expected_tabs:
             raise RuntimeError(f"unexpected main tabs: {set(app.tab_frames)}")
+        if app._workflow_mode is not None:
+            raise RuntimeError("main window did not open at the translation workflow picker")
+        if any(frame.winfo_ismapped() for frame in app.tab_frames.values()):
+            raise RuntimeError("workflow content is visible before a workflow is selected")
+
+        app._select_workflow("screen")
+        app.update_idletasks()
+        visible_tabs = {name for name, button in app.tab_buttons.items() if button.winfo_ismapped()}
+        if visible_tabs != {"영역 설정", "캡쳐 설정", "도구", "행동", "설정"}:
+            raise RuntimeError(f"unexpected screen translation tabs: {visible_tabs}")
         app._select_tab("행동")
         app.update_idletasks()
         ocr_button_height = app.ocr_button.master.winfo_height()
@@ -264,27 +267,39 @@ def run_ui_self_test(
             raise RuntimeError(
                 f"main OCR button height is {ocr_button_height}, expected {expected_ocr_button_height}"
             )
-        app._select_tab("영역")
+        if app.realtime_button is not app.ocr_button:
+            raise RuntimeError("manual and realtime translation do not share the action button")
+        initial_realtime_enabled = app.settings.realtime_ocr_enabled
+        for realtime_enabled, expected_label in ((False, "번역 후 표시"), (True, "실시간 OCR 시작")):
+            app.settings.realtime_ocr_enabled = realtime_enabled
+            app._sync_realtime_ocr()
+            app.update_idletasks()
+            if app.ocr_button.cget("text") != expected_label:
+                raise RuntimeError(f"unexpected translation action: {app.ocr_button.cget('text')}")
+            expected_detach_state = tk.DISABLED if realtime_enabled else tk.NORMAL
+            if app.detach_button.cget("state") != expected_detach_state:
+                raise RuntimeError("detached button availability does not match translation mode")
+        app.settings.realtime_ocr_enabled = initial_realtime_enabled
+        app._sync_realtime_ocr()
+        app._select_tab("도구")
         app.update_idletasks()
-        region_frame = app.tab_frames["영역"]
-        if (not app.realtime_button.winfo_ismapped()
-                or app.realtime_button.master is not region_frame
-                or app.realtime_button.winfo_y() + app.realtime_button.winfo_height() > region_frame.winfo_height()):
-            raise RuntimeError("realtime OCR control is clipped outside the region tab")
-        app._select_tab("도구/설정")
-        app.update_idletasks()
-        expected_overlay_state = (
-            tk.NORMAL if app.settings.overlay_translation_mode else tk.DISABLED
-        )
-        if app.hytrans_button.cget("state") != expected_overlay_state:
-            raise RuntimeError("HYTrans button state does not match overlay mode")
-        if app.overlayer_button.cget("state") != expected_overlay_state:
-            raise RuntimeError("MekiOverlayer button state does not match overlay mode")
-        app._select_tab("자막 생성")
-        app.update_idletasks()
-        if "MekiSubtitle" not in app.tab_frames["자막 생성"].winfo_children()[0].cget("text"):
-            raise RuntimeError("MekiSubtitle tab title was not created")
-        app._select_tab("영역")
+        if app.hytrans_button.cget("state") != tk.NORMAL:
+            raise RuntimeError("translation engine launch button is disabled")
+        if app.overlayer_button.cget("state") != tk.NORMAL:
+            raise RuntimeError("translation display launch button is disabled")
+        for workflow, frame_name in (("audio", "소리 번역"), ("subtitle", "영상 자막 생성")):
+            app._select_workflow(workflow)
+            app.update_idletasks()
+            if app._workflow_mode != workflow or not app.tab_frames[frame_name].winfo_ismapped():
+                raise RuntimeError(f"{workflow} workflow did not show its content")
+            if app.tab_frames["행동"].winfo_ismapped():
+                raise RuntimeError(f"screen translation actions are visible in {workflow} workflow")
+            app._show_workflow_picker()
+            app.update_idletasks()
+            if app._workflow_mode is not None:
+                raise RuntimeError(f"{workflow} workflow could not return to the picker")
+        app._select_workflow("screen")
+        app._select_tab("영역 설정")
         app.update_idletasks()
 
         bookmark = Bookmark(name="self-test", left=11, top=22, width=333, height=44)
@@ -294,11 +309,13 @@ def run_ui_self_test(
             raise RuntimeError(f"bookmark did not populate active region: {app.active_region}")
         if "확정 영역 :\n설정되지 않음" in app.status_label.cget("text"):
             raise RuntimeError("bookmark status still reports no active region")
-        app._select_tab("영역")
+        app._select_tab("행동")
         app.geometry("500x420")
         app.update_idletasks()
-        if app.realtime_button.winfo_y() + app.realtime_button.winfo_height() > region_frame.winfo_height():
-            raise RuntimeError("realtime OCR control is clipped at the minimum window size")
+        action_frame = app.tab_frames["행동"]
+        action_bottom = app.ocr_button.master.winfo_y() + app.ocr_button.master.winfo_height()
+        if action_bottom > action_frame.winfo_height():
+            raise RuntimeError("translation action is clipped at the minimum window size")
         app.geometry(f"{window_width}x{window_height}")
 
         tray_roundtrip = False

@@ -296,6 +296,7 @@ class AppSettings:
     detached_geometry: str = DETACHED_DEFAULT_GEOMETRY
     detached_fixed_width: int = 260
     detached_fixed_height: int = 160
+    # Retained for legacy settings compatibility; screen OCR always translates.
     overlay_translation_mode: bool = True
     realtime_ocr_enabled: bool = True
     realtime_ocr_interval: float = 1.0
@@ -575,11 +576,6 @@ def load_settings() -> AppSettings:
     settings.detached_fixed_height = parser.getint(
         section, "detached_fixed_height", fallback=settings.detached_fixed_height
     )
-    settings.overlay_translation_mode = parser.getboolean(
-        section,
-        "overlay_translation_mode",
-        fallback=settings.overlay_translation_mode,
-    )
     settings.realtime_ocr_enabled = parser.getboolean(
         section, "realtime_ocr_enabled", fallback=settings.realtime_ocr_enabled
     )
@@ -791,7 +787,7 @@ def save_settings(settings: AppSettings) -> bool:
         "detached_geometry": settings.detached_geometry,
         "detached_fixed_width": str(settings.detached_fixed_width),
         "detached_fixed_height": str(settings.detached_fixed_height),
-        "overlay_translation_mode": str(settings.overlay_translation_mode).lower(),
+        "overlay_translation_mode": "true",
         "realtime_ocr_enabled": str(settings.realtime_ocr_enabled).lower(),
         "realtime_ocr_interval": str(normalize_interval(settings.realtime_ocr_interval)),
         "hytrans_backend": normalize_backend(settings.hytrans_backend),

@@ -4,6 +4,7 @@ import configparser
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import mekicopy_settings
@@ -106,3 +107,63 @@ class HotkeySettingsTests(unittest.TestCase):
 
         self.assertTrue(settings.global_hotkey_enabled)
         self.assertEqual(settings.global_hotkey, DEFAULT_GLOBAL_HOTKEY)
+
+
+class ManualTranslationHotkeyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        import mekicopy
+        cls.app = mekicopy
+
+    def test_realtime_mode_disables_registration_without_erasing_manual_preference(self) -> None:
+        for realtime in (False, True):
+            with self.subTest(realtime=realtime):
+                settings = AppSettings(
+                    realtime_ocr_enabled=realtime,
+                    global_hotkey_enabled=True,
+                    global_hotkey="Ctrl+B",
+                )
+                self.assertEqual(
+                    self.app.MainWindow._global_hotkey_configuration(settings),
+                    (not realtime, "Ctrl+B"),
+                )
+                self.assertTrue(settings.global_hotkey_enabled)
+
+    def ready_window(self, *, workflow="screen", realtime=False):
+        runner = mock.Mock()
+        runner.is_running.return_value = False
+        return SimpleNamespace(
+            _workflow_mode=workflow,
+            settings=AppSettings(realtime_ocr_enabled=realtime, global_hotkey_enabled=True),
+            _closing=False,
+            _global_hotkey=SimpleNamespace(drain_activations=lambda: 3),
+            _global_hotkey_paused=False,
+            _global_hotkey_action_active=False,
+            _realtime_ocr=SimpleNamespace(active=False, translation_locked=False),
+            _task_runner=runner,
+            ocr_button=mock.Mock(),
+            _on_ocr_copy=mock.Mock(return_value=True),
+            _on_global_hotkey_action_finished=mock.Mock(),
+            _schedule_global_hotkey_poll=mock.Mock(),
+        )
+
+    def test_hotkey_only_runs_in_manual_screen_translation(self) -> None:
+        for workflow in (None, "screen", "audio", "subtitle"):
+            for realtime in (False, True):
+                with self.subTest(workflow=workflow, realtime=realtime):
+                    window = self.ready_window(workflow=workflow, realtime=realtime)
+                    self.app.MainWindow._poll_global_hotkey(window)
+                    self.assertEqual(
+                        window._on_ocr_copy.call_count,
+                        int(workflow == "screen" and not realtime),
+                    )
+                    window._schedule_global_hotkey_poll.assert_called_once_with()
+
+    def test_repeated_hotkey_events_share_one_inflight_manual_action(self) -> None:
+        window = self.ready_window()
+        self.app.MainWindow._poll_global_hotkey(window)
+        self.app.MainWindow._poll_global_hotkey(window)
+        window._on_ocr_copy.assert_called_once_with(
+            source_button=window.ocr_button,
+            on_finished=window._on_global_hotkey_action_finished,
+        )

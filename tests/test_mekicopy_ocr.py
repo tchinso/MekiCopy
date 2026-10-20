@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import mekicopy_ocr
+from mekicopy_settings import AppSettings
 
 
 class _Session:
@@ -112,6 +113,66 @@ class MeikiOcrGpuSelectionTests(unittest.TestCase):
             cudnn=True,
             msvc=True,
         )
+
+
+class OcrTranslationTests(unittest.TestCase):
+    def test_capture_translates_with_saved_service_and_display_settings(self) -> None:
+        settings = AppSettings(
+            hytrans_port=7996,
+            overlayer_port=7997,
+            overlayer_text_color="#123456",
+            simple_copy_complete=False,
+        )
+        complete = mock.Mock()
+        parent = mock.Mock()
+        with (
+            mock.patch.object(mekicopy_ocr, "_prepare_tk_library_paths"),
+            mock.patch.object(mekicopy_ocr, "load_settings", return_value=settings),
+            mock.patch.object(mekicopy_ocr, "ocr_region", return_value="原文") as capture,
+            mock.patch.object(mekicopy_ocr, "request_translation_and_show") as translate,
+            mock.patch.object(mekicopy_ocr.messagebox, "showinfo") as feedback,
+        ):
+            mekicopy_ocr.ocr_and_translate(
+                10, 20, 300, 100, parent=parent, on_translation_complete=complete
+            )
+        capture.assert_called_once_with(10, 20, 300, 100, parent=parent)
+        request = translate.call_args
+        self.assertEqual(request.args, ("原文",))
+        self.assertEqual(request.kwargs["hytrans_url"], "http://127.0.0.1:7996")
+        self.assertEqual(request.kwargs["overlayer_url"], "http://127.0.0.1:7997")
+        self.assertEqual(request.kwargs["overlayer_config"]["text_color"], "#123456")
+        complete.assert_called_once_with()
+        feedback.assert_called_once()
+
+    def test_empty_or_failed_capture_never_translates(self) -> None:
+        for text in (None, "", "  "):
+            with self.subTest(text=text):
+                with (
+                    mock.patch.object(mekicopy_ocr, "_prepare_tk_library_paths"),
+                    mock.patch.object(mekicopy_ocr, "load_settings", return_value=AppSettings()),
+                    mock.patch.object(mekicopy_ocr, "ocr_region", return_value=text),
+                    mock.patch.object(mekicopy_ocr, "request_translation_and_show") as translate,
+                    mock.patch.object(mekicopy_ocr.messagebox, "showwarning"),
+                ):
+                    mekicopy_ocr.ocr_and_translate(10, 20, 300, 100)
+                translate.assert_not_called()
+
+    def test_failed_translation_reports_failure_without_success_callback(self) -> None:
+        complete = mock.Mock()
+        with (
+            mock.patch.object(mekicopy_ocr, "_prepare_tk_library_paths"),
+            mock.patch.object(mekicopy_ocr, "load_settings", return_value=AppSettings()),
+            mock.patch.object(mekicopy_ocr, "ocr_region", return_value="原文"),
+            mock.patch.object(
+                mekicopy_ocr, "request_translation_and_show", side_effect=RuntimeError("연결 실패")
+            ),
+            mock.patch.object(mekicopy_ocr, "_log_runtime_error"),
+            mock.patch.object(mekicopy_ocr.messagebox, "showerror") as feedback,
+        ):
+            mekicopy_ocr.ocr_and_translate(10, 20, 300, 100, on_translation_complete=complete)
+        complete.assert_not_called()
+        feedback.assert_called_once()
+        self.assertIn("연결 실패", feedback.call_args.args[1])
 
 
 if __name__ == "__main__":

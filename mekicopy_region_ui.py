@@ -9,7 +9,7 @@ import mss
 from tkinter import messagebox
 from system_logging import install_tk_exception_hook
 from mekicopy_capture import MIN_SIZE_PX, Region, enable_dpi_awareness as _enable_dpi_awareness
-from mekicopy_ocr import ocr_and_copy
+from mekicopy_ocr import ocr_and_translate
 from mekicopy_runtime import _prepare_tk_library_paths, _set_window_icon
 from mekicopy_settings import Bookmark, Rect, load_bookmarks, save_detached_region
 
@@ -84,7 +84,7 @@ class SelectionUI:
 
     def _draw_instructions(self) -> None:
         if self.capture_on_enter:
-            text = "드래그로 미세 조정, <Enter> 캡처"
+            text = "드래그로 미세 조정, <Enter> 번역 후 표시"
         else:
             text = "드래그로 미세 조정, <Enter> 설정"
         for monitor in self.monitors:
@@ -236,7 +236,7 @@ class SelectionUI:
         if self.capture_on_enter:
             self.root.withdraw()
             self.root.update_idletasks()
-            ocr_and_copy(left, top, width, height)
+            ocr_and_translate(left, top, width, height, parent=self.root)
         elif self.on_confirm:
             self.on_confirm(Region(left=left, top=top, width=width, height=height))
         self.root.destroy()
@@ -406,7 +406,9 @@ def run_picker_and_capture(parent: tk.Misc | None = None) -> None:
         return
     bookmark = _show_bookmark_picker(bookmarks, parent=parent)
     if bookmark:
-        ocr_and_copy(bookmark.left, bookmark.top, bookmark.width, bookmark.height)
+        ocr_and_translate(
+            bookmark.left, bookmark.top, bookmark.width, bookmark.height, parent=parent
+        )
 
 
 def pick_bookmark(parent: tk.Misc | None = None) -> Bookmark | None:
