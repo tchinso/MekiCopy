@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
+from dataclasses import replace
+from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -10,7 +13,7 @@ from unittest import mock
 import mekicopy_settings
 from mekicopy_realtime import (
     REALTIME_INTERVALS, REALTIME_LOCK_LABEL, RealtimeOcrController,
-    RealtimeResult, RealtimeSession, comparison_text, detached_translation_locked,
+    RealtimeResult, RealtimeSession, RealtimeUnavailableError, comparison_text, detached_translation_locked,
     is_duplicate, japanese_character_count, next_start, normalize_interval, perform_cycle,
 )
 from mekicopy_settings import AppSettings, load_settings, save_settings
@@ -373,6 +376,166 @@ class RealtimeUiEntryTests(unittest.TestCase):
         import mekicopy
         cls.app = mekicopy
 
+    def ready_window(self):
+        from mekicopy_capture import Region
+        clock = FakeClock()
+        window = SimpleNamespace(
+            settings=AppSettings(realtime_ocr_enabled=True),
+            active_region=Region(0, 0, 100, 100), active_monitor=None, active_region_ratio=None,
+            _closing=False, _realtime_requested=False,
+            _realtime_service_ports=(AppSettings().hytrans_port, AppSettings().overlayer_port),
+            _realtime_service_processes=((None, False), (None, False)),
+            _realtime_service_status={"HYTrans": True, "MekiOverlayer": True},
+            _realtime_service_checked_at=time.monotonic(), _realtime_service_probe_at=0.0,
+            _hytrans_config_fingerprint="initial", _task_runner=mock.Mock(),
+            realtime_button=mock.Mock(), _set_capture_status=mock.Mock(),
+        )
+        for name in ("_realtime_block_reason", "_realtime_process_snapshot", "_sync_realtime_ocr",
+                     "_refresh_realtime_services"):
+            setattr(window, name, getattr(self.app.MainWindow, name).__get__(window))
+        window._realtime_ocr = RealtimeOcrController(
+            FakeRoot(clock), FakeRunner(), prepare_operation=mock.Mock(),
+            on_result=mock.Mock(), on_error=mock.Mock(), clock=clock,
+        )
+        return window
+
+    def test_start_requires_all_options_region_and_both_services(self):
+        for overlay, region, enabled, hytrans, overlayer in product((False, True), repeat=5):
+            with self.subTest(overlay=overlay, region=region, enabled=enabled,
+                              hytrans=hytrans, overlayer=overlayer):
+                window = self.ready_window()
+                window.settings = replace(window.settings, overlay_translation_mode=overlay,
+                                          realtime_ocr_enabled=enabled)
+                if not region:
+                    window.active_region = None
+                window._realtime_service_status = {"HYTrans": hytrans, "MekiOverlayer": overlayer}
+                self.app.MainWindow._on_toggle_realtime_ocr(window)
+                self.assertEqual(window._realtime_ocr.active,
+                                 all((overlay, region, enabled, hytrans, overlayer)))
+                self.assertEqual(window.settings.realtime_ocr_enabled, enabled)
+
+    def test_settings_enable_only_allows_explicit_start_and_stop_does_not_change_settings(self):
+        window = self.ready_window()
+        window._sync_realtime_ocr()
+        self.assertFalse(window._realtime_ocr.active)
+        self.app.MainWindow._on_toggle_realtime_ocr(window)
+        self.assertTrue(window._realtime_ocr.translation_locked)
+        self.assertEqual(window.realtime_button.config.call_args.kwargs["text"], "실시간 OCR 중지")
+        # Stopping remains possible even if prerequisites became unavailable.
+        window._realtime_service_status = {}
+        self.app.MainWindow._on_toggle_realtime_ocr(window)
+        self.assertFalse(window._realtime_ocr.active)
+        self.assertTrue(window.settings.realtime_ocr_enabled)
+
+    def test_service_loss_cancels_session_and_recovery_needs_explicit_start(self):
+        for name in ("HYTrans", "MekiOverlayer"):
+            with self.subTest(name=name):
+                window = self.ready_window()
+                self.app.MainWindow._on_toggle_realtime_ocr(window)
+                session = window._realtime_ocr.session
+                window._realtime_service_status[name] = False
+                window._sync_realtime_ocr()
+                self.assertFalse(window._realtime_ocr.active)
+                self.assertTrue(session.cancelled.is_set())
+                self.assertFalse(window._realtime_ocr.root.pending)
+                window._realtime_service_status[name] = True
+                window._sync_realtime_ocr()
+                self.assertFalse(window._realtime_ocr.active)
+                self.app.MainWindow._on_toggle_realtime_ocr(window)
+                self.assertTrue(window._realtime_ocr.active)
+
+    def test_stale_health_or_changed_ports_cannot_enable_start(self):
+        for change in ("expired", "ports", "restarting"):
+            with self.subTest(change=change):
+                window = self.ready_window()
+                if change == "expired":
+                    window._realtime_service_checked_at -= 10
+                elif change == "ports":
+                    window.settings = replace(window.settings, hytrans_port=5998)
+                else:
+                    window._hytrans_restart_after_id = "restart"
+                self.app.MainWindow._on_toggle_realtime_ocr(window)
+                self.assertFalse(window._realtime_ocr.active)
+
+    def test_background_probe_accepts_external_services_and_discards_stale_results(self):
+        for change in (None, "ports", "backend", "model", "process", "closed"):
+            with self.subTest(change=change):
+                window = self.ready_window()
+                window._realtime_service_status = {}
+                window._realtime_service_ports = None
+                window._refresh_realtime_services()
+                args, callbacks = window._task_runner.submit.call_args
+                self.assertEqual(args[0], "realtime_services")
+                with mock.patch.object(self.app, "_probe_service") as probe:
+                    status = args[1]()
+                self.assertEqual(probe.call_count, 2)
+                if change == "ports":
+                    window.settings = replace(window.settings, overlayer_port=6998)
+                elif change == "backend":
+                    window._hytrans_config_fingerprint = "changed"
+                elif change == "model":
+                    window.settings = replace(window.settings, hytrans_model_id="mt0.5")
+                elif change == "process":
+                    window.overlayer_process = SimpleNamespace(poll=lambda: None)
+                elif change == "closed":
+                    window._closing = True
+                callbacks["on_success"](status)
+                self.assertEqual(window._realtime_service_status,
+                                 {"HYTrans": True, "MekiOverlayer": True} if change is None else {})
+
+    def test_dead_owned_child_blocks_cached_start_and_external_replacement_can_be_used(self):
+        window = self.ready_window()
+        child = SimpleNamespace(poll=mock.Mock(return_value=None))
+        window.overlayer_process = child
+        window._realtime_service_processes = window._realtime_process_snapshot()
+        self.app.MainWindow._on_toggle_realtime_ocr(window)
+        session = window._realtime_ocr.session
+        child.poll.return_value = 1
+        window._refresh_realtime_services()
+        self.assertFalse(window._realtime_ocr.active)
+        self.assertTrue(session.cancelled.is_set())
+        args, callbacks = window._task_runner.submit.call_args
+        with mock.patch.object(self.app, "_probe_service"):
+            # A separately launched replacement can respond on the old port,
+            # even while the closed child's Popen handle remains stored.
+            callbacks["on_success"](args[1]())
+        window._sync_realtime_ocr()
+        self.assertEqual(window.realtime_button.config.call_args.kwargs["state"], "normal")
+        self.assertFalse(window._realtime_ocr.active)
+        self.app.MainWindow._on_toggle_realtime_ocr(window)
+        self.assertTrue(window._realtime_ocr.active)
+
+    def test_child_exit_during_probe_discards_old_healthy_response(self):
+        window = self.ready_window()
+        child = SimpleNamespace(poll=mock.Mock(return_value=None))
+        window.overlayer_process = child
+        window._realtime_service_ports = None
+        window._realtime_service_status = {}
+        window._refresh_realtime_services()
+        _, callbacks = window._task_runner.submit.call_args
+        child.poll.return_value = 1
+        callbacks["on_success"]({"HYTrans": True, "MekiOverlayer": True})
+        self.assertEqual(window._realtime_service_status, {})
+
+    def test_service_disappearing_before_cycle_prevents_capture(self):
+        window = self.ready_window()
+        operation = self.app.MainWindow._prepare_realtime_operation(window, RealtimeSession(1), None)
+        with (mock.patch.object(self.app, "_probe_service", side_effect=RuntimeError("offline")),
+              mock.patch.object(self.app, "capture_ocr_image") as capture):
+            with self.assertRaises(RealtimeUnavailableError):
+                operation()
+            capture.assert_not_called()
+
+    def test_service_failure_stops_retries_and_unlocks_manual_translation(self):
+        window = self.ready_window()
+        self.app.MainWindow._on_toggle_realtime_ocr(window)
+        session = window._realtime_ocr.session
+        with mock.patch.object(self.app, "_log_runtime_error"):
+            self.app.MainWindow._on_realtime_error(window, RealtimeUnavailableError("offline"))
+        self.assertFalse(window._realtime_ocr.translation_locked)
+        self.assertTrue(session.cancelled.is_set())
+        self.assertFalse(window._realtime_ocr.root.pending)
+
     def test_manual_main_entry_is_blocked_without_capturing(self):
         window = SimpleNamespace(_realtime_ocr=SimpleNamespace(translation_locked=True))
         with mock.patch.object(self.app, "capture_ocr_image") as capture:
@@ -417,13 +580,14 @@ class RealtimeUiEntryTests(unittest.TestCase):
     def test_monitor_target_correction_processes_first_result_and_updates_profile(self):
         from mekicopy_capture import Region
         old, corrected = Region(0, 0, 100, 100), Region(100, 0, 100, 100)
-        window = SimpleNamespace(
-            active_region=old, active_monitor=None, active_region_ratio=None,
-            settings=AppSettings(overlay_translation_mode=False), _closing=False,
-            _update_status=mock.Mock(), _set_capture_status=mock.Mock(),
-        )
+        window = self.ready_window()
+        window.active_region = old
+        window._update_status = mock.Mock()
         manager = SimpleNamespace(resolve_region=mock.Mock(return_value=(corrected, "monitor", "ratio", [])))
-        with (mock.patch.object(self.app, "get_capture_manager", return_value=manager),
+        with (mock.patch.object(self.app, "_probe_service"),
+              mock.patch.object(self.app, "request_translation_and_show",
+                                return_value={"displayedMonotonic": 101.5}) as translate,
+              mock.patch.object(self.app, "get_capture_manager", return_value=manager),
               mock.patch.object(self.app, "capture_ocr_image"),
               mock.patch.object(self.app, "recognize_image", return_value="同じ原文")):
             operation = self.app.MainWindow._prepare_realtime_operation(window, RealtimeSession(1), "同じ原文")
@@ -434,7 +598,8 @@ class RealtimeUiEntryTests(unittest.TestCase):
             self.assertTrue(self.app.MainWindow._on_realtime_result(window, result))
         self.assertEqual(window.active_region, corrected)
         self.assertEqual(window.active_monitor, "monitor")
-        copy.assert_called_once_with("同じ原文", notify=False, parent=window)
+        copy.assert_not_called()
+        self.assertEqual(translate.call_args.args[0], "同じ原文")
 
 
 if __name__ == "__main__":

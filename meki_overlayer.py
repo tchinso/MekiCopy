@@ -9,14 +9,12 @@ import socket
 import sys
 import threading
 import traceback
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from ctypes import wintypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-from runtime_paths import is_ascii_path, path_for_tcl, sync_tk_runtime, tk_runtime_roots
 from runtime_paths import prepare_tk_environment
 from overlay_receipts import DisplayReceipts
 
@@ -57,26 +55,13 @@ from win32_overlay import TopmostWindowController, get_top_level_hwnd
 DEFAULT_PORT = OVERLAYER_DEFAULT_PORT
 DEFAULT_GEOMETRY = "780x180+120+120"
 MAX_REQUEST_BYTES = 1024 * 1024
-_WINDOW_STREAM = None
 WDA_NONE = 0x00000000
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
-
-
-def _get_app_dir() -> str:
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
 
 
 def normalize_font_name(font_name: str) -> str:
     normalized = str(font_name).strip().lstrip("@").strip()
     return normalized or "Malgun Gothic"
-
-
-def _get_resource_dir() -> str:
-    if getattr(sys, "frozen", False):
-        return getattr(sys, "_MEIPASS", _get_app_dir())
-    return os.path.dirname(os.path.abspath(__file__))
 
 
 def log_error(stage: str, exc: BaseException | str) -> None:
@@ -85,74 +70,6 @@ def log_error(stage: str, exc: BaseException | str) -> None:
 
 def log_debug(enabled: bool, stage: str, message: str) -> None:
     system_debug(stage, message, component="MekiOverlayer", enabled=enabled)
-
-
-def _prepare_windowed_streams() -> None:
-    capture_windowed_streams()
-
-
-def _prepare_tk_library_paths() -> None:
-    if os.name != "nt":
-        return
-
-    resource_dir = _get_resource_dir()
-    tcl_candidates = [
-        os.path.join(resource_dir, "_tcl_data"),
-        os.path.join(resource_dir, "tcl", "tcl8.6"),
-        os.path.join(sys.base_prefix, "tcl", "tcl8.6"),
-    ]
-    tk_candidates = [
-        os.path.join(resource_dir, "_tk_data"),
-        os.path.join(resource_dir, "tcl", "tk8.6"),
-        os.path.join(sys.base_prefix, "tcl", "tk8.6"),
-    ]
-    source_tcl = next(
-        (
-            path
-            for path in tcl_candidates
-            if os.path.exists(os.path.join(path, "init.tcl"))
-        ),
-        None,
-    )
-    source_tk = next(
-        (
-            path
-            for path in tk_candidates
-            if os.path.exists(os.path.join(path, "tk.tcl"))
-        ),
-        None,
-    )
-    if not source_tcl or not source_tk:
-        return
-
-    def use_tk_paths(tcl_path: str, tk_path: str) -> bool:
-        tcl_env = path_for_tcl(tcl_path)
-        tk_env = path_for_tcl(tk_path)
-        if not is_ascii_path(tcl_env) or not is_ascii_path(tk_env):
-            return False
-        safe_init = os.path.join(tcl_env, "init.tcl")
-        safe_tk_script = os.path.join(tk_env, "tk.tcl")
-        if os.path.exists(safe_init) and os.path.exists(safe_tk_script):
-            os.environ["TCL_LIBRARY"] = tcl_env.replace("\\", "/")
-            os.environ["TK_LIBRARY"] = tk_env.replace("\\", "/")
-            return True
-        return False
-
-    if use_tk_paths(source_tcl, source_tk):
-        return
-
-    for safe_root_path in tk_runtime_roots(TK_RUNTIME_DIRNAME):
-        safe_root = path_for_tcl(safe_root_path)
-        if not is_ascii_path(safe_root):
-            continue
-        try:
-            safe_tcl, safe_tk = sync_tk_runtime(source_tcl, source_tk, safe_root)
-            if use_tk_paths(str(safe_tcl), str(safe_tk)):
-                return
-        except OSError as exc:
-            log_error("prepare_tk_library_paths", exc)
-
-    use_tk_paths(source_tcl, source_tk)
 
 
 @dataclass
@@ -243,6 +160,7 @@ class OverlayerApp:
         self._drag_start: tuple[int, int] | None = None
         self._window_start: tuple[int, int] | None = None
         self._topmost_controller: TopmostWindowController | None = None
+        self._applied_config: dict[str, Any] = {}
 
         self.root.title("MekiOverlayer")
         self.root.geometry(DEFAULT_GEOMETRY)
@@ -373,33 +291,57 @@ class OverlayerApp:
 
     def apply_config(self) -> None:
         cfg = self.config
-        self.root.withdraw()
-        self.root.overrideredirect(cfg.hide_titlebar)
-        self.root.configure(bg=cfg.bg_color)
-        self.root.attributes("-alpha", cfg.opacity)
-        self.root.attributes("-topmost", cfg.topmost)
-        self.root.resizable(not cfg.fixed_size, not cfg.fixed_size)
-        if cfg.fixed_size:
-            self.root.update_idletasks()
-            width = max(240, self.root.winfo_width())
-            height = max(80, self.root.winfo_height())
-            self.root.minsize(width, height)
-            self.root.maxsize(width, height)
-        else:
-            self.root.minsize(240, 80)
-            self.root.maxsize(10000, 10000)
-        self.label.configure(
-            bg=cfg.bg_color,
-            fg=cfg.text_color,
-            font=(normalize_font_name(cfg.text_font), cfg.text_size, "bold"),
-        )
-        self._update_wraplength()
-        self.root.deiconify()
+        current = asdict(cfg)
+        previous = self._applied_config
+        changed = {key for key, value in current.items() if previous.get(key) != value}
+        if not changed:
+            return
+
+        # Every translation may include the same config.  Remapping the native
+        # window for those requests disturbs dragging and generates unnecessary
+        # WinEvent callbacks; only a titlebar change requires withdrawing Tk.
+        frame_changed = "hide_titlebar" in changed
+        geometry = self.root.geometry() if previous and frame_changed else None
+        if frame_changed:
+            self.root.withdraw()
+            self.root.overrideredirect(cfg.hide_titlebar)
+            if geometry is not None:
+                self.root.geometry(geometry)
+        if "bg_color" in changed:
+            self.root.configure(bg=cfg.bg_color)
+        if "opacity" in changed:
+            self.root.attributes("-alpha", cfg.opacity)
+        if "topmost" in changed:
+            self.root.attributes("-topmost", cfg.topmost)
+        if "fixed_size" in changed:
+            self.root.resizable(not cfg.fixed_size, not cfg.fixed_size)
+            if cfg.fixed_size:
+                self.root.update_idletasks()
+                width = max(240, self.root.winfo_width())
+                height = max(80, self.root.winfo_height())
+                self.root.minsize(width, height)
+                self.root.maxsize(width, height)
+            else:
+                self.root.minsize(240, 80)
+                self.root.maxsize(10000, 10000)
+        if changed & {"bg_color", "text_color", "text_font", "text_size"}:
+            self.label.configure(
+                bg=cfg.bg_color,
+                fg=cfg.text_color,
+                font=(normalize_font_name(cfg.text_font), cfg.text_size, "bold"),
+            )
+            self._update_wraplength()
+        if frame_changed:
+            self.root.deiconify()
         self.root.update_idletasks()
-        self._apply_capture_exclusion()
+        if frame_changed or "exclude_from_capture" in changed:
+            self._apply_capture_exclusion()
         if self._topmost_controller is not None:
-            self._topmost_controller.set_debug_log(cfg.debug_log)
-            self._topmost_controller.set_enabled(cfg.topmost)
+            if "debug_log" in changed:
+                self._topmost_controller.set_debug_log(cfg.debug_log)
+            if "topmost" in changed:
+                self._topmost_controller.set_enabled(cfg.topmost)
+        self._applied_config = current
 
     def _apply_capture_exclusion(self) -> bool:
         if os.name != "nt":
@@ -651,8 +593,7 @@ def main() -> int:
     configure_system_logging("MekiOverlayer", args.debug_log)
     set_debug_enabled(args.debug_log)
     install_exception_hooks()
-    _prepare_windowed_streams()
-    _prepare_tk_library_paths()
+    capture_windowed_streams()
     set_windows_app_id("MekiOverlayer")
     config = OverlayConfig(
         topmost=bool(args.topmost),

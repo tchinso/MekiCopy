@@ -1,6 +1,26 @@
-# hdTrans 및 실시간 OCR 구현·검증
+# MekiCopy 검증 기록
 
 검증일: 2026-10-20 (Windows x64, Python 3.12.14).
+
+## 설정 UI 및 코드 정리
+
+- `번역` 설정 탭 하단에 `실시간 처리 사용`과 `최소 인식 간격(초)`을 배치했다. 별도 실시간 OCR 하위 탭은 없으며 안내는 옆의 `?`에 마우스를 올릴 때만 표시한다. 마우스 이탈·탭 전환·창 숨김·위젯 파괴 시 도움말 창과 바인딩을 정리한다.
+- 설정 화면을 페이지별 빌더로 분리하고 `mekicopy_tooltip.py`에 도움말 수명을 모았다. 오버레이 설정 전달은 `mekicopy_companions.overlay_config_payload`, Tk 경로 준비는 `runtime_paths.prepare_tk_environment`로 통합했다. 메인 파일의 배포 실행 검사는 `mekicopy_selftest.py`로 분리하고 미사용 import·전역 변수·중복 초기화·변경 이력식 주석을 정리했다.
+- 기존 동작을 보존한다. 시작·중지 버튼은 본체 `영역` 탭에 있으며 필수 조건, 세션 취소, 서비스 감시, 네이티브 WinEvent 처리는 그대로 검증한다. 작업 제출 뒤 설정을 바꿔도 메인·분리 버튼·실시간 요청이 제출 시점의 포트와 스타일을 사용하는 계약 검사를 추가했다.
+- 최종 전체 Python **282개**, 브라우저 worker **11개** 통과. Python 검사에는 실제 Windows DLL·실시간 통합, 오버레이 네이티브 이벤트 회귀, UI 위치·툴팁 정리, source/frozen 및 한글 경로의 Tk 초기화가 포함된다. 로그: `.cache/hdtrans/maintenance-tests.log`, `.cache/hdtrans/maintenance-worker-tests.log`.
+- README를 70줄의 설치·빠른 시작 안내로 정리했다. 상세 사용법·번역·설정과 문제 해결·모듈 구조는 `docs/`로 분리했다. 로컬 문서 링크·앵커 33개를 확인했다.
+- Lite·Full 최종 빌드는 모두 종료 코드 **0**이다. 실행 파일 검사, Full의 네이티브 엔진·음성 모델 검사, 공통 파일 일치, manifest 검증을 통과하고 ZIP·SHA-256을 생성했다. 두 ZIP 내부 manifest가 배포 폴더와 같으며 현재 소스 fingerprint `3e6725d14cefc84d08904596b24ddc75e1451fa508fba71b71cf1b8ec57d177a` 및 `smokeTested=true`를 확인했다.
+- 빌드 로그: `.cache/hdtrans/maintenance-lite-build.log`, `.cache/hdtrans/maintenance-full-build.log`. 최종 아카이브 확인: `.cache/hdtrans/maintenance-release-verification.json`.
+
+## 오버레이 안정성 검증 (앞선 빌드)
+- 오버레이어 번역 모드·확정 영역·HYTrans와 MekiOverlayer 연결 및 번역 준비·실시간 처리 사용을 모두 확인해야 시작한다. 설정만 켜거나 서비스를 복구해도 자동 시작하지 않는다. 필수 조건이 해제되면 예약과 진행 중인 세션의 늦은 결과를 취소한다.
+- 서비스 확인은 작업 스레드에서 실행하며, 프로세스 종료·교체·포트·번역 모델 변경 전의 늦은 상태 결과를 거부한다. OCR 직전에도 서비스를 다시 확인한다. 수동으로 실행한 외부 서비스도 사용할 수 있다.
+- 첨부 로그의 오버레이 반복 종료 코드 `3221226505 (0xC0000409)`를 Windows에서 재현했다. WinEvent 콜백의 `root.after()`가 Tcl에 재진입하면서 `PyEval_RestoreThread`로 종료됐다. 콜백은 플래그만 기록하고 Tk 타이머가 처리하도록 변경했다. 매 번역마다 동일한 설정으로 창을 숨겼다가 다시 표시하는 동작도 제거했다.
+- 전체 Python **274개**, 브라우저 worker **11개** 통과. Python 실행에는 실제 Windows DLL 및 실시간 통합 시험, 32가지 시작 조건 조합, 서비스 종료·교체·외부 재실행, 오래된 상태 결과 거부를 포함한다. 별도 frozen UI 검사에서 최소 창 크기의 버튼 배치도 확인했다. 전체 결과: `.cache/hdtrans/ocr-overlay-tests.log`.
+- 새 Windows 네이티브 회귀 시험에서 번역/설정 갱신 120회와 외부 WinEvent 40회 후 프로세스 정상 종료 및 `730x200+400+300` 위치·크기 유지를 확인했다. 기존의 위험한 콜백 동작을 시험에 주입하면 같은 네이티브 종료가 재현된다.
+- 새 Lite의 실제 `MekiOverlayer.exe`에서도 외부 WinEvent 180회, 처리 로그 42묶음, 동일 PID·HWND 및 이동한 창 영역 `[420,260,1220,490]` 유지를 확인했다. 실행 파일 SHA-256은 `7b9373bb589ce048ae6f1832421aef2f555116e856e7fc0febcbee2c6df9a07d`다. 결과: `.cache/hdtrans/frozen-overlay-stress-lite.json`.
+- 추가 frozen HTTP 설정·텍스트 반복 시험은 Windows 연결 종료 오류 `10054`로 완료하지 못했다. urllib, 직접 소켓 및 .NET 시험에서 오버레이 프로세스는 살아 있었고 네이티브 오류 로그는 비어 있었다. 이 추가 시험의 미완료를 소스의 설정/텍스트·네이티브 통합 시험 통과 및 frozen 네이티브 이벤트 시험 통과와 구분한다. 기록: `.cache/hdtrans/frozen-overlay-http-limitations.json`.
+- Lite·Full 재빌드 모두 종료 코드 **0**으로 완료했다. frozen 실행 검사, Full의 네이티브 엔진·음성 모델 검사, 공통 파일 일치 검사, manifest, ZIP 및 SHA-256 생성이 통과했다. 두 manifest는 현재 소스 fingerprint와 일치하고 `smokeTested=true`이며, 스트레스 시험한 오버레이 실행 파일의 해시도 두 배포본에 일치한다. 빌드 로그: `.cache/hdtrans/ocr-overlay-lite-build.log`, `.cache/hdtrans/ocr-overlay-full-build.log`.
 
 ## 주요 변경 파일
 

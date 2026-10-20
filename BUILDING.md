@@ -1,5 +1,7 @@
 # MekiCopy Lite / Full 빌드
 
+[처음으로](README.md) · [개발 구조](docs/architecture.md) · [검증 기록](VALIDATION.md)
+
 Python 3.12~3.14, Windows x64, PowerShell에서 저장소 루트를 작업 디렉터리로 사용합니다.
 빌드는 기존 결과를 보존하면서 임시 배포 폴더에 준비하고, 검증이 끝나면 배포 폴더·ZIP·체크섬을 게시합니다.
 
@@ -62,7 +64,7 @@ python -m hytrans.hdtrans_download --prepare-build .cache/hdtrans/full
 
 공식 제3자 고지는 PCRE2 10.49(`BSD-3-Clause WITH PCRE2-exception`), SLJIT(BSD 2-clause), libyaml 0.2.5(MIT)의 원문 조건을 포함합니다. 별도 상용 사전이나 Ehnd 자료는 추가하지 않았습니다. 배포 사전의 권리 표시는 위 공식 저장소·릴리스의 고지를 그대로 보존하며 별도의 권리를 부여한다고 주장하지 않습니다.
 
-MekiCopy 저장소의 기존 `LICENSE`는 GPL v2 문서입니다. 이 작업은 저장소를 임의로 재라이선스하지 않습니다. hdTrans와 직접 연결한 결합 배포본의 공개 재배포 전에는 원 프로젝트의 GPL 적용 범위·후속 버전 허용 근거와 AGPL 의무, 결합 프로그램의 대응 소스 제공 조건을 권리자와 확인해야 합니다. 이 문서는 해당 라이선스 호환성에 대한 법적 허가를 대신하지 않습니다.
+MekiCopy 저장소의 `LICENSE`는 GPL v2 문서입니다. hdTrans와 직접 연결한 결합 배포본의 공개 재배포 전에는 원 프로젝트의 GPL 적용 범위·후속 버전 허용 근거와 AGPL 의무, 결합 프로그램의 대응 소스 제공 조건을 권리자와 확인해야 합니다. 이 문서는 해당 라이선스 호환성에 대한 법적 허가를 대신하지 않습니다.
 
 ## 검증
 

@@ -86,6 +86,7 @@ class TopmostWindowController:
     """
 
     FOREGROUND_RECHECK_DELAYS_MS = (500, 3000)
+    FOREGROUND_EVENT_POLL_MS = 100
 
     def __init__(
         self,
@@ -105,7 +106,8 @@ class TopmostWindowController:
         # Keep this CFUNCTYPE instance alive for the full hook lifetime.
         self._win_event_callback: Any = None
         self._last_hwnd: int | None = None
-        self._foreground_dispatch_after_id: str | None = None
+        self._foreground_event_pending = False
+        self._foreground_poll_after_id: str | None = None
         self._retry_after_ids: list[str] = []
 
     def start(self) -> None:
@@ -271,6 +273,8 @@ class TopmostWindowController:
             self._remove_foreground_hook()
         elif os.name == "nt":
             self._install_foreground_hook()
+            if self._hook is not None and self._foreground_poll_after_id is None:
+                self._schedule_foreground_poll()
 
     def _install_foreground_hook(self) -> None:
         if self._hook is not None:
@@ -359,7 +363,7 @@ class TopmostWindowController:
         _event_thread: int,
         _event_time: int,
     ) -> None:
-        """Schedule, rather than perform, Tk work from the WinEvent callback."""
+        """Publish a notification without entering Tcl from a native callback."""
 
         if (
             event != EVENT_SYSTEM_FOREGROUND
@@ -368,22 +372,34 @@ class TopmostWindowController:
             or not self._enabled
         ):
             return
-        self._debug("foreground", "Foreground changed")
-        # WINEVENT_OUTOFCONTEXT delivers this callback on the hook-installing
-        # UI thread.  ``after`` still keeps native callback work free of Tk
-        # mutations and coalesces a burst of foreground notifications.
-        if self._foreground_dispatch_after_id is not None:
-            return
+        # Even root.after() calls Tcl.  Windows can deliver this callback while
+        # _tkinter is dispatching native messages with its Tcl thread state
+        # released, so reentering Tcl here can abort Python in
+        # PyEval_RestoreThread.  A Tk-owned timer consumes only this flag after
+        # the native callback has returned.  Repeated events coalesce naturally.
+        self._foreground_event_pending = True
+
+    def _schedule_foreground_poll(self) -> None:
         try:
-            self._foreground_dispatch_after_id = self.root.after(
-                0,
-                self._run_foreground_refresh,
+            self._foreground_poll_after_id = self.root.after(
+                self.FOREGROUND_EVENT_POLL_MS,
+                self._poll_foreground_events,
             )
         except Exception as exc:
             self._debug("foreground", f"Unable to schedule topmost refresh: {exc}")
 
+    def _poll_foreground_events(self) -> None:
+        self._foreground_poll_after_id = None
+        if self._closed or not self._started or not self._enabled:
+            return
+        if self._foreground_event_pending:
+            self._foreground_event_pending = False
+            self._debug("foreground", "Foreground changed")
+            self._run_foreground_refresh()
+        if self._hook is not None:
+            self._schedule_foreground_poll()
+
     def _run_foreground_refresh(self) -> None:
-        self._foreground_dispatch_after_id = None
         if self._closed or not self._enabled:
             return
         self._cancel_retry_callbacks()
@@ -412,10 +428,11 @@ class TopmostWindowController:
         return callback_id
 
     def _cancel_scheduled_refreshes(self) -> None:
-        dispatch_id = self._foreground_dispatch_after_id
-        self._foreground_dispatch_after_id = None
-        if dispatch_id is not None:
-            self._cancel_after(dispatch_id)
+        poll_id = self._foreground_poll_after_id
+        self._foreground_poll_after_id = None
+        self._foreground_event_pending = False
+        if poll_id is not None:
+            self._cancel_after(poll_id)
         self._cancel_retry_callbacks()
 
     def _cancel_retry_callbacks(self) -> None:

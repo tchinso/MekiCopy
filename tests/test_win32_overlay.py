@@ -82,13 +82,15 @@ class Win32OverlayTests(unittest.TestCase):
             controller = win32_overlay.TopmostWindowController(root)
             controller.start()
             controller.refresh = mock.Mock()  # type: ignore[method-assign]
+            controller._hook = 987
+            controller._schedule_foreground_poll()
 
             self._foreground_event(controller)
             self._foreground_event(controller)
-            immediate_id = self._callback_id_for_delay(root, 0)
+            poll_id = self._callback_id_for_delay(root, controller.FOREGROUND_EVENT_POLL_MS)
             self.assertEqual(len(root.callbacks), 1)
 
-            root.fire(immediate_id)
+            root.fire(poll_id)
             self.assertEqual(controller.refresh.call_count, 1)
             first_retry_ids = list(controller._retry_after_ids)
             self.assertEqual(
@@ -101,19 +103,40 @@ class Win32OverlayTests(unittest.TestCase):
             self.assertEqual(controller.refresh.call_count, 3)
             self.assertEqual(controller._retry_after_ids, [])
 
+            # Idle polls read only the notification flag and leave native
+            # Z-order alone until another foreground transition occurs.
+            root.fire(self._callback_id_for_delay(root, controller.FOREGROUND_EVENT_POLL_MS))
+            self.assertEqual(controller.refresh.call_count, 3)
+
+    def test_native_callback_never_calls_tk_or_logging(self) -> None:
+        root = _FakeRoot()
+        with mock.patch.object(win32_overlay.os, "name", "posix"):
+            controller = win32_overlay.TopmostWindowController(root)
+            controller.start()
+            with (
+                mock.patch.object(root, "after", side_effect=AssertionError("Tcl reentry")),
+                mock.patch.object(controller, "_debug", side_effect=AssertionError("native callback I/O")),
+            ):
+                self._foreground_event(controller)
+                self._foreground_event(controller)
+            self.assertTrue(controller._foreground_event_pending)
+            self.assertEqual(root.callbacks, {})
+
     def test_new_foreground_event_replaces_pending_rechecks(self) -> None:
         root = _FakeRoot()
         with mock.patch.object(win32_overlay.os, "name", "posix"):
             controller = win32_overlay.TopmostWindowController(root)
             controller.start()
             controller.refresh = mock.Mock()  # type: ignore[method-assign]
+            controller._hook = 987
+            controller._schedule_foreground_poll()
 
             self._foreground_event(controller)
-            root.fire(self._callback_id_for_delay(root, 0))
+            root.fire(self._callback_id_for_delay(root, controller.FOREGROUND_EVENT_POLL_MS))
             old_retry_ids = list(controller._retry_after_ids)
 
             self._foreground_event(controller)
-            root.fire(self._callback_id_for_delay(root, 0))
+            root.fire(self._callback_id_for_delay(root, controller.FOREGROUND_EVENT_POLL_MS))
 
             self.assertTrue(set(old_retry_ids).issubset(root.cancelled))
             self.assertEqual(
@@ -126,18 +149,23 @@ class Win32OverlayTests(unittest.TestCase):
         with mock.patch.object(win32_overlay.os, "name", "posix"):
             controller = win32_overlay.TopmostWindowController(root)
             controller.start()
+            controller._hook = 987
+            controller._schedule_foreground_poll()
             self._foreground_event(controller)
-            pending_id = self._callback_id_for_delay(root, 0)
+            pending_id = self._callback_id_for_delay(root, controller.FOREGROUND_EVENT_POLL_MS)
 
             controller.set_enabled(False)
             self.assertIn(pending_id, root.cancelled)
             self.assertEqual(root.callbacks, {})
             self._foreground_event(controller)
             self.assertEqual(root.callbacks, {})
+            self.assertFalse(controller._foreground_event_pending)
 
             controller.set_enabled(True)
+            controller._hook = 987
+            controller._schedule_foreground_poll()
             self._foreground_event(controller)
-            new_pending_id = self._callback_id_for_delay(root, 0)
+            new_pending_id = self._callback_id_for_delay(root, controller.FOREGROUND_EVENT_POLL_MS)
             controller.close()
             self.assertIn(new_pending_id, root.cancelled)
             self.assertEqual(root.callbacks, {})

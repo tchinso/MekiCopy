@@ -7,13 +7,7 @@ import tkinter as tk
 from ctypes import wintypes
 
 from PIL import Image, ImageTk
-from runtime_paths import (
-    is_ascii_path,
-    path_for_tcl,
-    state_data_dir,
-    sync_tk_runtime,
-    tk_runtime_roots,
-)
+from runtime_paths import prepare_tk_environment, state_data_dir
 
 ICON_FILENAME = "MekiCopy.ico"
 APP_USER_MODEL_ID = "MekiCopy.MekiCopy"
@@ -22,7 +16,6 @@ DETACHED_GEOMETRY_FILENAME = "detached_button_geometry.json"
 
 _DLL_DIR_HANDLES = []
 _RUNTIME_PATH_READY = False
-_WINDOW_STREAM = None
 _APP_USER_MODEL_ID_READY = False
 
 # ``onnxruntime-gpu[cuda,cudnn]`` 1.30 uses CUDA 13's consolidated ``cu13``
@@ -33,6 +26,7 @@ _NVIDIA_RUNTIME_DLL_SUBDIRECTORIES = (
     os.path.join("nvidia", "cu13", "bin", "x86_64"),
     os.path.join("nvidia", "cudnn", "bin"),
 )
+
 
 def _get_app_dir() -> str:
     if getattr(sys, "frozen", False):
@@ -90,82 +84,7 @@ def _set_window_icon(window: tk.Misc) -> None:
 
 
 def _prepare_tk_library_paths() -> None:
-    if os.name != "nt":
-        return
-
-    resource_dir = _get_resource_dir()
-    app_dir = _get_app_dir()
-    if getattr(sys, "frozen", False):
-        tcl_candidates = [
-            os.path.join(resource_dir, "_tcl_data"),
-            os.path.join(resource_dir, "tcl", "tcl8.6"),
-            os.path.join(resource_dir, "MekiCopyRuntime", "tcl8.6"),
-            os.path.join(app_dir, "MekiCopyRuntime", "tcl8.6"),
-            os.path.join(sys.base_prefix, "tcl", "tcl8.6"),
-        ]
-        tk_candidates = [
-            os.path.join(resource_dir, "_tk_data"),
-            os.path.join(resource_dir, "tcl", "tk8.6"),
-            os.path.join(resource_dir, "MekiCopyRuntime", "tk8.6"),
-            os.path.join(app_dir, "MekiCopyRuntime", "tk8.6"),
-            os.path.join(sys.base_prefix, "tcl", "tk8.6"),
-        ]
-    else:
-        tcl_candidates = [
-            os.path.join(sys.base_prefix, "tcl", "tcl8.6"),
-            os.path.join(app_dir, "MekiCopyRuntime", "tcl8.6"),
-        ]
-        tk_candidates = [
-            os.path.join(sys.base_prefix, "tcl", "tk8.6"),
-            os.path.join(app_dir, "MekiCopyRuntime", "tk8.6"),
-        ]
-    source_tcl = next(
-        (
-            path
-            for path in tcl_candidates
-            if os.path.exists(os.path.join(path, "init.tcl"))
-        ),
-        None,
-    )
-    source_tk = next(
-        (
-            path
-            for path in tk_candidates
-            if os.path.exists(os.path.join(path, "tk.tcl"))
-        ),
-        None,
-    )
-    if not source_tcl or not source_tk:
-        return
-
-    def use_tk_paths(tcl_path: str, tk_path: str) -> bool:
-        tcl_env = path_for_tcl(tcl_path)
-        tk_env = path_for_tcl(tk_path)
-        if not is_ascii_path(tcl_env) or not is_ascii_path(tk_env):
-            return False
-        safe_init = os.path.join(tcl_env, "init.tcl")
-        safe_tk_script = os.path.join(tk_env, "tk.tcl")
-        if os.path.exists(safe_init) and os.path.exists(safe_tk_script):
-            os.environ["TCL_LIBRARY"] = tcl_env.replace("\\", "/")
-            os.environ["TK_LIBRARY"] = tk_env.replace("\\", "/")
-            return True
-        return False
-
-    if use_tk_paths(source_tcl, source_tk):
-        return
-
-    for safe_root_path in tk_runtime_roots("MekiCopyRuntime"):
-        safe_root = path_for_tcl(safe_root_path)
-        if not is_ascii_path(safe_root):
-            continue
-        try:
-            safe_tcl, safe_tk = sync_tk_runtime(source_tcl, source_tk, safe_root)
-            if use_tk_paths(str(safe_tcl), str(safe_tk)):
-                return
-        except OSError:
-            pass
-
-    use_tk_paths(source_tcl, source_tk)
+    prepare_tk_environment("MekiCopyRuntime")
 
 
 def _prepare_native_runtime_paths() -> None:

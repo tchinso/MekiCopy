@@ -36,7 +36,6 @@ from tkinter import messagebox
 DEFAULT_PORT = SCRIPT_DEFAULT_PORT
 DEFAULT_GEOMETRY = "780x560+120+120"
 MAX_REQUEST_BYTES = 1024 * 1024
-_WINDOW_STREAM = None
 
 
 def normalize_font_name(value: str) -> str:
@@ -87,9 +86,7 @@ class _TranscriptHistoryEntry:
 
 
 class ScriptWindow:
-    # New transcript events are already delivered over a worker queue.  A
-    # slower idle tick avoids waking the UI 20 times a second while it is just
-    # displaying the last line; active bursts still drain promptly.
+    # Slow idle polling avoids unnecessary wakeups; active bursts drain promptly.
     ACTIVE_EVENT_POLL_MS = 50
     IDLE_EVENT_POLL_MS = 200
     # A remote producer must never be able to retain an unlimited transcript
@@ -264,9 +261,7 @@ class ScriptWindow:
         self.text.mark_gravity(start_mark, tk.LEFT)
         self.text.insert(tk.END, self._PENDING_TRANSLATION_TEXT + "\n", ("pending",))
         self.text.mark_set(end_mark, tk.END + "-1c")
-        # Keep this boundary attached to its own entry. RIGHT gravity made the
-        # mark follow every later append at tk.END, so translating an earlier
-        # entry deleted all transcript blocks that followed it.
+        # LEFT gravity keeps this entry's boundary before later transcript appends.
         self.text.mark_gravity(end_mark, tk.LEFT)
         self._remember_history_entry(
             entry_id,
@@ -457,9 +452,7 @@ def make_handler(
                     _write_json(self, 404, {"ok": False, "error": "not found"})
                     return
                 if not window.enqueue(kind, payload):
-                    # A full bounded UI queue must be visible to producers.
-                    # Returning 200 here made audio capture believe a line
-                    # was displayed even though it had been discarded.
+                    # Producers need to know when the UI queue rejects a line.
                     _write_json(
                         self,
                         503,

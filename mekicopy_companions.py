@@ -16,14 +16,38 @@ import urllib.error
 import urllib.request
 import zipfile
 from ctypes import wintypes
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 import uuid
 
 from mekicopy_runtime import _get_app_dir
 from runtime_paths import writable_app_subdir
 
+if TYPE_CHECKING:
+    from mekicopy_settings import AppSettings
+
 DETACHED_WINDOW_TITLE = "MekiCopy - 분리 버튼"
 MAGPIE_RELEASE_API_URL = "https://api.github.com/repos/Blinue/Magpie/releases/latest"
+
+
+def overlay_config_payload(
+    settings: AppSettings, *, include_debug_log: bool = True
+) -> dict:
+    """Snapshot overlay settings before dispatching background work."""
+    payload = {
+        "topmost": settings.overlayer_always_on_top,
+        "hide_titlebar": settings.overlayer_hide_titlebar,
+        "fixed_size": settings.overlayer_fixed_size,
+        "exclude_from_capture": settings.overlayer_exclude_from_capture,
+        "bg_color": settings.overlayer_bg_color,
+        "opacity": settings.overlayer_bg_opacity,
+        "text_color": settings.overlayer_text_color,
+        "text_size": settings.overlayer_text_size,
+        "text_font": settings.overlayer_text_font,
+    }
+    if include_debug_log:
+        payload["debug_log"] = settings.debug_logging
+    return payload
+
 
 def _json_request(
     url: str,
@@ -387,8 +411,7 @@ def _magpie_install_dir() -> str:
 
 
 def _magpie_install_candidates() -> list[str]:
-    # Keep finding suites installed by earlier releases at the distribution
-    # root, while all new files follow the executable-adjacent-first policy.
+    # Search executable-adjacent, suite-root and writable fallback locations.
     candidates = [
         _magpie_install_dir(),
         os.path.join(os.path.dirname(_get_app_dir()), "MagPie"),

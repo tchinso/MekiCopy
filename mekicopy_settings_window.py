@@ -10,6 +10,7 @@ from mekicopy_hotkey import (
     parse_hotkey,
 )
 from mekicopy_runtime import _set_window_icon
+from mekicopy_tooltip import Tooltip
 from mekicopy_realtime import REALTIME_INTERVALS, normalize_interval
 from mekicopy_settings import (
     AppSettings,
@@ -386,9 +387,7 @@ class SettingsWindow(tk.Toplevel):
             STT_MODEL_IDS_BY_LABEL.get(self.audio_stt_model_var.get()) == "parakeet"
         )
         if is_parakeet:
-            # The packaged Parakeet checkpoint only has model.int8.onnx. Keep
-            # the persisted selection truthful rather than silently accepting
-            # a stale FP32 value left over from the ReazonSpeech-only UI.
+            # The packaged Parakeet checkpoint only supports INT8.
             self.audio_stt_precision_var.set("int8")
         precision_menu = getattr(self, "audio_stt_precision_menu", None)
         if precision_menu is not None:
@@ -407,38 +406,29 @@ class SettingsWindow(tk.Toplevel):
     def _build_ui(self) -> None:
         body = tk.Frame(self, padx=14, pady=14, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
-
         notebook = ttk.Notebook(body)
         notebook.pack(fill=tk.BOTH, expand=True)
-        general_tab = self._add_scrollable_tab(notebook, "일반")
-        translation_tab = self._add_scrollable_tab(notebook, "번역")
-        overlay_tab = self._add_scrollable_tab(notebook, "번역 오버레이")
-        audio_tab = self._add_scrollable_tab(notebook, "음성인식")
-        realtime_tab = self._add_scrollable_tab(notebook, "실시간 OCR")
-        realtime_frame = tk.LabelFrame(realtime_tab, text="확정 영역 실시간 인식", padx=12, pady=12)
-        realtime_frame.pack(fill=tk.X, pady=(0, 10))
-        tk.Checkbutton(
-            realtime_frame, text="실시간 처리 사용", variable=self.realtime_ocr_enabled_var,
-            anchor="w",
-        ).pack(fill=tk.X)
-        interval_row = tk.Frame(realtime_frame)
-        interval_row.pack(fill=tk.X, pady=(10, 0))
-        tk.Label(interval_row, text="최소 인식 간격 (초)").pack(side=tk.LEFT)
-        ttk.Combobox(
-            interval_row, textvariable=self.realtime_ocr_interval_var,
-            values=[f"{value:g}" for value in REALTIME_INTERVALS], state="readonly", width=8,
-        ).pack(side=tk.LEFT, padx=10)
-        tk.Label(
-            realtime_frame,
-            text=("저장 후 확정된 OCR 영역에서 시작합니다. 본체에서만 실행됩니다.\n"
-                  "현재 모드에 따라 원문 복사 또는 번역 후 표시를 수행합니다.\n"
-                  "중복·빈 원문은 건너뛰고, 새 번역은 실제 표시 후 최소 1초 유지합니다.\n"
-                  "번역 실행 중에는 본체·분리창의 수동 버튼과 단축키가 잠깁니다.\n"
-                  "영역·설정을 변경하면 이전 결과를 무효화하고 새로 인식합니다.\n"
-                  "중지하려면 실시간 처리를 해제하고 저장하세요."),
-            justify=tk.LEFT, anchor="w", wraplength=510,
-        ).pack(fill=tk.X, pady=(12, 0))
+        pages = (
+            ("일반", self._build_general_page),
+            ("번역", self._build_translation_page),
+            ("번역 오버레이", self._build_overlay_page),
+            ("음성인식", self._build_audio_page),
+        )
+        for title, build_page in pages:
+            build_page(self._add_scrollable_tab(notebook, title))
 
+        button_row = tk.Frame(body, bg=BG)
+        button_row.pack(fill=tk.X, pady=(14, 0))
+        save_button = tk.Button(button_row, text="저장", command=self._on_save)
+        save_button.pack(side=tk.RIGHT, padx=(8, 0))
+        close_button = tk.Button(button_row, text="닫기", command=self._on_close)
+        close_button.pack(side=tk.RIGHT)
+        style_tree(self)
+        style_standard_button(save_button, "primary")
+        style_standard_button(close_button)
+        self._refresh_color_buttons()
+
+    def _build_general_page(self, general_tab: tk.Frame) -> None:
         options = [
             (
                 "MekiCopy가 최소화되면 시스템 트레이로 이동",
@@ -535,6 +525,7 @@ class SettingsWindow(tk.Toplevel):
         )
         debug_checkbox.pack(fill=tk.X, pady=(4, 8))
 
+    def _build_translation_page(self, translation_tab: tk.Frame) -> None:
         translation_frame = tk.LabelFrame(translation_tab, text="HYTrans 번역", padx=10, pady=8)
         translation_frame.pack(fill=tk.X)
         tk.Label(
@@ -576,6 +567,44 @@ class SettingsWindow(tk.Toplevel):
             textvariable=self.hytrans_port_var,
         ).pack(side=tk.RIGHT)
 
+        self._build_realtime_controls(translation_tab)
+
+    def _build_realtime_controls(self, parent: tk.Frame) -> None:
+        frame = tk.LabelFrame(parent, text="실시간 OCR", padx=10, pady=8)
+        frame.pack(fill=tk.X, pady=(10, 0))
+        enabled_row = tk.Frame(frame)
+        enabled_row.pack(fill=tk.X)
+        tk.Checkbutton(
+            enabled_row,
+            text="실시간 처리 사용",
+            variable=self.realtime_ocr_enabled_var,
+            anchor="w",
+        ).pack(side=tk.LEFT)
+        help_icon = tk.Label(enabled_row, text="?", width=2, cursor="question_arrow")
+        help_icon.pack(side=tk.LEFT, padx=(4, 0))
+        self.realtime_ocr_tooltip = Tooltip(
+            help_icon,
+            "설정 저장 후 아래 조건을 모두 만족하면 영역 탭의\n"
+            "'실시간 OCR 시작' 버튼으로 시작할 수 있습니다.\n\n"
+            "• '오버레이어 번역 모드 사용'이 켜져 있음\n"
+            "• 확정된 OCR 영역이 있음\n"
+            "• HYTrans와 MekiOverlayer가 모두 실행 중\n"
+            "• '실시간 처리 사용'이 켜져 있음\n\n"
+            "조건을 만족하지 않게 되면 중지됩니다.\n"
+            "중지하려면 영역 탭의 '실시간 OCR 중지' 버튼을 누르세요.",
+        )
+        interval_row = tk.Frame(frame)
+        interval_row.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(interval_row, text="최소 인식 간격(초)").pack(side=tk.LEFT)
+        ttk.Combobox(
+            interval_row,
+            textvariable=self.realtime_ocr_interval_var,
+            values=[f"{value:g}" for value in REALTIME_INTERVALS],
+            state="readonly",
+            width=8,
+        ).pack(side=tk.RIGHT)
+
+    def _build_overlay_page(self, overlay_tab: tk.Frame) -> None:
         overlay_frame = tk.LabelFrame(overlay_tab, text="번역 오버레이 모드", padx=10, pady=8)
         overlay_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -705,6 +734,7 @@ class SettingsWindow(tk.Toplevel):
         font_menu.pack(side=tk.RIGHT)
         self.overlay_only_widgets.extend([font_row, font_menu])
 
+    def _build_audio_page(self, audio_tab: tk.Frame) -> None:
         audio_model_frame = tk.LabelFrame(audio_tab, text="음성인식", padx=10, pady=8)
         audio_model_frame.pack(fill=tk.X)
         model_row = tk.Frame(audio_model_frame)
@@ -740,6 +770,9 @@ class SettingsWindow(tk.Toplevel):
         tk.Label(preset_row, text="음성 CHUNK 기준").pack(side=tk.LEFT)
         tk.OptionMenu(preset_row, self.audio_chunk_preset_var, "FAST", "BALANCED", "LONG").pack(side=tk.RIGHT)
 
+        self._build_script_controls(audio_tab)
+
+    def _build_script_controls(self, audio_tab: tk.Frame) -> None:
         script_frame = tk.LabelFrame(audio_tab, text="MekiScript", padx=10, pady=8)
         script_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
         script_port_row = tk.Frame(script_frame)
@@ -814,17 +847,6 @@ class SettingsWindow(tk.Toplevel):
         translated_font_menu = tk.OptionMenu(translated_font_row, self.script_translated_font_var, *korean_fonts)
         translated_font_menu.config(width=20)
         translated_font_menu.pack(side=tk.RIGHT)
-
-        button_row = tk.Frame(body, bg=BG)
-        button_row.pack(fill=tk.X, pady=(14, 0))
-        save_button = tk.Button(button_row, text="저장", command=self._on_save)
-        save_button.pack(side=tk.RIGHT, padx=(8, 0))
-        close_button = tk.Button(button_row, text="닫기", command=self._on_close)
-        close_button.pack(side=tk.RIGHT)
-        style_tree(self)
-        style_standard_button(save_button, "primary")
-        style_standard_button(close_button)
-        self._refresh_color_buttons()
 
     def _choose_color(self, variable: tk.StringVar, button: tk.Button) -> None:
         color = colorchooser.askcolor(color=variable.get(), parent=self)[1]

@@ -130,9 +130,7 @@ class ModelDownloadManager:
                 )
                 self._thread.start()
 
-        # Deliberately evaluate status after releasing _lock. The previous
-        # implementation recursively acquired a non-reentrant Lock here and
-        # deadlocked every first-run /model/prepare request.
+        # status() acquires this non-reentrant lock, so call it after release.
         return self.status()
 
     def _set_progress(

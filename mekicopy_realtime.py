@@ -23,6 +23,10 @@ _JAPANESE = re.compile(
 )
 
 
+class RealtimeUnavailableError(RuntimeError):
+    """A required service or option disappeared; an explicit restart is needed."""
+
+
 def normalize_interval(value: object) -> float:
     try:
         interval = float(value)

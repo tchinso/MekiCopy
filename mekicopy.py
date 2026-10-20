@@ -1,58 +1,31 @@
 import argparse
-import configparser
 import ctypes
-import datetime as _dt
 import json
 import os
-import platform
 import queue
-import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import urllib.error
 import urllib.request
 import time
-import zipfile
 
-from runtime_paths import (
-    is_ascii_path,
-    path_for_tcl,
-    prepare_tk_environment,
-    sync_tk_runtime,
-    tk_runtime_roots,
-)
-from service_ports import (
-    AUDIO_CAPTURE_DEFAULT_PORT,
-    HYTRANS_DEFAULT_PORT,
-    OVERLAYER_DEFAULT_PORT,
-    SCRIPT_DEFAULT_PORT,
-    normalize_port,
-    validate_unique_ports,
-)
+from runtime_paths import prepare_tk_environment
 
 prepare_tk_environment("MekiCopyRuntime")
 
 import tkinter as tk
-from dataclasses import dataclass, replace
-from tkinter import colorchooser, font as tkfont, messagebox, simpledialog, ttk
-from ctypes import wintypes
+from dataclasses import replace
+from tkinter import messagebox, simpledialog
 from typing import Callable
-import traceback
 
-import mss
-from PIL import Image, ImageTk
+from PIL import Image
 from mekicopy_capture import (
     MIN_SIZE_PX,
-    CaptureStatus,
     MonitorInfo,
     Region,
     RegionRatio,
-    capture_problem_message as _capture_problem_message,
-    capture_region_result,
     clamp_region_to_monitor as _clamp_region_to_monitor,
-    configure_capture_runtime,
     enable_dpi_awareness as _enable_dpi_awareness,
     find_monitor_for_region as _find_monitor_for_region,
     get_capture_manager,
@@ -64,24 +37,22 @@ from mekicopy_capture import (
     run_capture_diagnostics,
 )
 from mekicopy_companions import (
+    DETACHED_WINDOW_TITLE,
+    overlay_config_payload,
     _WindowsNamedMutex,
     _activate_detached_window,
     _close_detached_window,
-    _detached_process_creation_flags,
     _find_companion_executable,
-    _find_detached_window,
     _find_magpie_executable,
     _install_latest_magpie,
     _is_loopback_port_open,
     _is_process_alive,
     _json_request,
     _launch_detached_button_process,
-    _mekicopy_process_command,
     _probe_service,
     _startupinfo_for_background,
     _terminate_process_tree,
     _validate_service_health,
-    _validated_translation_text,
     request_translation_and_show,
 )
 from companion_watchdog import (
@@ -99,19 +70,15 @@ from companion_manual_close import (
 )
 from mekicopy_ocr import (
     OcrError,
-    _get_ocr_engine,
     _log_runtime_error,
     _log_runtime_message,
     capture_ocr_image,
-    capture_region,
     copy_text_to_clipboard,
     ocr_and_copy,
-    ocr_region,
     recognize_image,
 )
 from mekicopy_hotkey import GlobalHotkeyManager
 from mekicopy_region_ui import (
-    build_initial_rect,
     pick_bookmark,
     run_picker_and_capture,
     run_region_view,
@@ -119,20 +86,13 @@ from mekicopy_region_ui import (
 )
 from mekicopy_runtime import (
     _get_app_dir,
-    _get_icon_path,
-    _get_resource_dir,
-    _prepare_native_runtime_paths,
     _prepare_tk_library_paths,
-    _prepare_windowed_streams,
     _set_app_user_model_id,
     _set_window_icon,
 )
 from mekicopy_settings import (
     AppSettings,
     Bookmark,
-    Rect,
-    _font_has_character,
-    _geometry_size,
     load_bookmarks,
     load_detached_geometry,
     load_detached_region,
@@ -159,11 +119,7 @@ from hytrans.api_settings import (
 from mekicopy_theme import (
     BG,
     BORDER,
-    BUTTON_FONT,
-    DEFAULT_FONT,
     INK,
-    MUTED,
-    PINK,
     ROSE,
     RoundedButton,
     SOFT,
@@ -178,6 +134,7 @@ from mekicopy_realtime import (
     REALTIME_LOCK_LABEL,
     REALTIME_STATE_FILENAME,
     RealtimeOcrController,
+    RealtimeUnavailableError,
     detached_translation_locked,
     perform_cycle,
 )
@@ -191,32 +148,18 @@ from system_logging import (
 )
 from win32_overlay import TopmostWindowController
 import mekicopy_settings
-EDGE_GRAB_PX = 8
+
 MAIN_WINDOW_WIDTH = 520
 MAIN_WINDOW_HEIGHT = 440
 MAIN_TAB_BAR_WIDTH = 138
 OCR_BUTTON_HEIGHT_PX = 232
 GLOBAL_HOTKEY_POLL_MS = 50
-SELECTION_INSTRUCTION_FONT_SIZE = 36
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
-ICON_FILENAME = "MekiCopy.ico"
-APP_USER_MODEL_ID = "MekiCopy.MekiCopy"
-DETACHED_WINDOW_TITLE = "MekiCopy - 분리 버튼"
-DETACHED_REGION_FILENAME = "detached_button_region.json"
-DETACHED_GEOMETRY_FILENAME = "detached_button_geometry.json"
 DETACHED_MUTEX_NAME = "Local\\MekiCopy.DetachedOcrButton"
-KOREAN_FONT_TEST_CHARACTER = "쿈"
-MAGPIE_RELEASE_API_URL = "https://api.github.com/repos/Blinue/Magpie/releases/latest"
 MAGPIE_LAUNCH_NOTICE = (
     "데스크톱 캡쳐 모드는 Graphics Capture(1순위 권장) 또는 "
     "GDI(2순위 권장)을 사용해주세요"
 )
-_OCR_ENGINE = None
-_DLL_DIR_HANDLES = []
-_RUNTIME_PATH_READY = False
-_WINDOW_STREAM = None
-_ORT_PRELOAD_READY = False
-_APP_USER_MODEL_ID_READY = False
 _COMPANION_PROCESS_ATTRIBUTES = {
     "MekiAudioCapture": "audio_capture_process",
     "MekiScript": "script_process",
@@ -228,25 +171,11 @@ _MANUALLY_CLOSABLE_COMPANIONS = frozenset(
 ) - {"HYTrans"}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 class DetachedOcrButtonApp:
     MIN_WIDTH = 120
     MIN_HEIGHT = 80
     RESIZE_MARGIN = 10
-    # The main window writes this file only when settings change.  Polling its
-    # metadata every two seconds is enough for the detached companion while
-    # avoiding a ConfigParser read twice per second for its whole lifetime.
+    # Read settings only when the file metadata changes.
     SETTINGS_POLL_MS = 2_000
 
     def __init__(self) -> None:
@@ -439,17 +368,7 @@ class DetachedOcrButtonApp:
         simple_feedback = settings.simple_copy_complete
         hytrans_url = f"http://127.0.0.1:{settings.hytrans_port}"
         overlayer_url = f"http://127.0.0.1:{settings.overlayer_port}"
-        overlayer_config = {
-            "topmost": settings.overlayer_always_on_top,
-            "hide_titlebar": settings.overlayer_hide_titlebar,
-            "fixed_size": settings.overlayer_fixed_size,
-            "exclude_from_capture": settings.overlayer_exclude_from_capture,
-            "bg_color": settings.overlayer_bg_color,
-            "opacity": settings.overlayer_bg_opacity,
-            "text_color": settings.overlayer_text_color,
-            "text_size": settings.overlayer_text_size,
-            "text_font": settings.overlayer_text_font,
-        }
+        overlayer_config = overlay_config_payload(settings, include_debug_log=False)
 
         def operation() -> str:
             text = recognize_image(image)
@@ -516,17 +435,7 @@ class DetachedOcrButtonApp:
         settings = self.settings
         _json_request(
             f"http://127.0.0.1:{settings.overlayer_port}/config",
-            {
-                "topmost": settings.overlayer_always_on_top,
-                "hide_titlebar": settings.overlayer_hide_titlebar,
-                "fixed_size": settings.overlayer_fixed_size,
-                "exclude_from_capture": settings.overlayer_exclude_from_capture,
-                "bg_color": settings.overlayer_bg_color,
-                "opacity": settings.overlayer_bg_opacity,
-                "text_color": settings.overlayer_text_color,
-                "text_size": settings.overlayer_text_size,
-                "text_font": settings.overlayer_text_font,
-            },
+            overlay_config_payload(settings, include_debug_log=False),
             timeout=3,
             method="POST",
         )
@@ -764,9 +673,7 @@ class MainWindow(tk.Tk):
         self.overlayer_process: subprocess.Popen | None = None
         self.audio_capture_process: subprocess.Popen | None = None
         self.script_process: subprocess.Popen | None = None
-        # Per-launch close notices let a companion distinguish an explicitly
-        # confirmed user close from a crash without broadening ownership beyond
-        # the Popen children this window created.
+        # Per-launch notices distinguish a user-confirmed close from a crash.
         self._companion_manual_close_signals: dict[str, ManualCloseSignal] = {}
         self.magpie_process: subprocess.Popen | None = None
         self.subtitle_window: MekiSubtitleWindow | None = None
@@ -785,9 +692,7 @@ class MainWindow(tk.Tk):
         self.capture_status_text = "캡처 준비"
         self._closing = False
         self._restoring_from_tray = False
-        # Only processes launched by this window are registered here.  That
-        # ownership boundary prevents one suite instance from killing another
-        # manually launched/external process which happens to share a port.
+        # Track only our children; never terminate another instance sharing a port.
         self._companion_watchdog = CompanionWatchdog(
             interval_seconds=3.0,
             health_timeout_seconds=0.75,
@@ -811,13 +716,17 @@ class MainWindow(tk.Tk):
                 require_ui_responsive=True,
                 max_ui_heartbeat_age_seconds=7.0,
             ),
-            # HYTrans is a headless service.  Its private browser worker has
-            # its own timeout/reopen path, while this monitor owns the server
-            # process and its HTTP responsiveness.
+            # HYTrans manages its browser worker; this watchdog monitors the server.
             "HYTrans": default_health_evaluator("HYTrans"),
         }
         self._companion_watchdog_after_id: str | None = None
         self._realtime_state_after_id: str | None = None
+        self._realtime_requested = False
+        self._realtime_service_status: dict[str, bool] = {}
+        self._realtime_service_ports: tuple[int, int] | None = None
+        self._realtime_service_processes = None
+        self._realtime_service_checked_at = 0.0
+        self._realtime_service_probe_at = 0.0
         self._build_ui()
         self._realtime_ocr = RealtimeOcrController(
             self, self._task_runner,
@@ -900,7 +809,7 @@ class MainWindow(tk.Tk):
             bg=SURFACE,
             fg=INK,
         )
-        self.status_label.pack(pady=(4, 12), fill=tk.X)
+        self.status_label.pack(pady=(4, 6), fill=tk.X)
 
         buttons = [
             ("임시 영역 선택", self._on_select_region),
@@ -911,6 +820,10 @@ class MainWindow(tk.Tk):
         ]
         for text, command in buttons:
             self._pack_tab_button(frame, text, command)
+
+        self.realtime_button = self._pack_tab_button(
+            frame, "실시간 OCR 시작", self._on_toggle_realtime_ocr,
+        )
 
     def _build_capture_tab(self, frame: tk.Frame) -> None:
         self.capture_status_label = tk.Label(
@@ -1034,9 +947,6 @@ class MainWindow(tk.Tk):
             radius=28,
         )
         self.ocr_button.pack(fill=tk.BOTH, expand=True)
-        self.realtime_button = self._pack_tab_button(
-            frame, "실시간 OCR 시작", self._on_toggle_realtime_ocr,
-        )
 
     def _pack_tab_button(
         self,
@@ -1567,10 +1477,7 @@ class MainWindow(tk.Tk):
                     f"{app_name} exit_code={exit_code}",
                 )
                 if exit_code == MANUAL_CLOSE_EXIT_CODE:
-                    # A companion only uses this code after its own close
-                    # confirmation.  Its one-shot notice normally reaches the
-                    # watchdog first; this avoids a misleading startup error
-                    # when the user closes a just-opened child very quickly.
+                    # A confirmed close during startup is not a launch failure.
                     return
                 if notify:
                     messagebox.showerror(
@@ -1638,8 +1545,7 @@ class MainWindow(tk.Tk):
         try:
             return create_manual_close_signal(app_name)
         except OSError as exc:
-            # The exit-code fallback still prevents a confirmed close from
-            # being revived if the normal per-launch notice cannot be created.
+            # The exit code preserves a confirmed close if the notice file fails.
             _log_runtime_error("create_companion_manual_close_signal", exc)
             return None
 
@@ -1684,9 +1590,7 @@ class MainWindow(tk.Tk):
             except Exception:
                 has_exited = False
             if not has_exited:
-                # Do not read three signal files every 500 ms while companions
-                # are idle.  A recovery request below still checks its signal
-                # directly, covering the close/recovery race.
+                # Poll idle notices less often; recovery rechecks them before acting.
                 continue
             MainWindow._consume_manual_close_signal(
                 self,
@@ -1710,9 +1614,7 @@ class MainWindow(tk.Tk):
         if not self._companion_watchdog.matches_process(request, process):
             return False
 
-        # The signed file is the normal path.  Exit status is deliberately a
-        # fallback for the small window between a confirmed close and a failed
-        # notice write (for example, a temporary storage error).
+        # Fall back to exit status when a confirmed close could not write its notice.
         signals = getattr(self, "_companion_manual_close_signals", None)
         if signals:
             discard_manual_close_signal(signals.pop(request.name, None))
@@ -1728,8 +1630,7 @@ class MainWindow(tk.Tk):
             return
         try:
             self._companion_watchdog_after_id = self.after(
-                # Health probes run on a worker thread; this is only the UI
-                # handoff for queued recovery work, so 500 ms remains prompt.
+                # Health probes run off-thread; this timer handles queued recovery.
                 500,
                 self._poll_companion_watchdog,
             )
@@ -1741,6 +1642,7 @@ class MainWindow(tk.Tk):
         try:
             if self._closing:
                 return
+            self._refresh_realtime_services()
             self._consume_pending_manual_close_signals()
             for request in self._companion_watchdog.drain_recovery_requests():
                 process_attribute = _COMPANION_PROCESS_ATTRIBUTES.get(request.name)
@@ -1774,9 +1676,7 @@ class MainWindow(tk.Tk):
         if MainWindow._suppress_confirmed_manual_close_recovery(self, request, process):
             return
         if not self._companion_watchdog.matches_process(request, process):
-            # Never use a stale window attribute to terminate a process.  This
-            # protects an independently launched replacement from a queued
-            # watchdog request whose original child was already replaced.
+            # A stale request must never terminate a replacement process.
             _log_runtime_message(
                 "companion_watchdog_recovery",
                 f"ignored stale ownership for {request.name}",
@@ -1795,9 +1695,7 @@ class MainWindow(tk.Tk):
         )
 
         if request.name == "HYTrans":
-            # Do not call a loopback shutdown endpoint here: a dead child may
-            # have released its port to an unrelated local program.  The
-            # watchdog only ever terminates its own tracked Popen tree.
+            # Terminate our Popen tree; its former port may belong to another app.
             if _is_process_alive(process):
                 try:
                     _terminate_process_tree(process)
@@ -2073,18 +1971,7 @@ class MainWindow(tk.Tk):
             )
 
     def _overlayer_config_payload(self) -> dict:
-        return {
-            "topmost": self.settings.overlayer_always_on_top,
-            "hide_titlebar": self.settings.overlayer_hide_titlebar,
-            "fixed_size": self.settings.overlayer_fixed_size,
-            "exclude_from_capture": self.settings.overlayer_exclude_from_capture,
-            "bg_color": self.settings.overlayer_bg_color,
-            "opacity": self.settings.overlayer_bg_opacity,
-            "text_color": self.settings.overlayer_text_color,
-            "text_size": self.settings.overlayer_text_size,
-            "text_font": self.settings.overlayer_text_font,
-            "debug_log": self.settings.debug_logging,
-        }
+        return overlay_config_payload(self.settings)
 
     def _send_overlayer_config(self, log_errors: bool = True) -> bool:
         try:
@@ -2118,10 +2005,7 @@ class MainWindow(tk.Tk):
             return True
         try:
             health = _json_request(f"{self._hytrans_base_url()}/health", timeout=1)
-            # A disconnected/fatal worker intentionally reports an ERROR
-            # state, but the server is still the correct HYTrans instance and
-            # /worker/reopen is precisely how it recovers. Validate identity
-            # here without rejecting that recoverable state first.
+            # An ERROR worker can recover via /worker/reopen; validate server identity.
             if health.get("ok") is not True or health.get("app") != "HYTrans":
                 _validate_service_health("HYTrans", health)
                 raise RuntimeError("HYTrans service identity could not be verified")
@@ -2188,9 +2072,7 @@ class MainWindow(tk.Tk):
             else _is_process_alive(self.hytrans_process)
         )
         if already_starting:
-            # A tracked process is an in-flight successful launch, not a
-            # launch failure.  Callers such as MekiSubtitle can safely wait
-            # for its /ready endpoint instead of abandoning their job.
+            # A launched process may still be loading; callers can wait for /ready.
             return True
         command = _find_companion_executable("HYTrans", "hytrans_main.py")
         if not command:
@@ -2265,10 +2147,7 @@ class MainWindow(tk.Tk):
         shutdown_token = ""
         try:
             health = _json_request(f"{old_base_url}/health", timeout=0.75)
-            # A worker/model failure can legitimately put HYTrans in ERROR,
-            # but its local shutdown endpoint is still usable. Recognize the
-            # service by identity here instead of requiring a healthy worker,
-            # so changing models can recover an unhealthy external instance.
+            # An ERROR worker still supports shutdown; validate server identity.
             service_running = (
                 health.get("ok") is True
                 and health.get("app") == "HYTrans"
@@ -2280,8 +2159,7 @@ class MainWindow(tk.Tk):
         if not service_running and tracked_process is None:
             return False
 
-        # The old child is intentionally being stopped.  Do not let its
-        # expected health failure race the settings-driven replacement.
+        # Suspend recovery while settings intentionally replace this child.
         watchdog = getattr(self, "_companion_watchdog", None)
         if watchdog is not None:
             watchdog.untrack("HYTrans")
@@ -2499,10 +2377,86 @@ class MainWindow(tk.Tk):
             messagebox.showerror("MekiCopy", f"연결 테스트 실패:\n{exc}", parent=owner)
 
     def _on_toggle_realtime_ocr(self) -> None:
-        self.apply_settings(
-            replace(self.settings, realtime_ocr_enabled=not self.settings.realtime_ocr_enabled),
-            persist=True,
-        )
+        if self._realtime_ocr.active:
+            self._realtime_requested = False
+            self._sync_realtime_ocr()
+            self._set_capture_status("실시간 OCR을 중지했습니다.")
+            return
+        reason = self._realtime_block_reason()
+        if reason:
+            self._set_capture_status(f"실시간 OCR 시작 불가: {reason}")
+            return
+        self._realtime_requested = True
+        self._sync_realtime_ocr()
+
+    def _realtime_block_reason(self, *, include_services: bool = True) -> str:
+        if self._closing:
+            return "프로그램 종료 중입니다."
+        if not self.settings.overlay_translation_mode:
+            return "오버레이어 번역 모드 사용을 켜세요."
+        if self.active_region is None:
+            return "먼저 OCR 영역을 확정하세요."
+        if not self.settings.realtime_ocr_enabled:
+            return "번역 설정에서 실시간 처리 사용을 켜세요."
+        if getattr(self, "_hytrans_restart_after_id", None) is not None:
+            return "HYTrans 재시작이 끝날 때까지 기다리세요."
+        if include_services:
+            ports = (self.settings.hytrans_port, self.settings.overlayer_port)
+            if (self._realtime_service_ports != ports
+                    or self._realtime_service_processes != self._realtime_process_snapshot()
+                    or time.monotonic() - self._realtime_service_checked_at > 5.0):
+                return "HYTrans와 MekiOverlayer 연결을 확인 중입니다."
+            missing = [name for name in ("HYTrans", "MekiOverlayer")
+                       if not self._realtime_service_status.get(name)]
+            if missing:
+                return f"{' / '.join(missing)}를 실행하고 번역 준비를 마치세요."
+        return ""
+
+    def _realtime_process_snapshot(self):
+        return tuple((process, _is_process_alive(process)) for process in (
+            getattr(self, "hytrans_process", None), getattr(self, "overlayer_process", None),
+        ))
+
+    def _refresh_realtime_services(self) -> None:
+        """Probe both owned and external services without waiting on Tk's thread."""
+        self._sync_realtime_ocr()
+        if self._realtime_block_reason(include_services=False):
+            return
+        now = time.monotonic()
+        if now - self._realtime_service_probe_at < 1.0:
+            return
+        ports = (self.settings.hytrans_port, self.settings.overlayer_port)
+        config_fingerprint = (self.settings.hytrans_backend, self.settings.hytrans_model_id,
+                              self._hytrans_config_fingerprint)
+        processes = self._realtime_process_snapshot()
+
+        def probe():
+            status = {}
+            for name, port in zip(("HYTrans", "MekiOverlayer"), ports):
+                try:
+                    _probe_service(name, f"http://127.0.0.1:{port}", timeout=0.5)
+                    status[name] = True
+                except Exception:
+                    status[name] = False
+            return status
+
+        def complete(status):
+            if (self._closing or ports != (self.settings.hytrans_port, self.settings.overlayer_port)
+                    or processes != self._realtime_process_snapshot()
+                    or config_fingerprint != (self.settings.hytrans_backend, self.settings.hytrans_model_id,
+                                               self._hytrans_config_fingerprint)):
+                return
+            self._realtime_service_ports = ports
+            self._realtime_service_processes = processes
+            self._realtime_service_status = status
+            self._realtime_service_checked_at = time.monotonic()
+            self._sync_realtime_ocr()
+
+        if self._task_runner.submit(
+            "realtime_services", probe, on_success=complete,
+            on_error=lambda error: complete({}),
+        ):
+            self._realtime_service_probe_at = now
 
     def _sync_realtime_ocr(self) -> None:
         realtime = getattr(self, "_realtime_ocr", None)
@@ -2510,18 +2464,23 @@ class MainWindow(tk.Tk):
             return
         region = self.active_region
         target = None if region is None else (region.left, region.top, region.width, region.height)
+        reason = self._realtime_block_reason()
+        was_active = realtime.active
+        if reason:
+            self._realtime_requested = False
         realtime.configure(
-            enabled=self.settings.realtime_ocr_enabled and region is not None and not self._closing,
+            enabled=self._realtime_requested and not reason,
             interval=self.settings.realtime_ocr_interval,
-            translate=self.settings.overlay_translation_mode,
+            translate=True,
             fingerprint=(target, repr(self.settings), getattr(self, "_hytrans_config_fingerprint", None)),
         )
         if hasattr(self, "realtime_button"):
-            self.realtime_button.config(text=(
-                "실시간 OCR 중지" if self.settings.realtime_ocr_enabled else "실시간 OCR 시작"
-            ))
-        if self.settings.realtime_ocr_enabled and region is None:
-            self._set_capture_status("실시간 OCR 대기: 먼저 OCR 영역을 확정하세요.")
+            self.realtime_button.config(
+                text="실시간 OCR 중지" if realtime.active else "실시간 OCR 시작",
+                state=tk.NORMAL if realtime.active or not reason else tk.DISABLED,
+            )
+        if was_active and reason:
+            self._set_capture_status(f"실시간 OCR 중지: {reason}")
 
     def _on_realtime_state_changed(self) -> None:
         if not self._closing:
@@ -2548,20 +2507,12 @@ class MainWindow(tk.Tk):
         # Snapshot UI-owned state before handing any work to TkTaskRunner.
         region, settings = self.active_region, self.settings
         monitor, ratio = self.active_monitor, self.active_region_ratio
-        if region is None:
-            raise OcrError("확정된 OCR 영역이 없습니다.")
-        overlayer_config = {
-            "topmost": settings.overlayer_always_on_top,
-            "hide_titlebar": settings.overlayer_hide_titlebar,
-            "fixed_size": settings.overlayer_fixed_size,
-            "exclude_from_capture": settings.overlayer_exclude_from_capture,
-            "bg_color": settings.overlayer_bg_color,
-            "opacity": settings.overlayer_bg_opacity,
-            "text_color": settings.overlayer_text_color,
-            "text_size": settings.overlayer_text_size,
-            "text_font": settings.overlayer_text_font,
-            "debug_log": settings.debug_logging,
-        }
+        reason = self._realtime_block_reason()
+        if reason:
+            self._realtime_requested = False
+            self._sync_realtime_ocr()
+            raise RealtimeUnavailableError(reason)
+        overlayer_config = overlay_config_payload(settings)
 
         def translate(text: str) -> dict:
             return request_translation_and_show(
@@ -2576,6 +2527,15 @@ class MainWindow(tk.Tk):
             )
 
         def operation():
+            # Check again immediately before capture, including externally
+            # launched services and exits since the last background probe.
+            try:
+                _probe_service("HYTrans", f"http://127.0.0.1:{settings.hytrans_port}", timeout=0.5)
+                _probe_service("MekiOverlayer", f"http://127.0.0.1:{settings.overlayer_port}", timeout=0.5)
+            except Exception as exc:
+                raise RealtimeUnavailableError(str(exc)) from exc
+            if session.cancelled.is_set():
+                return perform_cycle(lambda: "", session=session, previous=previous)
             target, resolved_monitor, resolved_ratio, _ = get_capture_manager().resolve_region(
                 region, previous_monitor=monitor, ratio=ratio,
             )
@@ -2587,7 +2547,7 @@ class MainWindow(tk.Tk):
             result = perform_cycle(
                 recognize, session=session,
                 previous=previous if _regions_equal(target, region) else None,
-                translate=translate if settings.overlay_translation_mode else None,
+                translate=translate,
             )
             return replace(result, capture_target=(target, resolved_monitor, resolved_ratio))
 
@@ -2614,6 +2574,12 @@ class MainWindow(tk.Tk):
 
     def _on_realtime_error(self, error: Exception) -> None:
         _log_runtime_error("realtime_ocr", error)
+        if isinstance(error, RealtimeUnavailableError):
+            self._realtime_requested = False
+            self._realtime_service_status = {}
+            self._sync_realtime_ocr()
+            self._set_capture_status(f"실시간 OCR 중지: {error}")
+            return
         self._set_capture_status(f"실시간 OCR 실패 (다음 주기에 재시도): {error}")
 
     def _on_ocr_copy(
@@ -2665,18 +2631,7 @@ class MainWindow(tk.Tk):
         settings = self.settings
         hytrans_url = f"http://127.0.0.1:{settings.hytrans_port}"
         overlayer_url = f"http://127.0.0.1:{settings.overlayer_port}"
-        overlayer_config = {
-            "topmost": settings.overlayer_always_on_top,
-            "hide_titlebar": settings.overlayer_hide_titlebar,
-            "fixed_size": settings.overlayer_fixed_size,
-            "exclude_from_capture": settings.overlayer_exclude_from_capture,
-            "bg_color": settings.overlayer_bg_color,
-            "opacity": settings.overlayer_bg_opacity,
-            "text_color": settings.overlayer_text_color,
-            "text_size": settings.overlayer_text_size,
-            "text_font": settings.overlayer_text_font,
-            "debug_log": settings.debug_logging,
-        }
+        overlayer_config = overlay_config_payload(settings)
 
         def operation() -> str:
             text = recognize_image(image)
@@ -2826,9 +2781,7 @@ class MainWindow(tk.Tk):
         ) != self._global_hotkey_configuration(settings)
         was_hotkey_paused = self._global_hotkey_paused
         if persist and was_hotkey_paused:
-            # Saving must validate the newly captured key, rather than merely
-            # remembering it while the field has temporarily released the old
-            # registration.
+            # Validate registration of the new key before saving it.
             self._global_hotkey_paused = False
         hotkey_configured, hotkey_error = self._configure_global_hotkey(settings)
         if not hotkey_configured:
@@ -2879,6 +2832,8 @@ class MainWindow(tk.Tk):
             return None
 
         self.settings = settings
+        if restart_reason_parts or previous.overlayer_port != settings.overlayer_port:
+            self._realtime_service_ports = None
         hdtrans_button = getattr(self, "hdtrans_settings_button", None)
         if hdtrans_button is not None:
             hdtrans_button.configure(state=tk.NORMAL if backend == "hdtrans" else tk.DISABLED)
@@ -3072,349 +3027,6 @@ def run_detached_button() -> None:
             mutex.close()
 
 
-def run_detached_button_self_test() -> None:
-    _log_runtime_message("self_test_detached_button", "starting")
-    app: DetachedOcrButtonApp | None = None
-    try:
-        app = DetachedOcrButtonApp()
-        app.root.update_idletasks()
-        if not app.root.winfo_exists() or not app.button.winfo_exists():
-            raise RuntimeError("detached button UI was not created")
-        if app.root.title() != DETACHED_WINDOW_TITLE:
-            raise RuntimeError("detached button window title is not stable")
-        if app.button.cget("text") != app.ocr_action_label():
-            raise RuntimeError("detached button label does not match settings")
-        command = _mekicopy_process_command("--detached-button")
-        if "--detached-button" not in command:
-            raise RuntimeError("detached process command is invalid")
-        _log_runtime_message(
-            "self_test_detached_button",
-            f"command: {command}\nwindow: {app.root.geometry()}",
-        )
-    except Exception as exc:
-        _log_runtime_error("self_test_detached_button", exc)
-        raise SystemExit(1)
-    finally:
-        if app and app.root.winfo_exists():
-            app._closing = True
-            app.root.destroy()
-
-
-def run_detached_survival_self_test() -> None:
-    if os.name != "nt":
-        return
-    _log_runtime_message("self_test_detached_survival", "starting")
-    if _find_detached_window():
-        _close_detached_window()
-        deadline = time.monotonic() + 5.0
-        while _find_detached_window() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if _find_detached_window():
-            raise RuntimeError("an existing detached button window could not be closed")
-
-    launcher = subprocess.Popen(
-        _mekicopy_process_command("--self-test-detached-launcher"),
-        cwd=_get_app_dir(),
-        close_fds=True,
-    )
-    try:
-        exit_code = launcher.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        launcher.kill()
-        _close_detached_window()
-        raise RuntimeError("detached survival launcher did not exit")
-    if exit_code != 0:
-        _close_detached_window()
-        raise RuntimeError(f"detached survival launcher exited with {exit_code}")
-
-    hwnd = None
-    deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline:
-        hwnd = _find_detached_window()
-        if hwnd:
-            break
-        time.sleep(0.05)
-    if not hwnd:
-        _close_detached_window()
-        raise RuntimeError("detached button did not survive its launcher process")
-
-    process_id = wintypes.DWORD()
-    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
-    if not process_id.value or process_id.value == launcher.pid:
-        _close_detached_window()
-        raise RuntimeError("detached button is not running in an independent process")
-    _log_runtime_message(
-        "self_test_detached_survival",
-        f"launcher_pid: {launcher.pid}\ndetached_pid: {process_id.value}",
-    )
-    # FindWindow can succeed while Tk is still finishing constructor work,
-    # before mainloop has started dispatching WM_CLOSE.
-    time.sleep(1.0)
-    _close_detached_window()
-    deadline = time.monotonic() + 30.0
-    while _find_detached_window() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    if _find_detached_window():
-        raise RuntimeError("detached button did not close after survival test")
-
-
-def run_tray_stress_self_test(cycles: int = 100) -> None:
-    _log_runtime_message("self_test_tray_stress", f"starting cycles={cycles}")
-    app: MainWindow | None = None
-    try:
-        app = MainWindow()
-        app.settings.minimize_to_tray = True
-        app.update_idletasks()
-        if os.name != "nt":
-            return
-
-        user32 = ctypes.windll.user32
-        user32.PostMessageW.argtypes = [
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
-        user32.PostMessageW.restype = wintypes.BOOL
-        tray_hwnd = None
-        for cycle in range(1, cycles + 1):
-            app.iconify()
-            minimize_deadline = time.monotonic() + 3.0
-            while time.monotonic() < minimize_deadline:
-                app.update()
-                if app.tray_icon._active and app.state() == "withdrawn":
-                    break
-                time.sleep(0.005)
-            if not app.tray_icon._active or app.state() != "withdrawn":
-                raise RuntimeError(
-                    f"cycle {cycle}: minimize-to-tray failed (state={app.state()})"
-                )
-
-            current_hwnd = app.tray_icon._hwnd
-            if not current_hwnd:
-                raise RuntimeError(f"cycle {cycle}: tray callback window is missing")
-            if tray_hwnd is None:
-                tray_hwnd = current_hwnd
-            elif current_hwnd != tray_hwnd:
-                raise RuntimeError(f"cycle {cycle}: tray callback HWND changed")
-
-            # Explorer emits the double-click notification asynchronously. Two
-            # queued notifications also verify duplicate clicks are coalesced.
-            for _ in range(2):
-                if not user32.PostMessageW(
-                    current_hwnd,
-                    app.tray_icon.WM_TRAY_CALLBACK,
-                    1,
-                    app.tray_icon.WM_LBUTTONDBLCLK,
-                ):
-                    raise ctypes.WinError(ctypes.get_last_error())
-
-            restore_deadline = time.monotonic() + 3.0
-            while time.monotonic() < restore_deadline:
-                app.update()
-                if (
-                    app.state() == "normal"
-                    and not app.tray_icon._active
-                    and not app._restoring_from_tray
-                ):
-                    break
-                time.sleep(0.005)
-            if app.state() != "normal" or app.tray_icon._active:
-                raise RuntimeError(
-                    f"cycle {cycle}: tray restore failed "
-                    f"(state={app.state()}, active={app.tray_icon._active})"
-                )
-
-        _log_runtime_message(
-            "self_test_tray_stress",
-            f"completed cycles={cycles}\ntray_hwnd={tray_hwnd}",
-        )
-    except Exception as exc:
-        _log_runtime_error("self_test_tray_stress", exc)
-        raise SystemExit(1)
-    finally:
-        if app:
-            try:
-                app.tray_icon.close()
-                app.destroy()
-            except tk.TclError:
-                pass
-
-
-def _snapshot_runtime_state(paths: tuple[str, ...]) -> dict[str, bytes | None]:
-    snapshot: dict[str, bytes | None] = {}
-    for path in paths:
-        try:
-            with open(path, "rb") as handle:
-                snapshot[path] = handle.read()
-        except FileNotFoundError:
-            snapshot[path] = None
-        except OSError as exc:
-            _log_runtime_error("snapshot_runtime_state", exc)
-            snapshot[path] = None
-    return snapshot
-
-
-def _restore_runtime_state(snapshot: dict[str, bytes | None]) -> None:
-    for path, payload in snapshot.items():
-        try:
-            if payload is None:
-                if os.path.exists(path):
-                    os.remove(path)
-                continue
-            with open(path, "wb") as handle:
-                handle.write(payload)
-        except OSError as exc:
-            _log_runtime_error("restore_runtime_state", exc)
-
-
-def run_ui_self_test() -> None:
-    _log_runtime_message("self_test_ui", "starting")
-    app: MainWindow | None = None
-    runtime_snapshot = _snapshot_runtime_state(
-        (
-            mekicopy_settings.SETTINGS_FILE,
-            mekicopy_settings.DETACHED_REGION_FILE,
-            mekicopy_settings.DETACHED_GEOMETRY_FILE,
-        )
-    )
-    try:
-        app = MainWindow()
-        app.update_idletasks()
-        if app.winfo_height() != MAIN_WINDOW_HEIGHT:
-            raise RuntimeError(
-                f"main window height is {app.winfo_height()}, expected {MAIN_WINDOW_HEIGHT}"
-            )
-        expected_tabs = {
-            "영역",
-            "캡쳐",
-            "음성인식",
-            "자막 생성",
-            "도구/설정",
-            "행동",
-        }
-        if set(app.tab_frames) != expected_tabs:
-            raise RuntimeError(f"unexpected main tabs: {set(app.tab_frames)}")
-        app._select_tab("행동")
-        app.update_idletasks()
-        ocr_button_height = app.ocr_button.master.winfo_height()
-        if ocr_button_height != OCR_BUTTON_HEIGHT_PX:
-            raise RuntimeError(
-                f"main OCR button height is {ocr_button_height}, expected {OCR_BUTTON_HEIGHT_PX}"
-            )
-        action_frame = app.tab_frames["행동"]
-        if (not app.realtime_button.winfo_ismapped()
-                or app.realtime_button.winfo_y() + app.realtime_button.winfo_height() > action_frame.winfo_height()):
-            raise RuntimeError("realtime OCR control is clipped outside the action tab")
-        app._select_tab("도구/설정")
-        app.update_idletasks()
-        expected_overlay_state = (
-            tk.NORMAL if app.settings.overlay_translation_mode else tk.DISABLED
-        )
-        if app.hytrans_button.cget("state") != expected_overlay_state:
-            raise RuntimeError("HYTrans button state does not match overlay mode")
-        if app.overlayer_button.cget("state") != expected_overlay_state:
-            raise RuntimeError("MekiOverlayer button state does not match overlay mode")
-        app._select_tab("자막 생성")
-        app.update_idletasks()
-        if "MekiSubtitle" not in app.tab_frames["자막 생성"].winfo_children()[0].cget("text"):
-            raise RuntimeError("MekiSubtitle tab title was not created")
-        app._select_tab("영역")
-        app.update_idletasks()
-
-        bookmark = Bookmark(name="self-test", left=11, top=22, width=333, height=44)
-        expected_region = Region(left=11, top=22, width=333, height=44)
-        app._load_bookmark_region(bookmark)
-        if app.active_region != expected_region:
-            raise RuntimeError(f"bookmark did not populate active region: {app.active_region}")
-        if "확정 영역 :\n설정되지 않음" in app.status_label.cget("text"):
-            raise RuntimeError("bookmark status still reports no active region")
-
-        tray_roundtrip = False
-        tray_message_window_reused = False
-        if os.name == "nt":
-            tray_hwnd = None
-            for _ in range(3):
-                if not app.tray_icon.show():
-                    break
-                tray_roundtrip = True
-                current_hwnd = app.tray_icon._hwnd
-                if tray_hwnd is None:
-                    tray_hwnd = current_hwnd
-                elif current_hwnd != tray_hwnd:
-                    raise RuntimeError("tray message window was recreated during restore")
-                app.withdraw()
-                app.update_idletasks()
-                ctypes.windll.user32.SendMessageW(
-                    current_hwnd,
-                    app.tray_icon.WM_TRAY_CALLBACK,
-                    1,
-                    app.tray_icon.WM_LBUTTONDBLCLK,
-                )
-                ctypes.windll.user32.SendMessageW(
-                    current_hwnd,
-                    app.tray_icon.WM_TRAY_CALLBACK,
-                    1,
-                    app.tray_icon.WM_LBUTTONDBLCLK,
-                )
-                deadline = time.monotonic() + 2.0
-                while app.state() != "normal" and time.monotonic() < deadline:
-                    app.update()
-                    time.sleep(0.01)
-                if app.state() != "normal":
-                    raise RuntimeError(f"tray restore left app in state: {app.state()}")
-            tray_message_window_reused = bool(
-                tray_roundtrip
-                and app.tray_icon._window_class_atom
-                and app.tray_icon._hwnd == tray_hwnd
-            )
-            if tray_roundtrip and not tray_message_window_reused:
-                raise RuntimeError("tray message window did not survive restore")
-
-        if load_detached_region() != expected_region:
-            raise RuntimeError("active region was not published for detached process")
-        if "--detached-button" not in _mekicopy_process_command("--detached-button"):
-            raise RuntimeError("detached OCR button process command was not created")
-
-        app._on_open_settings()
-        app.update_idletasks()
-        if not app.settings_window or not app.settings_window.winfo_exists():
-            raise RuntimeError("settings window was not created")
-        if not app.settings_window.korean_font_names:
-            raise RuntimeError("font menu contains no Korean-capable fonts")
-        unsupported_fonts = [
-            name
-            for name in app.settings_window.korean_font_names
-            if not _font_has_character(name)
-        ]
-        if unsupported_fonts:
-            raise RuntimeError(f"font menu contains unsupported fonts: {unsupported_fonts}")
-        korean_font_count = len(app.settings_window.korean_font_names)
-
-        app.settings_window._on_close()
-        save_settings(app.settings)
-        _log_runtime_message(
-            "self_test_ui",
-            (
-                f"main_ocr_button_height: {ocr_button_height}\n"
-                f"main_window_height: {app.winfo_height()}\n"
-                f"tray_roundtrip: {tray_roundtrip}\n"
-                f"tray_message_window_reused: {tray_message_window_reused}\n"
-                f"korean_font_count: {korean_font_count}\n"
-                f"settings_file: {mekicopy_settings.SETTINGS_FILE}\n"
-                f"icon_path: {_get_icon_path()}"
-            ),
-        )
-    except Exception as exc:
-        _log_runtime_error("self_test_ui", exc)
-        raise SystemExit(1)
-    finally:
-        if app and app.winfo_exists():
-            app.tray_icon.close()
-            app.destroy()
-        _restore_runtime_state(runtime_snapshot)
-
-
 def main() -> None:
     _enable_dpi_awareness()
     _set_app_user_model_id()
@@ -3426,38 +3038,36 @@ def main() -> None:
         _launch_detached_button_process()
         os._exit(0)
     if args.self_test_runtime:
-        _log_runtime_message("self_test_runtime", "starting")
-        from importlib.metadata import version
+        from mekicopy_selftest import run_runtime_self_test
 
-        meikiocr_version = version("meikiocr")
-        if meikiocr_version != "0.3.5":
-            raise RuntimeError(
-                f"unexpected meikiocr version: {meikiocr_version} (expected 0.3.5)"
-            )
-        engine = _get_ocr_engine()
-        _log_runtime_message(
-            "self_test_runtime",
-            (
-                f"meikiocr_version: {meikiocr_version}\n"
-                f"active_provider: {getattr(engine, 'active_provider', 'unknown')}"
-            ),
-        )
+        run_runtime_self_test()
         return
     _prepare_tk_library_paths()
     if args.detached_button:
         run_detached_button()
         return
     if args.self_test_detached_button:
-        run_detached_button_self_test()
+        from mekicopy_selftest import run_detached_button_self_test
+
+        run_detached_button_self_test(DetachedOcrButtonApp)
         return
     if args.self_test_detached_survival:
+        from mekicopy_selftest import run_detached_survival_self_test
+
         run_detached_survival_self_test()
         return
     if args.self_test_tray_stress:
-        run_tray_stress_self_test()
+        from mekicopy_selftest import run_tray_stress_self_test
+
+        run_tray_stress_self_test(MainWindow)
         return
     if args.self_test_ui:
-        run_ui_self_test()
+        from mekicopy_selftest import run_ui_self_test
+
+        run_ui_self_test(
+            MainWindow, window_size=(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT),
+            expected_ocr_button_height=OCR_BUTTON_HEIGHT_PX,
+        )
         return
     if args.bookmark:
         bookmarks = load_bookmarks()

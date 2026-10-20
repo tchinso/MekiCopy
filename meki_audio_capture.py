@@ -98,24 +98,16 @@ AUDIO_TRANSLATION_TIMEOUT_SECONDS = 300
 MAX_TRANSLATION_SESSION_SECONDS = 30 * 60
 MAX_CONSECUTIVE_TRANSLATION_FAILURES = 2
 REALTIME_STT_QUEUE_MAX_SEGMENTS = 24
-# Keep the browser translator's backlog bounded. Each entry is small, but an
-# hours-long stall used to retain unbounded text/result objects while a game
-# was running. 256 utterances is still several minutes of headroom for rapid
-# dialogue. Translation entries contain only completed text/metadata, and
-# overflow already has an explicit skip-marker path.
+# Bound completed text/metadata queued for translation; overflow emits a skip marker.
 REALTIME_TRANSLATION_QUEUE_MAX_SEGMENTS = 2048
-# Keep the warning at the same 25% utilization point as the previous 64/256
-# configuration, so normal short bursts do not create unnecessary notices.
+# Warn at 25% capacity so short bursts do not trigger notices.
 REALTIME_TRANSLATION_QUEUE_WARNING_SEGMENTS = 512
-# Live VAD and STT run concurrently with the game. Batch/subtitle processing
-# retains the generic four-thread defaults in audio_capture_core, but live
-# mode deliberately reserves only a small, predictable CPU share.
+# Limit live VAD/STT CPU use while the game runs concurrently.
 REALTIME_VAD_NUM_THREADS = 1
 REALTIME_STT_NUM_THREADS = 2
 _SESSION_DIRECTORY_PATTERN = re.compile(r"^\d{8}-\d{6}-\d{6}$")
 _WORK_SWEEP_LOCK = threading.Lock()
 _WORK_SWEEP_DONE = False
-_WINDOW_STREAM = None
 
 
 def app_dir() -> Path:
@@ -148,10 +140,6 @@ def work_dir() -> Path:
                 except OSError:
                     pass
     return path
-
-
-def prepare_streams() -> None:
-    capture_windowed_streams()
 
 
 @dataclass(frozen=True)
@@ -285,9 +273,8 @@ class RealtimeTranslationSession:
         self._closed = False
         self._started = False
         self._aborted = threading.Event()
-        # A timed Queue.get plus these two events deliberately replaces a
-        # terminal queue item.  A terminal item can itself block forever when
-        # a failed consumer leaves a bounded queue full.
+        # Events and timed Queue.get allow shutdown even when a failed consumer
+        # leaves a bounded queue full.
         self._stt_input_closed = threading.Event()
         self._translation_input_closed = threading.Event()
         self._close_lock = threading.Lock()
@@ -1940,7 +1927,7 @@ def main() -> int:
     args = parse_args()
     configure_system_logging("MekiAudioCapture", args.debug_log)
     install_exception_hooks()
-    prepare_streams()
+    capture_windowed_streams()
     if args.self_test:
         assert DEFAULT_STT_MODEL == "parakeet"
         assert args.stt_model in STT_MODELS

@@ -25,16 +25,12 @@ from .paths import assets_dir, models_dir
 
 DTYPE = MT15_PROFILE.dtype
 REQUIRED_MODEL_FILES = tuple(MT15_PROFILE.files)
-# Compatibility for callers that used the old constant. It describes only the
-# default model; runtime code below always reads the active profile dynamically.
+# Default-model alias; runtime requests read the active profile.
 REQUIRED_Q4_MODEL_FILES = REQUIRED_MODEL_FILES
 SOURCE_LANG = "Japanese"
 TARGET_LANG = "Korean"
 MAX_NEW_TOKENS = 2048
-# Live speech arrives as short, frequent utterances. Giving every one the
-# bulk-translation ceiling lets a malformed/non-terminating generation hold
-# the only browser worker far longer than useful. Scale the output budget with
-# the utterance while leaving the normal API's 2,048-token ceiling alone.
+# Bound live speech generation by utterance length to keep the worker responsive.
 REALTIME_MIN_NEW_TOKENS = 128
 REALTIME_MAX_NEW_TOKENS = 768
 HOST = "127.0.0.1"

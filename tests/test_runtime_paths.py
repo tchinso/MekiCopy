@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -46,6 +47,77 @@ class WritablePathPolicyTests(unittest.TestCase):
         ):
             selected = runtime_paths.writable_app_subdir("TestApp", "work")
         self.assertEqual(selected, fallback / "work")
+
+
+@unittest.skipUnless(os.name == "nt", "Tcl/Tk path preparation is Windows-specific")
+class TkEnvironmentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = self.enterContext(tempfile.TemporaryDirectory(prefix="meki-tk-"))
+        self.root = Path(temporary)
+        self.program = self.root / "program"
+        self.python = self.root / "python"
+        self.bundle = self.root / "bundle"
+        self.enterContext(mock.patch.dict(os.environ))
+        self.enterContext(mock.patch.object(runtime_paths, "app_root", return_value=self.program))
+        self.enterContext(mock.patch.object(runtime_paths.sys, "base_prefix", str(self.python)))
+        self.enterContext(
+            mock.patch.object(runtime_paths.sys, "_MEIPASS", str(self.bundle), create=True)
+        )
+        self.enterContext(mock.patch.object(runtime_paths.sys, "frozen", False, create=True))
+        self.enterContext(mock.patch.object(runtime_paths, "windows_short_path", return_value=None))
+
+    def scripts(self, tcl: Path, tk: Path) -> None:
+        tcl.mkdir(parents=True)
+        tk.mkdir(parents=True)
+        (tcl / "init.tcl").write_text("tcl script", encoding="ascii")
+        (tk / "tk.tcl").write_text("tk script", encoding="ascii")
+
+    def assert_environment(self, tcl: Path, tk: Path) -> None:
+        self.assertEqual(os.environ["TCL_LIBRARY"], tcl.as_posix())
+        self.assertEqual(os.environ["TK_LIBRARY"], tk.as_posix())
+
+    def test_source_run_uses_scripts_matching_active_python(self) -> None:
+        tcl = self.python / "tcl" / "tcl8.6"
+        tk = self.python / "tcl" / "tk8.6"
+        self.scripts(tcl, tk)
+        runtime = self.program / "MekiCopyRuntime"
+        self.scripts(runtime / "tcl8.6", runtime / "tk8.6")
+        self.scripts(self.bundle / "_tcl_data", self.bundle / "_tk_data")
+
+        self.assertTrue(runtime_paths.prepare_tk_environment())
+        self.assert_environment(tcl, tk)
+
+    def test_frozen_run_uses_bundled_scripts(self) -> None:
+        self.scripts(self.python / "tcl" / "tcl8.6", self.python / "tcl" / "tk8.6")
+        tcl, tk = self.bundle / "_tcl_data", self.bundle / "_tk_data"
+        self.scripts(tcl, tk)
+        with mock.patch.object(runtime_paths.sys, "frozen", True):
+            self.assertTrue(runtime_paths.prepare_tk_environment())
+        self.assert_environment(tcl, tk)
+
+    def test_non_ascii_scripts_use_next_writable_ascii_runtime(self) -> None:
+        source = self.root / "한국어"
+        self.scripts(source / "tcl" / "tcl8.6", source / "tcl" / "tk8.6")
+        blocked = self.root / "blocked"
+        blocked.write_text("occupied", encoding="ascii")
+        safe = self.root / "runtime"
+        with (
+            mock.patch.object(runtime_paths.sys, "base_prefix", str(source)),
+            mock.patch.object(
+                runtime_paths,
+                "tk_runtime_roots",
+                return_value=[source / "runtime", blocked, safe],
+            ),
+        ):
+            self.assertTrue(runtime_paths.prepare_tk_environment())
+
+        self.assert_environment(safe / "tcl8.6", safe / "tk8.6")
+        self.assertEqual(
+            (safe / "tcl8.6" / "init.tcl").read_text(encoding="ascii"), "tcl script"
+        )
+        self.assertEqual(
+            (safe / "tk8.6" / "tk.tcl").read_text(encoding="ascii"), "tk script"
+        )
 
 
 if __name__ == "__main__":
