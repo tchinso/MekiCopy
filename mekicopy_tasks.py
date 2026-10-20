@@ -105,6 +105,9 @@ class TkTaskRunner:
             except Exception:
                 pass
             self._poll_after_id = None
+        # A still-running operation only needs the completion queue. Keeping
+        # its destroyed Tk owner alive could finalize Tcl on the worker thread.
+        self._root = None
 
     def _schedule_poll(self, delay_ms: int, *, replace: bool = False) -> None:
         if self._closed:

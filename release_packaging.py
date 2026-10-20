@@ -15,6 +15,7 @@ MANIFEST_VERSION = 1
 FULL_PAYLOAD_ROOTS = (
     "MekiCopy/_internal/runtime_models/",
     "HYTrans/models/",
+    "HYTrans/hdtrans/",
     "MekiAudioCapture/models/",
     "MagPie/",
 )
@@ -66,6 +67,31 @@ def verify_no_saved_api_settings(files: dict[str, Path]) -> None:
     for relative, path in files.items():
         if path.name.casefold().startswith("translation_api.json"):
             raise ValueError(f"Saved API settings must not be distributed: {relative}")
+        if path.name.casefold() in {"hdtrans_settings.json", "realtime_ocr_state.json"}:
+            raise ValueError(f"Saved user settings must not be distributed: {relative}")
+
+
+def verify_hdtrans_payload(release_root: Path, flavor: str) -> dict | None:
+    from hytrans.hdtrans_download import (
+        ARCHIVE_SHA256, DICTIONARY_VERSION, SOURCE_COMMIT, VERSION,
+        resolve_installation, validate_installation,
+    )
+    root = release_root / "HYTrans" / "hdtrans"
+    if flavor == "Lite":
+        if root.exists() and any(root.rglob("hdTransEngine*.dll")):
+            raise ValueError("Lite must not contain a bundled hdTrans engine")
+        return None
+    installed = resolve_installation(root)
+    if installed is None or not validate_installation(installed, rehash=True):
+        raise ValueError("Full requires a verified, compatible hdTrans DLL/dictionary/source bundle")
+    # Only official examples are packaged. Saved user files/configs belong in
+    # the writable runtime store, never in a distributed Full engine generation.
+    for user_file in installed.joinpath("hdTrans", "user").iterdir():
+        if user_file.name not in {"hdtrans.config.example.yaml", "userdict.example.txt"}:
+            raise ValueError(f"Saved hdTrans user settings must not be distributed: {user_file.name}")
+    return {"version": VERSION, "dictionaryVersion": DICTIONARY_VERSION,
+            "archiveSha256": ARCHIVE_SHA256, "sourceCommit": SOURCE_COMMIT,
+            "license": "AGPL-3.0-or-later"}
 
 
 def write_build_manifest(
@@ -77,6 +103,7 @@ def write_build_manifest(
         reusable = json.loads((lite_root / MANIFEST_NAME).read_text(encoding="utf-8"))["files"]
     payload_files = release_files(release_root)
     verify_no_saved_api_settings(payload_files)
+    hdtrans = verify_hdtrans_payload(release_root, flavor)
     files = {}
     for relative, path in sorted(payload_files.items()):
         info = path.stat()
@@ -97,6 +124,7 @@ def write_build_manifest(
         "sourceFingerprint": source_fingerprint(source_root),
         "pythonVersion": list(sys.version_info[:3]),
         "files": files,
+        "hdTrans": hdtrans,
     }
     # A reused release may be hard-linked to Lite. Atomic replacement ensures
     # writing Full provenance never changes the original Lite manifest.

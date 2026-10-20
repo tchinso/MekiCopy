@@ -237,7 +237,12 @@ class MekiSubtitleIntegrationTests(unittest.TestCase):
                 "int8",
             )
         self.assertEqual(process.call_args.kwargs["vad_preset"], "FAST")
-        self.assertIs(process.call_args.kwargs["translate"], translator)
+        translate_cue = process.call_args.kwargs["translate"]
+        self.assertEqual(translate_cue("最初"), "번역")
+        self.assertEqual(translate_cue("次"), "번역")
+        first_owner = translator.call_args_list[0].kwargs["context_owner"]
+        self.assertTrue(first_owner.startswith("subtitle:"))
+        self.assertEqual(translator.call_args_list[1].kwargs["context_owner"], first_owner)
         self.assertEqual(process.call_args.kwargs["stt_model_root"], shared_root)
         self.assertIs(process.call_args.kwargs["log"], window._emit_log)
         events.put.assert_called_once_with(("done", summary))

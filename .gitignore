@@ -42,3 +42,5 @@ MekiCopy-Full-one-dir.zip.sha256
 MekiCopy-Lite-one-dir.zip.recovery-before-publish-20260920-143455-bb99057d84b545579e8166e80ad84658
 *.recovery-before-publish-20260920-143455-bb99057d84b545579e8166e80ad84658
 /ChromeProfile
+/.cache/
+/hdtrans/

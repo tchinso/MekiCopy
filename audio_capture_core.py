@@ -258,10 +258,13 @@ def translate_text(
     timeout: float = 650.0,
     *,
     realtime: bool = False,
+    context_owner: str | None = None,
 ) -> str:
     """Translate text through HYTrans, optionally using its live-tuning path."""
 
     payload = {"text": text}
+    if context_owner:
+        payload["contextOwner"] = context_owner
     if realtime:
         # HYTrans uses this hint to keep a short spoken utterance from being
         # given the same 2,048-token generation budget as a bulk request.

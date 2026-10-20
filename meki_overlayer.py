@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 from runtime_paths import is_ascii_path, path_for_tcl, sync_tk_runtime, tk_runtime_roots
 from runtime_paths import prepare_tk_environment
+from overlay_receipts import DisplayReceipts
 
 TK_RUNTIME_DIRNAME = "MekiCopyRuntime"
 _DLL_DIR_HANDLES = []
@@ -233,6 +234,8 @@ class OverlayerApp:
         )
         self._text_lock = threading.Lock()
         self._pending_text: str | None = None
+        self._pending_request_id: str | None = None
+        self.display_receipts = DisplayReceipts()
         self._event_count_lock = threading.Lock()
         self._dropped_config_count = 0
         self._trimmed_payload_count = 0
@@ -330,14 +333,25 @@ class OverlayerApp:
                 ),
             )
 
-    def enqueue_text(self, text: str) -> None:
+    def enqueue_text(self, text: str, request_id: str | None = None) -> None:
         # Showing an outdated translation is worse than skipping intermediate
         # frames.  One locked slot bounds memory and always lets Tk consume the
         # newest available text on its next tick.
         value = self._bounded_text("text", text, self.MAX_TEXT_CHARS)
         with self._text_lock:
+            self.display_receipts.complete(
+                self._pending_request_id, error="superseded by another display request"
+            )
             self.last_text = value
             self._pending_text = value
+            self._pending_request_id = request_id
+
+    def cancel_display(self, request_id: str) -> None:
+        with self._text_lock:
+            self.display_receipts.cancel(request_id)
+            if self._pending_request_id == request_id:
+                self._pending_text = None
+                self._pending_request_id = None
 
     def enqueue_config(self, data: dict[str, Any]) -> bool:
         try:
@@ -464,12 +478,28 @@ class OverlayerApp:
             if event_type == "config":
                 self.config.update_from_dict(payload)
                 self.apply_config()
-        text = self._take_pending_text()
+        with self._text_lock:
+            text = self._pending_text
+            request_id = self._pending_request_id
+            self._pending_text = None
+            self._pending_request_id = None
+        if self.display_receipts.cancelled(request_id):
+            text = None
         if text is not None:
             handled_event = True
-            self.label.configure(text=text)
-            self.root.deiconify()
-            self.root.lift()
+            try:
+                # Keep cancellation and UI application in one critical section.
+                # A receipt is acknowledged only after Tk has flushed redraws.
+                with self._text_lock:
+                    if not self.display_receipts.cancelled(request_id):
+                        self.label.configure(text=text)
+                        self.root.deiconify()
+                        self.root.lift()
+                        self.root.update_idletasks()
+                        self.display_receipts.complete(request_id)
+            except Exception as exc:
+                self.display_receipts.complete(request_id, error=str(exc))
+                log_error("display_text", exc)
         self.root.after(
             (
                 self.ACTIVE_EVENT_POLL_MS
@@ -531,7 +561,26 @@ def make_handler(
             try:
                 parsed = urlparse(self.path)
                 payload = _read_request_json(self)
+                if parsed.path == "/cancel-display":
+                    app_ref.cancel_display(str(payload.get("requestId", "")))
+                    _write_json(self, 200, {"ok": True})
+                    return
                 if parsed.path == "/show":
+                    wait_for_display = payload.get("waitForDisplay") is True
+                    if wait_for_display:
+                        request_id = str(payload.get("requestId", ""))
+                        receipt = app_ref.display_receipts.create(request_id)
+                        app_ref.enqueue_text(str(payload.get("text", "")), request_id)
+                        if not receipt.event.wait(timeout=5.0):
+                            app_ref.cancel_display(request_id)
+                            _write_json(self, 504, {"ok": False, "displayed": False, "error": "overlay UI display timed out"})
+                            return
+                        _write_json(self, 200 if receipt.displayed else 409, {
+                            "ok": receipt.displayed, "displayed": receipt.displayed,
+                            "requestId": request_id, "error": receipt.error,
+                            "displayedMonotonic": receipt.completed_at,
+                        })
+                        return
                     app_ref.enqueue_text(str(payload.get("text", "")))
                     log_debug(app_ref.config.debug_log, "show", f"chars: {len(str(payload.get('text', '')))}")
                     _write_json(self, 200, {"ok": True})

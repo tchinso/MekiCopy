@@ -14,6 +14,7 @@ import queue
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
@@ -143,7 +144,7 @@ class MekiSubtitleWindow(tk.Toplevel):
 
     def _refresh_translation_model_label(self) -> None:
         backend = normalize_backend(getattr(self._settings, "hytrans_backend", "local"))
-        if backend == "translator_api":
+        if backend in {"translator_api", "hdtrans"}:
             self.translation_model_var.set(f"{BACKEND_LABELS[backend]} · 일본어 → 한국어")
             return
         if backend != "local":
@@ -579,7 +580,8 @@ class MekiSubtitleWindow(tk.Toplevel):
                 error = str(payload.get("error") or "").strip()
                 message = state if not error else f"{state}: {error}"
                 if backend not in {"local", "translator_api"} and error and not payload.get("ready"):
-                    raise RuntimeError(f"HYTrans API 번역 설정을 확인해 주세요: {error}")
+                    label = "hdTrans 설치·사전" if backend == "hdtrans" else "API 번역"
+                    raise RuntimeError(f"HYTrans {label} 설정을 확인해 주세요: {error}")
                 if message != last_message:
                     self._emit_status(0.66, f"HYTrans 번역 모델을 기다리고 있습니다: {message}")
                     last_message = message
@@ -602,7 +604,8 @@ class MekiSubtitleWindow(tk.Toplevel):
                 raise TimeoutError("HYTrans 번역 모델 준비 시간이 10분을 초과했습니다.")
             time.sleep(0.35)
 
-    def _translate(self, text: str, *, timeout: float = 600.0, cancel_event=None) -> str:
+    def _translate(self, text: str, *, timeout: float = 600.0, cancel_event=None,
+                   context_owner: str | None = None) -> str:
         del cancel_event
         base_url = self._wait_for_hytrans_ready()
         return translate_via_hytrans(
@@ -610,6 +613,7 @@ class MekiSubtitleWindow(tk.Toplevel):
             text,
             timeout=timeout,
             cancel_event=self._cancel_event,
+            context_owner=context_owner,
         )
 
     def _run_job(
@@ -620,13 +624,19 @@ class MekiSubtitleWindow(tk.Toplevel):
         precision: str,
     ) -> None:
         try:
+            context_owner = f"subtitle:{uuid.uuid4().hex}"
+
+            def translate_cue(text, *, timeout=600.0, cancel_event=None):
+                return self._translate(text, timeout=timeout, cancel_event=cancel_event,
+                                       context_owner=context_owner)
+
             summary = process_video(
                 input_path,
                 output_path,
                 stt_model=stt_model,
                 precision=precision,
                 vad_preset="FAST",
-                translate=self._translate,
+                translate=translate_cue,
                 stt_model_root=shared_stt_model_root(),
                 status=self._emit_status,
                 log=self._emit_log,

@@ -70,6 +70,15 @@ class ReleaseReuseTests(unittest.TestCase):
                 packaging.write_build_manifest(root, root, "Lite")
             self.assertFalse((root / packaging.MANIFEST_NAME).exists())
 
+    def test_hdtrans_and_realtime_user_state_are_rejected(self) -> None:
+        for filename in ("hdtrans_settings.json", "realtime_ocr_state.json"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / filename).write_text("{}", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "Saved user settings"):
+                    packaging.write_build_manifest(root, root, "Lite")
+                self.assertFalse((root / packaging.MANIFEST_NAME).exists())
+
 
 class ReleaseFlavorParityTests(unittest.TestCase):
     def test_full_may_add_only_model_and_magpie_payloads(self) -> None:
@@ -82,6 +91,7 @@ class ReleaseFlavorParityTests(unittest.TestCase):
                 (directory / "MekiCopy.exe").write_bytes(b"runtime")
             for relative in (
                 "HYTrans/models/owner/model/model.onnx",
+                "HYTrans/hdtrans/installations/0.2.1-windows-x64/hdTransEngine.dll",
                 "MekiAudioCapture/models/vad/vad.onnx",
                 "MekiCopy/_internal/runtime_models/meikiocr/ocr.onnx",
                 "MagPie/MagPie.exe",

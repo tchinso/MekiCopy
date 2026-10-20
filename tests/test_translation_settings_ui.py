@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import configparser
+import gc
 from copy import deepcopy
 import tempfile
 import tkinter as tk
@@ -53,7 +54,7 @@ class TranslationSettingsUiTests(unittest.TestCase):
         except tk.TclError as exc:
             self.skipTest(f"Tk display unavailable: {exc}")
         self.root.withdraw()
-        self.addCleanup(self.root.destroy)
+        self.addCleanup(self._cleanup_tk)
         self.root.settings = AppSettings()
         self.root.apply_settings = mock.Mock(return_value=False)
         self.root.settings_window = None
@@ -70,6 +71,25 @@ class TranslationSettingsUiTests(unittest.TestCase):
         self.window = settings_ui.SettingsWindow(self.root)
         self.window.withdraw()
         self.root.settings_window = self.window
+
+    def _cleanup_tk(self) -> None:
+        dialog = None
+        window = getattr(self, "window", None)
+        if window is not None and window.winfo_exists():
+            dialog = getattr(window, "hdtrans_settings_dialog", None)
+            if dialog is not None and dialog.winfo_exists():
+                dialog._close()
+            window.destroy()
+        self.window = None
+        window = None
+        dialog = None
+        root = getattr(self, "root", None)
+        if root is not None:
+            root.settings_window = None
+            root.destroy()
+        self.root = None
+        root = None
+        gc.collect()
 
     def dialog(self) -> settings_ui.ApiSettingsDialog:
         self.window._open_api_settings()
@@ -119,6 +139,14 @@ class TranslationSettingsUiTests(unittest.TestCase):
         profile.account_id = "a" * 32
         self.assertEqual(self.window._collect_settings().hytrans_backend, "cloudflare")
         self.assertEqual(self.window.api_settings.profiles["groq"].api_key, "")
+
+    def test_hdtrans_selection_needs_no_api_profile_and_enables_native_settings(self) -> None:
+        profiles = deepcopy(self.window.api_settings)
+        self.window.hytrans_backend_var.set(BACKEND_LABELS["hdtrans"])
+        self.window._update_translation_controls()
+        self.assertEqual(self.window._collect_settings().hytrans_backend, "hdtrans")
+        self.assertEqual(str(self.window.hdtrans_settings_button.cget("state")), "normal")
+        self.assertEqual(self.window.api_settings, profiles)
 
     def test_api_only_save_passes_draft_through_existing_apply_callback(self) -> None:
         self.window.api_settings.profiles["groq"].models.append("future-model")

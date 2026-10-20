@@ -10,6 +10,7 @@ from mekicopy_hotkey import (
     parse_hotkey,
 )
 from mekicopy_runtime import _set_window_icon
+from mekicopy_realtime import REALTIME_INTERVALS, normalize_interval
 from mekicopy_settings import (
     AppSettings,
     _geometry_size,
@@ -304,6 +305,10 @@ class SettingsWindow(tk.Toplevel):
         )
         self.global_hotkey_var = tk.StringVar(value=settings.global_hotkey)
         self.overlay_mode_var = tk.BooleanVar(value=settings.overlay_translation_mode)
+        self.realtime_ocr_enabled_var = tk.BooleanVar(value=settings.realtime_ocr_enabled)
+        self.realtime_ocr_interval_var = tk.StringVar(
+            value=f"{settings.realtime_ocr_interval:g}"
+        )
         self.api_settings: ApiSettings = load_api_settings()
         self.api_settings_dialog: ApiSettingsDialog | None = None
         self.hytrans_backend_var = tk.StringVar(
@@ -409,6 +414,30 @@ class SettingsWindow(tk.Toplevel):
         translation_tab = self._add_scrollable_tab(notebook, "번역")
         overlay_tab = self._add_scrollable_tab(notebook, "번역 오버레이")
         audio_tab = self._add_scrollable_tab(notebook, "음성인식")
+        realtime_tab = self._add_scrollable_tab(notebook, "실시간 OCR")
+        realtime_frame = tk.LabelFrame(realtime_tab, text="확정 영역 실시간 인식", padx=12, pady=12)
+        realtime_frame.pack(fill=tk.X, pady=(0, 10))
+        tk.Checkbutton(
+            realtime_frame, text="실시간 처리 사용", variable=self.realtime_ocr_enabled_var,
+            anchor="w",
+        ).pack(fill=tk.X)
+        interval_row = tk.Frame(realtime_frame)
+        interval_row.pack(fill=tk.X, pady=(10, 0))
+        tk.Label(interval_row, text="최소 인식 간격 (초)").pack(side=tk.LEFT)
+        ttk.Combobox(
+            interval_row, textvariable=self.realtime_ocr_interval_var,
+            values=[f"{value:g}" for value in REALTIME_INTERVALS], state="readonly", width=8,
+        ).pack(side=tk.LEFT, padx=10)
+        tk.Label(
+            realtime_frame,
+            text=("저장 후 확정된 OCR 영역에서 시작합니다. 본체에서만 실행됩니다.\n"
+                  "현재 모드에 따라 원문 복사 또는 번역 후 표시를 수행합니다.\n"
+                  "중복·빈 원문은 건너뛰고, 새 번역은 실제 표시 후 최소 1초 유지합니다.\n"
+                  "번역 실행 중에는 본체·분리창의 수동 버튼과 단축키가 잠깁니다.\n"
+                  "영역·설정을 변경하면 이전 결과를 무효화하고 새로 인식합니다.\n"
+                  "중지하려면 실시간 처리를 해제하고 저장하세요."),
+            justify=tk.LEFT, anchor="w", wraplength=510,
+        ).pack(fill=tk.X, pady=(12, 0))
 
         options = [
             (
@@ -532,6 +561,10 @@ class SettingsWindow(tk.Toplevel):
             text="API 키 · 모델 목록 · 번역 프롬프트 설정",
             command=self._open_api_settings,
         ).pack(fill=tk.X, pady=3)
+        self.hdtrans_settings_button = tk.Button(
+            translation_frame, text="hdTrans 설정 · 사전 · 문맥 · 설치", command=self._open_hdtrans_settings,
+        )
+        self.hdtrans_settings_button.pack(fill=tk.X, pady=3)
         port_row = tk.Frame(translation_frame)
         port_row.pack(fill=tk.X, pady=3)
         tk.Label(port_row, text="HYTrans 포트").pack(side=tk.LEFT)
@@ -807,16 +840,27 @@ class SettingsWindow(tk.Toplevel):
             return
         self.api_settings_dialog = ApiSettingsDialog(self)
 
+    def _open_hdtrans_settings(self) -> None:
+        from hdtrans_settings_window import HdTransSettingsWindow
+        dialog = getattr(self, "hdtrans_settings_dialog", None)
+        if dialog is not None and dialog.winfo_exists():
+            dialog.lift()
+            return
+        self.hdtrans_settings_dialog = HdTransSettingsWindow(self, main_window=self.owner)
+
     def _update_translation_controls(self) -> None:
         backend = BACKEND_IDS_BY_LABEL.get(self.hytrans_backend_var.get(), "local")
         if backend == "local":
             text = "로컬 모델: " + HYTRANS_MODEL_LABELS[DEFAULT_MODEL_ID]
         elif backend == "translator_api":
             text = "브라우저 내장 Translator API · 일본어 → 한국어 (첫 사용 시 모델 다운로드)"
+        elif backend == "hdtrans":
+            text = "hdTrans · 네이티브 일본어 → 한국어 · 브라우저/API 키 불필요 · Lite 최초 다운로드"
         else:
             profile = self.api_settings.profiles[backend]
             text = f"API 모델: {profile.model or '(모델 ID를 입력하세요)'}"
         self.translation_model_label.configure(text=text)
+        self.hdtrans_settings_button.configure(state=tk.NORMAL if backend == "hdtrans" else tk.DISABLED)
 
     def _refresh_color_buttons(self) -> None:
         for button, variable in self._color_buttons:
@@ -948,6 +992,8 @@ class SettingsWindow(tk.Toplevel):
             detached_fixed_width=current.detached_fixed_width,
             detached_fixed_height=current.detached_fixed_height,
             overlay_translation_mode=self.overlay_mode_var.get(),
+            realtime_ocr_enabled=self.realtime_ocr_enabled_var.get(),
+            realtime_ocr_interval=normalize_interval(self.realtime_ocr_interval_var.get()),
             hytrans_backend=backend,
             hytrans_model_id=DEFAULT_MODEL_ID,
             hytrans_port=hytrans_port,

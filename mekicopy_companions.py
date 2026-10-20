@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import platform
 import shutil
@@ -9,10 +10,14 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
 import zipfile
 from ctypes import wintypes
+from typing import Callable
+import uuid
 
 from mekicopy_runtime import _get_app_dir
 from runtime_paths import writable_app_subdir
@@ -87,6 +92,8 @@ def _probe_service(expected_app: str, base_url: str, timeout: float = 2.0) -> st
     details: list[str] = []
     if backend == "translator_api":
         details.append("Browser Translator API")
+    elif backend == "hdtrans":
+        details.append("hdTrans (네이티브)")
     elif backend != "local":
         details.append(f"API={backend}")
         details.append(f"model={ready.get('model') or health.get('model') or ''}")
@@ -126,7 +133,11 @@ def request_translation_and_show(
     overlayer_url: str,
     overlayer_config: dict | None = None,
     timeout: float = 650.0,
-) -> str:
+    request_id: str | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+    wait_for_display: bool = False,
+    context_owner: str = "ocr",
+) -> str | dict:
     """Translate text through HYTrans and publish it to a verified overlay.
 
     This is deliberately UI-free so desktop windows can run the network wait
@@ -138,6 +149,11 @@ def request_translation_and_show(
     """
     hytrans_base = hytrans_url.rstrip("/")
     overlayer_base = overlayer_url.rstrip("/")
+    def check_cancelled() -> None:
+        if is_cancelled is not None and is_cancelled():
+            raise RuntimeError("실시간 OCR 요청이 취소되었습니다.")
+
+    check_cancelled()
     _probe_service("HYTrans", hytrans_base)
     _probe_service("MekiOverlayer", overlayer_base)
     if overlayer_config is not None:
@@ -147,11 +163,61 @@ def request_translation_and_show(
             timeout=3,
             method="POST",
         )
+    check_cancelled()
+    if wait_for_display:
+        # Translate first so an obsolete OCR generation can discard its result
+        # before any display request is sent. Native execution itself remains
+        # owned by HYTrans until the DLL returns.
+        response = _json_request(
+            f"{hytrans_base}/translate?format=json",
+            {"text": text, "contextOwner": context_owner},
+            timeout=timeout, method="POST",
+        )
+        translated = _validated_translation_text(response)
+        check_cancelled()
+        display_id = request_id or uuid.uuid4().hex
+        finished = threading.Event()
+
+        def cancel_display_when_obsolete() -> None:
+            while not finished.wait(0.025):
+                if is_cancelled is not None and is_cancelled():
+                    try:
+                        _json_request(f"{overlayer_base}/cancel-display",
+                                      {"requestId": display_id}, timeout=2, method="POST")
+                    except Exception:
+                        pass
+                    return
+
+        monitor = None
+        if is_cancelled is not None:
+            monitor = threading.Thread(target=cancel_display_when_obsolete,
+                                       name="MekiCopyDisplayCancellation", daemon=True)
+            monitor.start()
+        try:
+            check_cancelled()
+            shown = _json_request(f"{overlayer_base}/show", {
+                "text": translated, "requestId": display_id, "waitForDisplay": True,
+            }, timeout=7, method="POST")
+            displayed_at = shown.get("displayedMonotonic")
+            check_cancelled()
+            if shown.get("ok") is not True or shown.get("displayed") is not True:
+                raise RuntimeError(str(shown.get("error") or "오버레이 표시 완료를 확인하지 못했습니다."))
+            # On Windows Python's monotonic clock is shared across processes.
+            # Use the Tk paint timestamp, so network latency never adds another
+            # display hold after the two scheduling deadlines have elapsed.
+            if (not isinstance(displayed_at, (int, float)) or isinstance(displayed_at, bool)
+                    or not math.isfinite(displayed_at) or displayed_at < 0
+                    or displayed_at > time.monotonic()):
+                raise RuntimeError("오버레이의 표시 완료 시각이 올바르지 않습니다.")
+            return {"text": translated, "displayedMonotonic": float(displayed_at)}
+        finally:
+            finished.set()
     response = _json_request(
         f"{hytrans_base}/translate-and-show",
         {
             "text": text,
             "overlayUrl": f"{overlayer_base}/show",
+            "contextOwner": context_owner,
         },
         timeout=timeout,
         method="POST",

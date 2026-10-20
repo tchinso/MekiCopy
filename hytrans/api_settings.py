@@ -17,14 +17,16 @@ from runtime_paths import state_data_dir
 
 
 BACKEND_LABELS = {
+    "hdtrans": "hdTrans",
     "local": "HY-MT1.5 (로컬)",
     "translator_api": "Translator API (브라우저 내장)",
     "cloudflare": "Cloudflare Workers AI",
     "deepinfra": "DeepInfra",
     "groq": "Groq",
 }
-PROVIDERS = tuple(key for key in BACKEND_LABELS if key not in {"local", "translator_api"})
+PROVIDERS = ("cloudflare", "deepinfra", "groq")
 BROWSER_BACKENDS = frozenset({"local", "translator_api"})
+NATIVE_BACKENDS = frozenset({"hdtrans"})
 DEFAULT_PROMPT = (
     "Translate the following {source} text into {target}. Preserve its meaning, "
     "tone, names, and line breaks. Return only the translated text, without "
@@ -239,7 +241,7 @@ def render_prompt(template: str, *, source: str, target: str, text: str) -> str:
 
 def fingerprint(settings: ApiSettings, backend: str) -> str:
     backend = normalize_backend(backend)
-    if backend in {"local", "translator_api"}:
+    if backend not in PROVIDERS:
         return backend
     profile = settings.profiles[backend]
     # Kept only in the controller's memory for restart decisions; this digest

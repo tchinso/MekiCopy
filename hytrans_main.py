@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backend", choices=tuple(BACKEND_LABELS), default="local")
     parser.add_argument("--api-config", help="path to encrypted translation API settings; never pass keys on the command line")
     parser.add_argument("--self-test-api", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--self-test-hdtrans", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--model",
         "--model-id",
@@ -84,6 +85,17 @@ def wait_server_ready(host: str, port: int, timeout: float = 15.0) -> bool:
 def main() -> int:
     set_windows_app_id("HYTrans")
     args = parse_args()
+    if args.self_test_hdtrans:
+        from hytrans.hdtrans_selftest import run_hdtrans_self_test
+        try:
+            result = run_hdtrans_self_test()
+            if sys.stdout is not None:
+                print(json.dumps(result, ensure_ascii=True))
+            return 0
+        except Exception as exc:
+            if sys.stderr is not None:
+                print(str(exc), file=sys.stderr)
+            return 1
     if args.self_test_api:
         from hytrans.api_selftest import run_api_self_test
 

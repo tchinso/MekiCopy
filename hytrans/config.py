@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from service_ports import HYTRANS_DEFAULT_PORT, OVERLAYER_DEFAULT_PORT
 
 from .api_settings import ApiSettings, PROVIDERS, ProviderSettings, load_api_settings, normalize_backend
+from .hdtrans_settings import configure_hdtrans_settings_path
 
 from .model_files import (
     DEFAULT_MODEL_ID,
@@ -125,6 +126,10 @@ def configure_server(
     options.model_id = profile.key
     options.backend = normalize_backend(backend)
     options.api_config = str(api_config) if api_config else None
+    # The frozen controller and HYTrans live in sibling executable folders.
+    # Its existing --api-config argument identifies their common user-config
+    # directory for native options too, without publishing paths/credentials.
+    configure_hdtrans_settings_path(Path(api_config).parent / "hdtrans_settings.json" if api_config else None)
     options.api_settings = load_api_settings(api_config) if options.backend in PROVIDERS else None
 
 
@@ -144,9 +149,11 @@ def _model_path(profile: ModelProfile) -> Path:
 
 
 def detect_model_mode() -> str:
+    if options.backend == "hdtrans":
+        return "native"
     if options.backend == "translator_api":
         return "on-device"
-    if options.backend != "local":
+    if options.backend in PROVIDERS:
         return "api"
     profile = selected_model_profile()
     if is_complete_model(_model_path(profile), profile):
@@ -166,6 +173,12 @@ def has_local_wasm_files() -> bool:
 
 
 def runtime_config() -> RuntimeConfig:
+    if options.backend == "hdtrans":
+        return RuntimeConfig(
+            backend="hdtrans", modelKey="hdtrans", modelId="hdTrans",
+            revision="v0.2.1", dtype="native", promptTemplate="",
+            modelMode="native", modelFiles={}, debugLog=options.debug_log,
+        )
     if options.backend == "translator_api":
         return RuntimeConfig(
             backend="translator_api",
@@ -178,7 +191,7 @@ def runtime_config() -> RuntimeConfig:
             modelFiles={},
             debugLog=options.debug_log,
         )
-    if options.backend != "local":
+    if options.backend in PROVIDERS:
         profile = selected_api_profile()
         return RuntimeConfig(
             backend=options.backend,

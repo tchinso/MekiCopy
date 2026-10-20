@@ -602,18 +602,17 @@ class CaptureManager:
         raise ValueError(f"unknown capture strategy: {strategy}")
 
     def _capture_with_mss(self, region: Region) -> Image.Image:
-        if self.sct is None:
-            self.reinitialize("missing_mss_before_capture")
-        if self.sct is None:
-            raise RuntimeError("mss capture backend is unavailable")
         mss_region = {
             "left": region.left,
             "top": region.top,
             "width": region.width,
             "height": region.height,
         }
-        sct_image = self.sct.grab(mss_region)
-        return Image.frombytes("RGB", sct_image.size, sct_image.rgb)
+        # Windows MSS owns thread-local DCs. TkTaskRunner uses a fresh worker
+        # per OCR operation, so never borrow the UI thread's cached instance.
+        with mss.mss() as capture:
+            sct_image = capture.grab(mss_region)
+            return Image.frombytes("RGB", sct_image.size, sct_image.rgb)
 
     def _capture_with_pillow(self, region: Region) -> Image.Image:
         bbox = (

@@ -29,6 +29,8 @@ from .config import (
 )
 from .api_client import ApiTranslationError, ApiTranslationQueue, ApiTranslator
 from .api_settings import BROWSER_BACKENDS, PROVIDERS, validate_provider_settings
+from .hdtrans_backend import HdTransBackend, HdTransError
+from .hdtrans_settings import HdTransSettings, load_hdtrans_settings
 from .logging_setup import configure_logging, debug, error
 from .model_cache import (
     model_cache_file_response,
@@ -49,6 +51,8 @@ translation_queue = TranslationQueue()
 queue_task: asyncio.Task | None = None
 api_translation_queue: ApiTranslationQueue | None = None
 api_active_requests = 0
+hdtrans_backend: HdTransBackend | None = None
+hdtrans_prepare_task: asyncio.Task | None = None
 worker_opener: Callable[[], None] | None = None
 worker_activator: Callable[[], None] | None = None
 worker_interactive_opener: Callable[[], None] | None = None
@@ -78,6 +82,17 @@ class TranslateBody(BaseModel):
     realtime: bool = False
     source: str | None = None
     target: str | None = None
+    contextOwner: str | None = None
+    resetContext: bool = False
+
+
+class HdTransSettingsBody(BaseModel):
+    preserveContext: bool = True
+    userDictionaries: list[str] = []
+
+
+class HdTransInstallBody(BaseModel):
+    force: bool = False
 
 
 class ClientLogBody(BaseModel):
@@ -256,7 +271,11 @@ def _translator_language_tag(value: str | None, *, default: str) -> str:
 
 
 async def _translate_text(text: str, *, realtime: bool = False,
-                          source: str | None = None, target: str | None = None) -> str:
+                          source: str | None = None, target: str | None = None,
+                          context_owner: str = "shared", reset_context: bool = False) -> str:
+    if options.backend == "hdtrans":
+        return await _translate_native_text(text, source=source, target=target,
+                                            context_owner=context_owner, reset_context=reset_context)
     if options.backend in PROVIDERS:
         return await _translate_api_text(text, source=source, target=target)
     source_language = target_language = None
@@ -371,9 +390,83 @@ async def _translate_api_text(text: str, *, source: str | None = None,
         state.state = "BUSY" if api_active_requests else "READY"
 
 
+def _sync_hdtrans_state() -> dict[str, object]:
+    snapshot = hdtrans_backend.status() if hdtrans_backend else {"ready": False, "state": "STARTING"}
+    state.worker_ready = bool(snapshot.get("ready"))
+    state.worker_connected = False
+    state.state = str(snapshot.get("state", "STARTING")).upper()
+    state.backend = "hdtrans"
+    state.model = "hdTrans"
+    state.dtype = "native"
+    state.model_mode = "native"
+    state.device = "cpu"
+    state.device_detail = "hdTrans C API"
+    state.error = snapshot.get("error")
+    state.warning = snapshot.get("userDictionaryError") or None
+    return snapshot
+
+
+async def _initialize_hdtrans() -> None:
+    assert hdtrans_backend is not None
+    try:
+        await hdtrans_backend.submit("initialize", timeout=None)
+    except Exception as exc:
+        error("hdtrans_initialize", exc)
+    finally:
+        _sync_hdtrans_state()
+
+
+def _prepare_hdtrans() -> dict[str, object]:
+    global hdtrans_prepare_task
+    if hdtrans_backend is None:
+        raise HTTPException(status_code=503, detail="hdTrans backend is unavailable")
+    snapshot = _sync_hdtrans_state()
+    if not snapshot.get("ready") and (hdtrans_prepare_task is None or hdtrans_prepare_task.done()):
+        hdtrans_backend.cancel_install.clear()
+        hdtrans_prepare_task = asyncio.create_task(_initialize_hdtrans())
+    return {"ok": True, **snapshot}
+
+
+async def _native_command(operation: str, *arguments: object, timeout: float | None = 120) -> object:
+    if hdtrans_backend is None or options.backend != "hdtrans":
+        raise HTTPException(status_code=409, detail="hdTrans is not the selected engine")
+    try:
+        return await hdtrans_backend.submit(operation, *arguments, timeout=timeout)
+    except TranslationQueueOverloadedError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="hdTrans timeout; the native call is still completing safely") from exc
+    except (HdTransError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=503 if operation == "translate" else 400, detail=str(exc)) from exc
+    finally:
+        _sync_hdtrans_state()
+
+
+async def _translate_native_text(text: str, *, source: str | None, target: str | None,
+                                context_owner: str, reset_context: bool) -> str:
+    if not _sync_hdtrans_state().get("ready"):
+        raise HTTPException(status_code=503, detail=state.error or "hdTrans is not ready")
+    for language, allowed in ((source, {"ja", "japanese"}), (target, {"ko", "korean"})):
+        if language is not None and language.casefold() not in allowed:
+            raise HTTPException(status_code=400, detail="hdTrans supports Japanese to Korean only")
+    if not context_owner or len(context_owner) > 200 or any(ord(char) < 32 for char in context_owner):
+        raise HTTPException(status_code=400, detail="invalid contextOwner")
+    return await _native_command("translate", text, context_owner, reset_context,
+                                 timeout=translation_timeout_seconds(len(text)))
+
+
+def _validate_native_control(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    if not _is_loopback_host(host) or not _is_trusted_shutdown_origin(request.headers.get("origin")):
+        raise HTTPException(status_code=403, detail="hdTrans control is limited to trusted loopback clients")
+    if request.headers.get("sec-fetch-site", "").casefold() == "cross-site":
+        raise HTTPException(status_code=403, detail="cross-site hdTrans control requests are blocked")
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     global queue_task, translation_queue, worker_open_task, api_translation_queue, api_active_requests
+    global hdtrans_backend, hdtrans_prepare_task
     # A FastAPI app object may be stopped and started again in the same
     # interpreter (embedded hosting and lifespan tests do this). ``stop``
     # permanently wakes the old queue, so each server lifetime needs a fresh
@@ -394,6 +487,13 @@ async def on_startup() -> None:
     state.started_at = time.time()
     api_active_requests = 0
     api_translation_queue = None
+    hdtrans_backend = None
+    hdtrans_prepare_task = None
+    if options.backend == "hdtrans":
+        hdtrans_backend = HdTransBackend()
+        queue_task = None
+        _prepare_hdtrans()
+        return
     if options.backend in PROVIDERS:
         profile = selected_api_profile()
         issue = validate_provider_settings(profile, options.backend) if profile else "API settings are unavailable"
@@ -427,7 +527,16 @@ async def on_startup() -> None:
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     global queue_task, api_translation_queue
+    global hdtrans_backend, hdtrans_prepare_task
     state.state = "STOPPING"
+    if hdtrans_prepare_task is not None and not hdtrans_prepare_task.done():
+        hdtrans_prepare_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await hdtrans_prepare_task
+    hdtrans_prepare_task = None
+    if hdtrans_backend is not None:
+        await hdtrans_backend.close()
+        hdtrans_backend = None
     translation_queue.stop()
     if api_translation_queue is not None:
         await api_translation_queue.stop()
@@ -443,6 +552,8 @@ async def on_shutdown() -> None:
 async def health(response: Response) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
     profile = active_model_profile()
+    if options.backend == "hdtrans":
+        _sync_hdtrans_state()
     return {
         "ok": True,
         "app": "HYTrans",
@@ -453,6 +564,7 @@ async def health(response: Response) -> dict[str, object]:
         "ready": state.worker_ready,
         "model": state.model if options.backend != "local" else profile.model_id,
         "dtype": ("api" if options.backend in PROVIDERS else
+                  "native" if options.backend == "hdtrans" else
                   "browser" if options.backend == "translator_api" else profile.dtype),
         # The per-process capability is readable by native loopback clients.
         # Same-origin policy prevents an unrelated website from reading it,
@@ -479,6 +591,8 @@ async def shutdown(request: Request) -> dict[str, object]:
 
 @app.get("/ready")
 async def ready() -> dict[str, object]:
+    if options.backend == "hdtrans":
+        _sync_hdtrans_state()
     return state.as_ready_payload()
 
 
@@ -555,20 +669,24 @@ async def post_model_cache_file(url: str, request: Request) -> dict[str, object]
 
 @app.post("/model/prepare")
 async def prepare_model() -> dict[str, object]:
+    if options.backend == "hdtrans":
+        return _prepare_hdtrans()
     if options.backend == "translator_api":
         return {"ok": state.worker_ready, "state": state.state,
                 "backend": options.backend, "model": state.model}
-    if options.backend != "local":
+    if options.backend in PROVIDERS:
         return {"ok": True, "state": "API", "backend": options.backend, "model": state.model}
     return await asyncio.to_thread(model_download_manager.start)
 
 
 @app.get("/model/status")
 async def model_status() -> dict[str, object]:
+    if options.backend == "hdtrans":
+        return _sync_hdtrans_state()
     if options.backend == "translator_api":
         return {"state": state.state, "complete": state.worker_ready,
                 "backend": options.backend, "model": state.model}
-    if options.backend != "local":
+    if options.backend in PROVIDERS:
         return {"state": "API", "complete": True, "backend": options.backend, "model": state.model}
     return await asyncio.to_thread(model_download_manager.status)
 
@@ -576,6 +694,60 @@ async def model_status() -> dict[str, object]:
 @app.get("/worker.html")
 async def worker_html() -> FileResponse:
     return FileResponse(assets_dir() / "worker.html")
+
+
+@app.get("/hdtrans/status")
+async def hdtrans_status() -> dict[str, object]:
+    if options.backend == "hdtrans":
+        return _sync_hdtrans_state()
+    return {"backend": "hdtrans", "ready": False, "state": "INACTIVE",
+            "settings": load_hdtrans_settings().as_payload(), "singleSession": True,
+            "reloadResetsContext": True}
+
+
+@app.put("/hdtrans/settings")
+async def hdtrans_settings(body: HdTransSettingsBody, request: Request) -> object:
+    _validate_native_control(request)
+    return await _native_command("settings", HdTransSettings(body.preserveContext, body.userDictionaries))
+
+
+@app.post("/hdtrans/context/reset")
+async def hdtrans_reset(request: Request) -> object:
+    _validate_native_control(request)
+    return await _native_command("reset")
+
+
+@app.post("/hdtrans/reload")
+async def hdtrans_reload(request: Request) -> object:
+    _validate_native_control(request)
+    return await _native_command("reload")
+
+
+@app.post("/hdtrans/install")
+async def hdtrans_install(body: HdTransInstallBody, request: Request) -> dict[str, object]:
+    _validate_native_control(request)
+    if options.backend != "hdtrans":
+        raise HTTPException(status_code=409, detail="hdTrans is not the selected engine")
+    if body.force and hdtrans_backend is not None and hdtrans_backend.status().get("ready"):
+        raise HTTPException(status_code=409, detail="Restart HYTrans before replacing a loaded hdTrans DLL")
+    return _prepare_hdtrans()
+
+
+@app.post("/hdtrans/download/cancel")
+async def hdtrans_cancel(request: Request) -> dict[str, object]:
+    _validate_native_control(request)
+    if hdtrans_backend is not None:
+        hdtrans_backend.cancel_install.set()
+    return {"ok": True, "phase": "취소 요청됨; 진행 중인 네이티브 호출은 완료 후 정리됩니다."}
+
+
+@app.get("/hdtrans/updates")
+async def hdtrans_updates() -> dict[str, object]:
+    from .hdtrans_download import check_for_updates
+    try:
+        return await asyncio.to_thread(check_for_updates)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"hdTrans 업데이트 확인 실패: {exc}") from exc
 
 
 @app.get("/translator_api_worker.html")
@@ -603,10 +775,13 @@ async def translate_get(
     format: str = "text",
     source: str | None = None,
     target: str | None = None,
+    contextOwner: str | None = None,
+    resetContext: bool = False,
 ) -> PlainTextResponse | dict[str, object]:
     _validate_api_caller(request)
     clean_text = _validate_text(text)
-    result = await _translate_text(clean_text, source=source, target=target)
+    result = await _translate_text(clean_text, source=source, target=target,
+                                   context_owner=contextOwner or "shared", reset_context=resetContext)
     if format == "json":
         return _json_response(True, result)
     return PlainTextResponse(result, media_type="text/plain; charset=utf-8")
@@ -620,7 +795,8 @@ async def translate_post(
 ) -> PlainTextResponse | dict[str, object]:
     _validate_api_caller(request)
     clean_text = _validate_text(body.text)
-    result = await _translate_text(clean_text, realtime=body.realtime, source=body.source, target=body.target)
+    result = await _translate_text(clean_text, realtime=body.realtime, source=body.source, target=body.target,
+                                   context_owner=body.contextOwner or "shared", reset_context=body.resetContext)
     if format == "json":
         return _json_response(True, result)
     return PlainTextResponse(result, media_type="text/plain; charset=utf-8")
@@ -630,7 +806,8 @@ async def translate_post(
 async def translate_and_show(body: TranslateBody, request: Request) -> dict[str, object]:
     _validate_api_caller(request)
     clean_text = _validate_text(body.text)
-    result = await _translate_text(clean_text, realtime=body.realtime, source=body.source, target=body.target)
+    result = await _translate_text(clean_text, realtime=body.realtime, source=body.source, target=body.target,
+                                   context_owner=body.contextOwner or "overlay", reset_context=body.resetContext)
     try:
         await _send_to_overlay(result, body.overlayUrl)
     except Exception as exc:

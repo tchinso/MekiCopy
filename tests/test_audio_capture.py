@@ -630,6 +630,7 @@ class RealtimeTranslationSessionTests(unittest.TestCase):
             timeout: float,
             *,
             realtime: bool = False,
+              context_owner: str | None = None,
         ) -> str:
             realtime_flags.append(realtime)
             deliveries.append(("translate", hytrans_url, text))
@@ -1099,9 +1100,21 @@ class RealtimeTranslationConfigTests(unittest.TestCase):
     def test_config_endpoint_rejects_realtime_translation_setting(self) -> None:
         controller = CaptureControllerTests._controller()
         before = controller.health()
+        class TestCaptureHandler(meki_audio_capture.make_handler(controller)):
+            # Preserve the production routes while avoiding a Windows socket
+            # reset race when a HTTP/1.0 response closes its connection.
+            protocol_version = "HTTP/1.1"
+
+            def handle(self):
+                try:
+                    super().handle()
+                except ConnectionResetError:
+                    # Ignore peer teardown after the response was consumed.
+                    pass
+
         server = meki_audio_capture.ThreadingHTTPServer(
             ("127.0.0.1", 0),
-            meki_audio_capture.make_handler(controller),
+            TestCaptureHandler,
         )
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()

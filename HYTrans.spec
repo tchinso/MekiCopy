@@ -9,7 +9,9 @@ if Path("assets").exists():
 if Path("MekiCopy.ico").exists():
     datas.append(("MekiCopy.ico", "."))
 
-hiddenimports = ["hytrans_main"]
+hiddenimports = ["hytrans_main", "hytrans.hdtrans_backend", "hytrans.hdtrans_download"]
+# hdTrans native payloads are deliberately staged beside HYTrans.exe by the
+# Full packaging step. Never collect a warmed developer download into Lite.
 hiddenimports += collect_submodules("fastapi")
 hiddenimports += collect_submodules("starlette")
 hiddenimports += collect_submodules("uvicorn")

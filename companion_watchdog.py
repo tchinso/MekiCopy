@@ -123,6 +123,9 @@ def default_health_evaluator(
         actual_app = str(payload.get("app") or "")
         if actual_app != expected_app:
             return f"expected {expected_app}, received {actual_app or 'unknown service'}"
+        if (expected_app == "HYTrans" and payload.get("backend") == "hdtrans"
+                and payload.get("state") == "NATIVE_TIMEOUT"):
+            return "hdTrans native call has exceeded its request timeout"
 
         ui_responsive = payload.get("uiResponsive")
         if ui_responsive is False:

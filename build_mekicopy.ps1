@@ -7,6 +7,7 @@ param(
     [string]$PackageFlavor = "Lite",
     [string]$FullAssetsRoot = "",
     [string]$FullMagpieRoot = "",
+    [string]$FullHdTransRoot = "",
     [string]$FfmpegRoot = "",
     [switch]$ReuseLiteBuild
 )
@@ -540,6 +541,7 @@ function Invoke-HealthSmokeTest {
         [Parameter(Mandatory = $true)][int]$Port,
         [hashtable]$ExpectedConfig,
         [switch]$GracefulShutdown,
+        [switch]$RequireNativeReady,
         [int]$TimeoutSeconds = 30
     )
 
@@ -566,6 +568,12 @@ function Invoke-HealthSmokeTest {
                         $healthPayload = $response.Content |
                             ConvertFrom-Json -ErrorAction Stop
                         $controlToken = [string]$healthPayload.controlToken
+                        if ($RequireNativeReady -and (
+                            -not $healthPayload.ready -or $healthPayload.workerConnected
+                        )) {
+                            Start-Sleep -Milliseconds 250
+                            continue
+                        }
                     }
                     catch {
                         $controlToken = ""
@@ -903,6 +911,24 @@ $hyTransRoot = Split-Path -Parent $hyTransExe
 $displayRoot = Split-Path -Parent $overlayerExe
 $audioCaptureRoot = Split-Path -Parent $audioCaptureExe
 if ($PackageFlavor -eq "Full") {
+    # The same verified installer backs Lite first-use and Full preloading.
+    # Keep this external to the frozen application so Lite and Full binaries
+    # remain byte-for-byte identical and no loaded DLL is overwritten.
+    $hdTransPrepareArgs = @(
+        "-m", "hytrans.hdtrans_download", "--prepare-build", (Join-Path $hyTransRoot "hdtrans")
+    )
+    $hdTransArchiveCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-0.2.1-windows.zip"
+    $hdTransSourceCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-v0.2.1-source.zip"
+    if ($FullHdTransRoot) {
+        $hdTransPrepareArgs += @("--from-bundle-root", $FullHdTransRoot)
+    }
+    if (Test-Path -LiteralPath $hdTransArchiveCache -PathType Leaf) {
+        $hdTransPrepareArgs += @("--archive", $hdTransArchiveCache)
+    }
+    if (Test-Path -LiteralPath $hdTransSourceCache -PathType Leaf) {
+        $hdTransPrepareArgs += @("--source-archive", $hdTransSourceCache)
+    }
+    Invoke-CheckedPython $hdTransPrepareArgs
     Copy-ReleaseTree `
         -SourceRoot (Join-Path $PSScriptRoot "runtime_models\meikiocr") `
         -TargetRoot (Join-Path $mekiCopyRoot "_internal\runtime_models\meikiocr") `
@@ -1045,6 +1071,7 @@ if ($PackageFlavor -eq "Lite") {
     # companion roots directly so a warmed developer cache cannot leak into it.
     foreach ($liteModelRoot in @(
         (Join-Path $mekiCopyRoot "_internal\runtime_models"),
+        (Join-Path $hyTransRoot "hdtrans"),
         (Join-Path $hyTransRoot "models"),
         (Join-Path $audioCaptureRoot "models")
     )) {
@@ -1235,6 +1262,20 @@ if (-not $SkipSmokeTests) {
             $audioPort
     }
     if ($PackageFlavor -eq "Full") {
+        Invoke-ExeSmokeTest $hyTransExe @("--self-test-hdtrans")
+        $nativePort = Get-FreeTcpPort
+        Invoke-HealthSmokeTest `
+            -ExePath $hyTransExe `
+            -Arguments @("--port", "$nativePort", "--backend", "hdtrans", "--no-browser") `
+            -Port $nativePort `
+            -ExpectedConfig @{
+                backend = "hdtrans"
+                modelId = "hdTrans"
+                dtype = "native"
+                modelMode = "native"
+            } `
+            -RequireNativeReady `
+            -GracefulShutdown
         # Verify the copied, pre-downloaded STT/VAD assets from inside the
         # frozen companion.  Lite intentionally has no model payload and
         # retains its first-use download path instead.

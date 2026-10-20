@@ -18,6 +18,7 @@ from tkinter import font as tkfont
 
 from mekicopy_capture import MIN_SIZE_PX, Region
 from mekicopy_hotkey import DEFAULT_GLOBAL_HOTKEY, normalize_hotkey
+from mekicopy_realtime import normalize_interval
 from mekicopy_runtime import _get_app_dir
 from hytrans.model_files import (
     DEFAULT_MODEL_ID,
@@ -296,6 +297,8 @@ class AppSettings:
     detached_fixed_width: int = 260
     detached_fixed_height: int = 160
     overlay_translation_mode: bool = True
+    realtime_ocr_enabled: bool = False
+    realtime_ocr_interval: float = 2.0
     hytrans_backend: str = "local"
     hytrans_model_id: str = DEFAULT_MODEL_ID
     hytrans_port: int = HYTRANS_DEFAULT_PORT
@@ -577,6 +580,12 @@ def load_settings() -> AppSettings:
         "overlay_translation_mode",
         fallback=settings.overlay_translation_mode,
     )
+    settings.realtime_ocr_enabled = parser.getboolean(
+        section, "realtime_ocr_enabled", fallback=False
+    )
+    settings.realtime_ocr_interval = normalize_interval(
+        parser.get(section, "realtime_ocr_interval", fallback="2")
+    )
     settings.hytrans_model_id = normalize_model_id(
         parser.get(
             section,
@@ -781,6 +790,8 @@ def save_settings(settings: AppSettings) -> bool:
         "detached_fixed_width": str(settings.detached_fixed_width),
         "detached_fixed_height": str(settings.detached_fixed_height),
         "overlay_translation_mode": str(settings.overlay_translation_mode).lower(),
+        "realtime_ocr_enabled": str(settings.realtime_ocr_enabled).lower(),
+        "realtime_ocr_interval": str(normalize_interval(settings.realtime_ocr_interval)),
         "hytrans_backend": normalize_backend(settings.hytrans_backend),
         "hytrans_model_id": normalize_model_id(settings.hytrans_model_id),
         "hytrans_port": str(settings.hytrans_port),

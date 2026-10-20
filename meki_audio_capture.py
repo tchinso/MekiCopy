@@ -756,6 +756,7 @@ class RealtimeTranslationSession:
                             result.text_ja,
                             timeout=AUDIO_TRANSLATION_TIMEOUT_SECONDS,
                             realtime=True,
+                            context_owner=f"audio:{self.session_id}",
                         )
                         if not translated:
                             raise RuntimeError("HYTrans가 빈 번역 결과를 반환했습니다.")
@@ -1533,6 +1534,7 @@ class CaptureController:
                             hytrans_url,
                             result.text_ja,
                             timeout=AUDIO_TRANSLATION_TIMEOUT_SECONDS,
+                            context_owner=f"audio:{session_id}",
                         )
                         if not translated:
                             raise RuntimeError("HYTrans가 빈 번역 결과를 반환했습니다.")

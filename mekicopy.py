@@ -35,7 +35,7 @@ from service_ports import (
 prepare_tk_environment("MekiCopyRuntime")
 
 import tkinter as tk
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from tkinter import colorchooser, font as tkfont, messagebox, simpledialog, ttk
 from ctypes import wintypes
 from typing import Callable
@@ -174,6 +174,13 @@ from mekicopy_theme import (
     style_tree,
 )
 from mekicopy_tasks import TkTaskRunner
+from mekicopy_realtime import (
+    REALTIME_LOCK_LABEL,
+    REALTIME_STATE_FILENAME,
+    RealtimeOcrController,
+    detached_translation_locked,
+    perform_cycle,
+)
 from mekicopy_tray import WindowsTrayIcon
 from system_logging import (
     configure_system_logging,
@@ -188,7 +195,7 @@ EDGE_GRAB_PX = 8
 MAIN_WINDOW_WIDTH = 520
 MAIN_WINDOW_HEIGHT = 440
 MAIN_TAB_BAR_WIDTH = 138
-OCR_BUTTON_HEIGHT_PX = 278
+OCR_BUTTON_HEIGHT_PX = 232
 GLOBAL_HOTKEY_POLL_MS = 50
 SELECTION_INSTRUCTION_FONT_SIZE = 36
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
@@ -261,6 +268,7 @@ class DetachedOcrButtonApp:
         self._settings_file_state = self._current_settings_file_state()
         self._settings_after_id: str | None = None
         self._geometry_after_id: str | None = None
+        self._realtime_locked = False
         self._closing = False
         self._topmost_controller = TopmostWindowController(
             self.root,
@@ -299,7 +307,19 @@ class DetachedOcrButtonApp:
         self.root.mainloop()
 
     def ocr_action_label(self) -> str:
+        if getattr(self, "_realtime_locked", False) and self.settings.overlay_translation_mode:
+            return REALTIME_LOCK_LABEL
         return "번역 후 표시" if self.settings.overlay_translation_mode else "인식 후 복사"
+
+    def _refresh_realtime_lock(self) -> None:
+        self._realtime_locked = detached_translation_locked(
+            mekicopy_settings.STATE_DIR / REALTIME_STATE_FILENAME
+        )
+        if self.button.winfo_exists():
+            self.button.config(text=self.ocr_action_label(), state=(
+                tk.DISABLED if self._realtime_locked and self.settings.overlay_translation_mode
+                else tk.NORMAL
+            ))
 
     def current_size(self) -> tuple[int, int]:
         self.root.update_idletasks()
@@ -324,7 +344,7 @@ class DetachedOcrButtonApp:
 
     def apply_settings(self) -> None:
         settings = self.settings
-        self.button.config(text=self.ocr_action_label())
+        self._refresh_realtime_lock()
         self.root.withdraw()
         self.root.overrideredirect(settings.detached_hide_titlebar)
         if settings.detached_fixed_size:
@@ -375,6 +395,9 @@ class DetachedOcrButtonApp:
             self._suppress_next_click = False
             return
         self.settings = load_settings()
+        self._refresh_realtime_lock()
+        if self._realtime_locked and self.settings.overlay_translation_mode:
+            return
         region = load_detached_region()
         if not region:
             messagebox.showerror(
@@ -431,6 +454,9 @@ class DetachedOcrButtonApp:
         def operation() -> str:
             text = recognize_image(image)
             if translate and text.strip():
+                # A realtime session may have started while this manual OCR ran.
+                if detached_translation_locked(mekicopy_settings.STATE_DIR / REALTIME_STATE_FILENAME):
+                    return ""
                 request_translation_and_show(
                     text,
                     hytrans_url=hytrans_url,
@@ -568,6 +594,7 @@ class DetachedOcrButtonApp:
         self._settings_after_id = None
         if self._closing:
             return
+        self._refresh_realtime_lock()
         file_state = self._current_settings_file_state()
         if file_state == self._settings_file_state:
             self._schedule_settings_poll()
@@ -790,7 +817,15 @@ class MainWindow(tk.Tk):
             "HYTrans": default_health_evaluator("HYTrans"),
         }
         self._companion_watchdog_after_id: str | None = None
+        self._realtime_state_after_id: str | None = None
         self._build_ui()
+        self._realtime_ocr = RealtimeOcrController(
+            self, self._task_runner,
+            prepare_operation=self._prepare_realtime_operation,
+            on_result=self._on_realtime_result,
+            on_error=self._on_realtime_error,
+            on_state=self._on_realtime_state_changed,
+        )
         self.apply_settings(self.settings, persist=False)
         self.bind("<Unmap>", self._on_unmap)
         self.bind("<Destroy>", self._on_root_destroy, add="+")
@@ -907,6 +942,12 @@ class MainWindow(tk.Tk):
             "HYTrans 서버 실행",
             self._on_start_hytrans,
         )
+        self.hdtrans_settings_button = self._pack_tab_button(
+            frame, "hdTrans 설정", self._on_hdtrans_settings,
+        )
+        self.hdtrans_settings_button.configure(
+            state=tk.NORMAL if self.settings.hytrans_backend == "hdtrans" else tk.DISABLED
+        )
         self.overlayer_button = self._pack_tab_button(
             frame,
             "MekiOverlayer 실행",
@@ -993,6 +1034,9 @@ class MainWindow(tk.Tk):
             radius=28,
         )
         self.ocr_button.pack(fill=tk.BOTH, expand=True)
+        self.realtime_button = self._pack_tab_button(
+            frame, "실시간 OCR 시작", self._on_toggle_realtime_ocr,
+        )
 
     def _pack_tab_button(
         self,
@@ -1019,6 +1063,9 @@ class MainWindow(tk.Tk):
                 button.config(bg=SOFT, fg=INK, activebackground=SURFACE)
 
     def ocr_action_label(self) -> str:
+        realtime = getattr(self, "_realtime_ocr", None)
+        if realtime is not None and realtime.translation_locked:
+            return REALTIME_LOCK_LABEL
         if self.settings.overlay_translation_mode:
             return "번역 후 표시"
         return "인식 후 복사"
@@ -1029,7 +1076,9 @@ class MainWindow(tk.Tk):
             button = getattr(self, button_name, None)
             if button is not None and button.winfo_exists():
                 button.config(state=overlay_state)
-        self.ocr_button.config(text=self.ocr_action_label())
+        realtime = getattr(self, "_realtime_ocr", None)
+        locked = realtime is not None and realtime.translation_locked
+        self.ocr_button.config(text=self.ocr_action_label(), state=tk.DISABLED if locked else tk.NORMAL)
         self.detach_button.config(text=f"'{self.ocr_action_label()}' 버튼 분리하기")
 
     @staticmethod
@@ -1104,6 +1153,8 @@ class MainWindow(tk.Tk):
             and self.settings.global_hotkey_enabled
             and not self._global_hotkey_paused
             and not self._global_hotkey_action_active
+            and not (getattr(self, "_realtime_ocr", None)
+                     and self._realtime_ocr.translation_locked)
             and not self._task_runner.is_running("main_ocr")
         ):
             self._global_hotkey_action_active = True
@@ -1121,6 +1172,8 @@ class MainWindow(tk.Tk):
     def _on_root_destroy(self, event: tk.Event) -> None:
         if event.widget == self:
             self._closing = True
+            if getattr(self, "_realtime_ocr", None) is not None:
+                self._realtime_ocr.close()
             self._global_hotkey.close()
 
     def _format_region(self, region: Region | None) -> str:
@@ -1152,6 +1205,7 @@ class MainWindow(tk.Tk):
         )
 
     def _remember_active_region_profile(self) -> None:
+        self._sync_realtime_ocr()
         if not self.active_region:
             self.active_region_ratio = None
             self.active_monitor = None
@@ -1214,6 +1268,7 @@ class MainWindow(tk.Tk):
         self.active_monitor = monitor
         self.active_region_ratio = ratio
         if changed:
+            self._sync_realtime_ocr()
             self.draft_region = Region(
                 left=region.left,
                 top=region.top,
@@ -1257,6 +1312,7 @@ class MainWindow(tk.Tk):
         )
         self.active_monitor = monitor
         self.active_region_ratio = _ratio_for_region(region, monitor)
+        self._sync_realtime_ocr()
         try:
             save_detached_region(region)
         except OSError as exc:
@@ -2044,6 +2100,14 @@ class MainWindow(tk.Tk):
                 _log_runtime_error("send_overlayer_config", exc)
             return False
 
+    def _on_hdtrans_settings(self) -> None:
+        from hdtrans_settings_window import HdTransSettingsWindow
+        dialog = getattr(self, "hdtrans_settings_window", None)
+        if dialog is not None and dialog.winfo_exists():
+            dialog.lift()
+            return
+        self.hdtrans_settings_window = HdTransSettingsWindow(self, main_window=self)
+
     def _on_start_hytrans(self) -> bool:
         if self._hytrans_restart_after_id is not None:
             messagebox.showinfo(
@@ -2066,6 +2130,7 @@ class MainWindow(tk.Tk):
             expected_model = (
                 expected_profile.model_id if backend == "local" else
                 "Browser Translator API" if backend == "translator_api" else
+                "hdTrans" if backend == "hdtrans" else
                 load_api_settings().profiles[backend].model
             )
             if (
@@ -2081,6 +2146,9 @@ class MainWindow(tk.Tk):
             self._send_hytrans_logging_config(log_errors=False)
             try:
                 ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=1)
+                if backend == "hdtrans" and not ready.get("ready"):
+                    self._on_hdtrans_settings()
+                    return True
                 if backend in PROVIDERS and not ready.get("ready"):
                     messagebox.showerror(
                         "MekiCopy",
@@ -2430,12 +2498,133 @@ class MainWindow(tk.Tk):
             _log_runtime_error("test_overlay_connection", exc)
             messagebox.showerror("MekiCopy", f"연결 테스트 실패:\n{exc}", parent=owner)
 
+    def _on_toggle_realtime_ocr(self) -> None:
+        self.apply_settings(
+            replace(self.settings, realtime_ocr_enabled=not self.settings.realtime_ocr_enabled),
+            persist=True,
+        )
+
+    def _sync_realtime_ocr(self) -> None:
+        realtime = getattr(self, "_realtime_ocr", None)
+        if realtime is None:
+            return
+        region = self.active_region
+        target = None if region is None else (region.left, region.top, region.width, region.height)
+        realtime.configure(
+            enabled=self.settings.realtime_ocr_enabled and region is not None and not self._closing,
+            interval=self.settings.realtime_ocr_interval,
+            translate=self.settings.overlay_translation_mode,
+            fingerprint=(target, repr(self.settings), getattr(self, "_hytrans_config_fingerprint", None)),
+        )
+        if hasattr(self, "realtime_button"):
+            self.realtime_button.config(text=(
+                "실시간 OCR 중지" if self.settings.realtime_ocr_enabled else "실시간 OCR 시작"
+            ))
+        if self.settings.realtime_ocr_enabled and region is None:
+            self._set_capture_status("실시간 OCR 대기: 먼저 OCR 영역을 확정하세요.")
+
+    def _on_realtime_state_changed(self) -> None:
+        if not self._closing:
+            self._apply_overlay_mode_ui()
+        self._publish_realtime_state()
+
+    def _publish_realtime_state(self) -> None:
+        if self._realtime_state_after_id is not None:
+            try:
+                self.after_cancel(self._realtime_state_after_id)
+            except tk.TclError:
+                pass
+            self._realtime_state_after_id = None
+        realtime = self._realtime_ocr
+        active = realtime.active and not self._closing
+        mekicopy_settings._write_state_text(REALTIME_STATE_FILENAME, json.dumps({
+            "version": 1, "pid": os.getpid(), "active": active,
+            "translation": realtime.translate, "updatedAt": time.time(),
+        }))
+        if active:
+            self._realtime_state_after_id = self.after(1000, self._publish_realtime_state)
+
+    def _prepare_realtime_operation(self, session, previous):
+        # Snapshot UI-owned state before handing any work to TkTaskRunner.
+        region, settings = self.active_region, self.settings
+        monitor, ratio = self.active_monitor, self.active_region_ratio
+        if region is None:
+            raise OcrError("확정된 OCR 영역이 없습니다.")
+        overlayer_config = {
+            "topmost": settings.overlayer_always_on_top,
+            "hide_titlebar": settings.overlayer_hide_titlebar,
+            "fixed_size": settings.overlayer_fixed_size,
+            "exclude_from_capture": settings.overlayer_exclude_from_capture,
+            "bg_color": settings.overlayer_bg_color,
+            "opacity": settings.overlayer_bg_opacity,
+            "text_color": settings.overlayer_text_color,
+            "text_size": settings.overlayer_text_size,
+            "text_font": settings.overlayer_text_font,
+            "debug_log": settings.debug_logging,
+        }
+
+        def translate(text: str) -> dict:
+            return request_translation_and_show(
+                text,
+                hytrans_url=f"http://127.0.0.1:{settings.hytrans_port}",
+                overlayer_url=f"http://127.0.0.1:{settings.overlayer_port}",
+                overlayer_config=overlayer_config,
+                request_id=f"{session.owner}:{time.monotonic_ns()}",
+                is_cancelled=session.cancelled.is_set,
+                wait_for_display=True,
+                context_owner=session.owner,
+            )
+
+        def operation():
+            target, resolved_monitor, resolved_ratio, _ = get_capture_manager().resolve_region(
+                region, previous_monitor=monitor, ratio=ratio,
+            )
+
+            def recognize() -> str:
+                image = capture_ocr_image(target.left, target.top, target.width, target.height)
+                return recognize_image(image)
+
+            result = perform_cycle(
+                recognize, session=session,
+                previous=previous if _regions_equal(target, region) else None,
+                translate=translate if settings.overlay_translation_mode else None,
+            )
+            return replace(result, capture_target=(target, resolved_monitor, resolved_ratio))
+
+        return operation
+
+    def _on_realtime_result(self, result) -> bool:
+        if self._closing:
+            return False
+        if result.capture_target is not None:
+            region, monitor, ratio = result.capture_target
+            if not _regions_equal(region, self.active_region):
+                self.active_region = region
+                self.active_monitor, self.active_region_ratio = monitor, ratio
+                self.draft_region = replace(region)
+                save_detached_region(region)
+                self._update_status()
+        if result.displayed_at is None:
+            # Clipboard ownership stays on Tk's thread and automatic mode is quiet.
+            copy_text_to_clipboard(result.text, notify=False, parent=self)
+            self._set_capture_status("실시간 OCR: 새 원문을 복사했습니다.")
+        else:
+            self._set_capture_status("실시간 OCR: 새 번역 표시 완료. 다음 인식을 기다립니다.")
+        return True
+
+    def _on_realtime_error(self, error: Exception) -> None:
+        _log_runtime_error("realtime_ocr", error)
+        self._set_capture_status(f"실시간 OCR 실패 (다음 주기에 재시도): {error}")
+
     def _on_ocr_copy(
         self,
         source_button: tk.Button | None = None,
         *,
         on_finished: Callable[[], None] | None = None,
     ) -> bool:
+        realtime = getattr(self, "_realtime_ocr", None)
+        if (realtime is not None and realtime.translation_locked) or self._task_runner.is_running("main_ocr"):
+            return False
         if not self.active_region:
             messagebox.showerror("MekiCopy", "설정된 영역이 없습니다.", parent=self)
             return False
@@ -2470,6 +2659,9 @@ class MainWindow(tk.Tk):
         translate: bool,
         on_finished: Callable[[], None] | None = None,
     ) -> bool:
+        realtime = getattr(self, "_realtime_ocr", None)
+        if realtime is not None and realtime.translation_locked:
+            return False
         settings = self.settings
         hytrans_url = f"http://127.0.0.1:{settings.hytrans_port}"
         overlayer_url = f"http://127.0.0.1:{settings.overlayer_port}"
@@ -2583,6 +2775,7 @@ class MainWindow(tk.Tk):
         def restore() -> None:
             if not button.winfo_exists():
                 return
+            original["text"] = self.ocr_action_label()
             button.config(**original)
             setattr(button, "_mekicopy_feedback_original", None)
             setattr(button, "_mekicopy_feedback_after_id", None)
@@ -2686,22 +2879,31 @@ class MainWindow(tk.Tk):
             return None
 
         self.settings = settings
+        hdtrans_button = getattr(self, "hdtrans_settings_button", None)
+        if hdtrans_button is not None:
+            hdtrans_button.configure(state=tk.NORMAL if backend == "hdtrans" else tk.DISABLED)
         self._hytrans_config_fingerprint = current_fingerprint
         set_debug_enabled(self.settings.debug_logging)
         self.attributes("-topmost", self.settings.main_always_on_top)
         if self.subtitle_window is not None and self.subtitle_window.winfo_exists():
             self.subtitle_window.refresh_settings(self.settings)
         self._apply_overlay_mode_ui()
+        self._sync_realtime_ocr()
         if self.settings.overlay_translation_mode:
             self._send_overlayer_config(log_errors=False)
         self._send_script_config(log_errors=False)
         self._send_audio_capture_config(log_errors=False)
         self._send_hytrans_logging_config(log_errors=False)
         if persist and restart_reason_parts:
-            return self._begin_hytrans_restart(
+            restarting = self._begin_hytrans_restart(
                 previous.hytrans_port,
                 ",".join(restart_reason_parts),
             )
+            if backend == "hdtrans":
+                if not restarting and not _is_loopback_port_open(settings.hytrans_port):
+                    self._launch_hytrans(notify=False)
+                self._on_hdtrans_settings()
+            return restarting
         return False
 
     def _on_unmap(self, event: tk.Event) -> None:
@@ -2768,6 +2970,7 @@ class MainWindow(tk.Tk):
             ):
                 return
         self._closing = True
+        self._realtime_ocr.close()
         if self._global_hotkey_after_id is not None:
             try:
                 self.after_cancel(self._global_hotkey_after_id)
@@ -3099,6 +3302,10 @@ def run_ui_self_test() -> None:
             raise RuntimeError(
                 f"main OCR button height is {ocr_button_height}, expected {OCR_BUTTON_HEIGHT_PX}"
             )
+        action_frame = app.tab_frames["행동"]
+        if (not app.realtime_button.winfo_ismapped()
+                or app.realtime_button.winfo_y() + app.realtime_button.winfo_height() > action_frame.winfo_height()):
+            raise RuntimeError("realtime OCR control is clipped outside the action tab")
         app._select_tab("도구/설정")
         app.update_idletasks()
         expected_overlay_state = (

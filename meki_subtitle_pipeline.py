@@ -18,6 +18,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -362,12 +363,16 @@ def translate_via_hytrans(
     *,
     timeout: float = DEFAULT_TRANSLATION_TIMEOUT_SECONDS,
     cancel_event: Any = None,
+    context_owner: str | None = None,
 ) -> str:
     """Translate one segment through the existing local HYTrans service."""
 
     _check_cancel(cancel_event)
     endpoint = f"{hytrans_url.rstrip('/')}/translate?format=json"
-    data = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
+    payload = {"text": text}
+    if context_owner:
+        payload["contextOwner"] = context_owner
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         endpoint,
         data=data,
@@ -399,11 +404,16 @@ def _translation_callable(
     if translate is not None:
         return translate
     if translation_url:
+        # One native engine/session exists. A fresh work boundary resets it
+        # on the first cue; switching to audio/OCR or another subtitle file
+        # resets it again instead of sharing learned names across works.
+        context_owner = f"subtitle:{uuid.uuid4().hex}"
         return lambda text, timeout=DEFAULT_TRANSLATION_TIMEOUT_SECONDS, cancel_event=None: translate_via_hytrans(
             translation_url,
             text,
             timeout=timeout,
             cancel_event=cancel_event,
+            context_owner=context_owner,
         )
     return None
 
