@@ -291,15 +291,15 @@ class AppSettings:
     detached_hide_titlebar: bool = False
     detached_fixed_size: bool = False
     simple_copy_complete: bool = True
-    global_hotkey_enabled: bool = True
+    global_hotkey_enabled: bool = False
     global_hotkey: str = DEFAULT_GLOBAL_HOTKEY
     detached_geometry: str = DETACHED_DEFAULT_GEOMETRY
     detached_fixed_width: int = 260
     detached_fixed_height: int = 160
     overlay_translation_mode: bool = True
-    realtime_ocr_enabled: bool = False
-    realtime_ocr_interval: float = 2.0
-    hytrans_backend: str = "local"
+    realtime_ocr_enabled: bool = True
+    realtime_ocr_interval: float = 1.0
+    hytrans_backend: str = "hdtrans"
     hytrans_model_id: str = DEFAULT_MODEL_ID
     hytrans_port: int = HYTRANS_DEFAULT_PORT
     overlayer_port: int = OVERLAYER_DEFAULT_PORT
@@ -581,10 +581,12 @@ def load_settings() -> AppSettings:
         fallback=settings.overlay_translation_mode,
     )
     settings.realtime_ocr_enabled = parser.getboolean(
-        section, "realtime_ocr_enabled", fallback=False
+        section, "realtime_ocr_enabled", fallback=settings.realtime_ocr_enabled
     )
     settings.realtime_ocr_interval = normalize_interval(
-        parser.get(section, "realtime_ocr_interval", fallback="2")
+        parser.get(
+            section, "realtime_ocr_interval", fallback=str(settings.realtime_ocr_interval)
+        )
     )
     settings.hytrans_model_id = normalize_model_id(
         parser.get(

@@ -17,13 +17,13 @@ from mekicopy_settings import AppSettings, load_settings, save_settings
 
 
 class TranslationSettingsPersistenceTests(unittest.TestCase):
-    def test_legacy_settings_default_to_local_mt15(self) -> None:
+    def test_legacy_settings_default_to_hdtrans_mt15(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.cfg"
             path.write_text("[settings]\nhytrans_model_id = mt2\n", encoding="utf-8")
             with mock.patch.object(mekicopy_settings, "SETTINGS_FILE", str(path)):
                 settings = load_settings()
-        self.assertEqual(settings.hytrans_backend, "local")
+        self.assertEqual(settings.hytrans_backend, "hdtrans")
         self.assertEqual(settings.hytrans_model_id, "mt1.5")
 
     def test_backend_is_persisted_and_invalid_values_fall_back(self) -> None:
@@ -131,6 +131,11 @@ class TranslationSettingsUiTests(unittest.TestCase):
         interval = next(widget for widget in controls if isinstance(widget, ttk.Combobox))
         self.assertEqual(str(interval.cget("textvariable")), str(self.window.realtime_ocr_interval_var))
         self.assertEqual(str(interval.cget("state")), "readonly")
+        self.assertEqual(interval.cget("values"), ("0.5", "1", "1.5", "2", "2.5"))
+        self.assertEqual(self.window.realtime_ocr_interval_var.get(), "1")
+        self.assertTrue(self.window.realtime_ocr_enabled_var.get())
+        self.assertFalse(self.window.global_hotkey_enabled_var.get())
+        self.assertEqual(self.window.hytrans_backend_var.get(), "hdTrans")
         labels = [
             str(widget.cget("text")) for widget in controls
             if isinstance(widget, tk.Label)
@@ -239,6 +244,7 @@ class TranslationSettingsUiTests(unittest.TestCase):
         self.root.apply_settings.assert_not_called()
 
     def test_local_allows_blank_credentials_but_selected_api_requires_them(self) -> None:
+        self.window.hytrans_backend_var.set(BACKEND_LABELS["local"])
         self.assertEqual(self.window._collect_settings().hytrans_backend, "local")
         self.window.hytrans_backend_var.set(BACKEND_LABELS["cloudflare"])
         with self.assertRaisesRegex(ValueError, "API"):
@@ -263,7 +269,7 @@ class TranslationSettingsUiTests(unittest.TestCase):
         self.window._on_save()
         self.root.apply_settings.assert_called_once()
         args, kwargs = self.root.apply_settings.call_args
-        self.assertEqual(args[0].hytrans_backend, "local")
+        self.assertEqual(args[0].hytrans_backend, "hdtrans")
         self.assertTrue(kwargs["persist"])
         self.assertIs(kwargs["api_settings"], draft)
         self.assertFalse(self.window.winfo_exists())

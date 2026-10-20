@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 
-REALTIME_INTERVALS = (1.0, 1.5, 2.0, 2.5, 3.0)
+REALTIME_INTERVALS = (0.5, 1.0, 1.5, 2.0, 2.5)
 REALTIME_LOCK_LABEL = "실시간 인식 중입니다"
 REALTIME_STATE_FILENAME = "realtime_ocr_state.json"
 _JAPANESE = re.compile(
@@ -31,8 +31,8 @@ def normalize_interval(value: object) -> float:
     try:
         interval = float(value)
     except (ValueError, TypeError):
-        return 2.0
-    return interval if interval in REALTIME_INTERVALS else 2.0
+        return 1.0
+    return interval if interval in REALTIME_INTERVALS else 1.0
 
 
 def comparison_text(text: str) -> str:
@@ -72,7 +72,7 @@ def is_duplicate(previous: str | None, current: str) -> bool:
 
 def next_start(started_at: float, interval: float, displayed_at: float | None) -> float:
     deadline = started_at + interval
-    return max(deadline, displayed_at + 1.0) if displayed_at is not None else deadline
+    return max(deadline, displayed_at + 0.5) if displayed_at is not None else deadline
 
 
 @dataclass
@@ -128,7 +128,7 @@ class RealtimeOcrController:
         self.prepare_operation, self.on_result = prepare_operation, on_result
         self.on_error, self.on_state, self.clock = on_error, on_state, clock
         self.active = False
-        self.interval = 2.0
+        self.interval = 1.0
         self.translate = False
         self.previous: str | None = None
         self.session: RealtimeSession | None = None

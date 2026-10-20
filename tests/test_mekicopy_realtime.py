@@ -177,12 +177,22 @@ class RealtimeSchedulingTests(unittest.TestCase):
         self.runner.finish()
         self.assertEqual(self.root.deadline, 102)
 
-    def test_slow_display_waits_one_second_after_actual_ack(self):
+    def test_slow_display_waits_half_second_after_actual_ack(self):
         self.start(translate=True)
         self.clock.now = 103
         self.result = RealtimeResult("原文", displayed_at=103)
         self.runner.finish()
-        self.assertEqual(self.root.deadline, 104)
+        self.assertEqual(self.root.deadline, 103.5)
+
+    def test_half_second_interval_waits_for_actual_display(self):
+        self.controller.configure(enabled=True, interval=0.5, translate=True)
+        self.root.fire()
+        self.clock.now = 100.25
+        self.result = RealtimeResult("原文", displayed_at=100.25)
+        self.runner.finish()
+        self.assertEqual(self.root.deadline, 100.75)
+        self.root.fire()
+        self.assertEqual(self.runner.submissions, 2)
 
     def test_elapsed_deadlines_do_not_add_delay(self):
         self.start(translate=True)
@@ -329,8 +339,13 @@ class RealtimeSchedulingTests(unittest.TestCase):
 
 
 class RealtimeSettingsTests(unittest.TestCase):
-    def test_default_is_off_and_supported_intervals_roundtrip(self):
-        self.assertFalse(AppSettings().realtime_ocr_enabled)
+    def test_defaults_and_supported_intervals_roundtrip(self):
+        defaults = AppSettings()
+        self.assertFalse(defaults.global_hotkey_enabled)
+        self.assertEqual(defaults.hytrans_backend, "hdtrans")
+        self.assertTrue(defaults.realtime_ocr_enabled)
+        self.assertEqual(defaults.realtime_ocr_interval, 1.0)
+        self.assertEqual(REALTIME_INTERVALS, (0.5, 1.0, 1.5, 2.0, 2.5))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.cfg"
             for interval in REALTIME_INTERVALS:
@@ -353,9 +368,12 @@ class RealtimeSettingsTests(unittest.TestCase):
             with mock.patch.object(mekicopy_settings, "SETTINGS_FILE", str(path)):
                 loaded = load_settings()
             self.assertTrue(loaded.main_always_on_top)
-            self.assertFalse(loaded.realtime_ocr_enabled)
-        for value in (None, "wrong", float("nan"), -1, 4):
-            self.assertEqual(normalize_interval(value), 2)
+            self.assertTrue(loaded.realtime_ocr_enabled)
+            self.assertEqual(loaded.realtime_ocr_interval, 1.0)
+            self.assertFalse(loaded.global_hotkey_enabled)
+            self.assertEqual(loaded.hytrans_backend, "hdtrans")
+        for value in (None, "wrong", float("nan"), -1, 3, 4):
+            self.assertEqual(normalize_interval(value), 1.0)
 
     def test_detached_lock_uses_running_lease_and_expires_after_main_crash(self):
         with tempfile.TemporaryDirectory() as directory:
