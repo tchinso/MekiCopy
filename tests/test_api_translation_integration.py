@@ -126,7 +126,7 @@ class ApiTranslationIntegrationTests(unittest.TestCase):
         response.__enter__.return_value.read.return_value = json.dumps(
             {"ready": True, "workerConnected": False, "backend": "cloudflare"}
         ).encode()
-        with mock.patch("urllib.request.urlopen", return_value=response) as open_url:
+        with mock.patch("meki_subtitle_window.urlopen", return_value=response) as open_url:
             self.assertEqual(MekiSubtitleWindow._wait_for_hytrans_ready(window), "http://127.0.0.1:6996")
         self.assertEqual(open_url.call_count, 1)
 
@@ -140,7 +140,7 @@ class ApiTranslationIntegrationTests(unittest.TestCase):
         response.__enter__.return_value.read.return_value = json.dumps(
             {"ready": False, "backend": "groq", "state": "ERROR", "error": "API key required"}
         ).encode()
-        with mock.patch("urllib.request.urlopen", return_value=response) as open_url:
+        with mock.patch("meki_subtitle_window.urlopen", return_value=response) as open_url:
             with self.assertRaisesRegex(RuntimeError, "API key required"):
                 MekiSubtitleWindow._wait_for_hytrans_ready(window)
         self.assertEqual(open_url.call_count, 1)

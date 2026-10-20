@@ -14,7 +14,7 @@ MekiCopy는 Tk 본체와 별도 프로세스로 실행하는 번역·표시·음
 | OCR | `mekicopy_ocr.py` | 모델 준비, GPU/CPU 선택, 인식과 복사 |
 | 실시간 OCR | `mekicopy_realtime.py` | 주기·중복 판정·세션 취소 |
 | UI 작업 | `mekicopy_tasks.py`, `mekicopy_tooltip.py`, `mekicopy_hotkey.py`, `mekicopy_tray.py` | 작업 스레드 결과 전달, 툴팁, 단축키, 트레이 |
-| 외부 도구 | `mekicopy_companions.py`, `companion_watchdog.py`, `companion_liveness.py`, `companion_manual_close.py` | 실행·통신·공통 오버레이 설정·상태 검사·복구·수동 종료 |
+| 외부 도구 | `mekicopy_companions.py`, `companion_http.py`, `companion_watchdog.py`, `companion_liveness.py`, `companion_manual_close.py` | 실행·통신·공통 오버레이 설정·상태 검사·복구·수동 종료 |
 | 번역 서버 | `hytrans_main.py`, `hytrans/app.py`, `hytrans/queue.py` | HTTP API, 제한된 순차 작업 큐 |
 | 번역 엔진 | `hytrans/hdtrans_backend.py`, `hytrans/browser.py`, `hytrans/api_client.py` | 네이티브·브라우저·클라우드 번역 |
 | 번역 설정·자산 | `hytrans/config.py`, `hytrans/*settings.py`, `hytrans/*download.py`, `hytrans/model_*.py` | 서비스 설정, 키 보호, 다운로드·무결성 |
@@ -42,6 +42,8 @@ MekiCopy는 Tk 본체와 별도 프로세스로 실행하는 번역·표시·음
 OCR 작업은 겹쳐 실행하지 않습니다. MSS 캡처는 작업 스레드에 맞는 캡처 인스턴스를 사용합니다. Tk 위젯과 Tcl 변수는 UI 스레드에서 다루며 백그라운드 결과는 `TkTaskRunner`로 전달합니다. Windows 이벤트 콜백은 상태만 기록하고 Tk 타이머가 UI 변경을 수행합니다.
 
 상태 조회 응답은 해당 프로세스·포트·모델의 현재 상태에 속하는지 확인해야 합니다. 프로세스 교체나 설정 변경 전 요청의 늦은 응답을 새 상태로 반영하면 안 됩니다. 자동 복구는 본체가 소유한 프로세스에만 적용합니다.
+
+도구 간 HTTP 통신은 `companion_http.urlopen`을 사용합니다. 루프백 요청과 표시·음성 서버는 HTTP/1.1로 길이가 명시된 응답을 끝까지 읽고 연결을 정리하여 Windows의 연결 종료 시 응답 유실을 방지합니다. 번역·표시 POST를 자동 재전송하지 않습니다. 외부 다운로드와 클라우드 API는 기존 전송 경로를 사용합니다.
 
 ## 실시간 OCR
 

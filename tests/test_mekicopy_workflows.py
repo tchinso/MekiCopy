@@ -108,6 +108,26 @@ class WorkflowConnectionTests(unittest.TestCase):
                 self.assertEqual(error.call_count, int(failed_service is not None))
                 self.assertEqual(info.call_count, int(failed_service is None))
 
+    def test_screen_connection_check_stops_when_overlay_config_fails(self) -> None:
+        parent = object()
+        window = SimpleNamespace(
+            _hytrans_base_url=lambda: "http://127.0.0.1:5000",
+            _overlayer_base_url=lambda: "http://127.0.0.1:6000",
+            _overlayer_show_url=lambda: "http://127.0.0.1:6000/show",
+            _send_overlayer_config=mock.Mock(return_value=False),
+        )
+        with (
+            mock.patch.object(mekicopy, "_probe_service", return_value="ready"),
+            mock.patch.object(mekicopy, "_json_request") as request,
+            mock.patch.object(mekicopy.messagebox, "showinfo") as info,
+            mock.patch.object(mekicopy.messagebox, "showerror") as error,
+        ):
+            mekicopy.MainWindow._on_test_overlay_connection(window, parent=parent)
+        request.assert_not_called()
+        info.assert_not_called()
+        error.assert_called_once()
+        self.assertIs(error.call_args.kwargs["parent"], parent)
+
     def test_audio_connection_check_always_checks_all_three_tools(self) -> None:
         window = SimpleNamespace(
             _audio_capture_base_url=lambda: "http://127.0.0.1:7000",
@@ -133,6 +153,90 @@ class WorkflowConnectionTests(unittest.TestCase):
                 self.assertEqual([call.args[0] for call in checked.call_args_list], services)
                 self.assertEqual(error.call_count, int(failed_service is not None))
                 self.assertEqual(info.call_count, int(failed_service is None))
+
+
+class CompanionActionFeedbackTests(unittest.TestCase):
+    @staticmethod
+    def _hytrans_window(backend: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            settings=SimpleNamespace(
+                hytrans_backend=backend, hytrans_model_id="test", hytrans_port=5000,
+            ),
+            _hytrans_restart_after_id=None,
+            hytrans_process=object(),
+            _hytrans_base_url=lambda: "http://127.0.0.1:5000",
+            _send_hytrans_logging_config=mock.Mock(),
+            _tracked_process_is_starting=mock.Mock(return_value=False),
+            _warn_if_port_busy=mock.Mock(return_value=True),
+            _launch_hytrans=mock.Mock(),
+            _begin_hytrans_restart=mock.Mock(),
+        )
+
+    def test_hytrans_readiness_error_reports_failure_without_launching(self) -> None:
+        window = self._hytrans_window("hdtrans")
+        health = {"ok": True, "app": "HYTrans", "backend": "hdtrans", "model": "hdTrans"}
+        failure = TimeoutError("timed out")
+        with (
+            mock.patch.object(mekicopy, "get_model_profile", return_value=object()),
+            mock.patch.object(mekicopy, "_json_request", side_effect=[health, failure]) as request,
+            mock.patch.object(mekicopy, "_log_runtime_error") as log,
+            mock.patch.object(mekicopy.messagebox, "showinfo") as info,
+            mock.patch.object(mekicopy.messagebox, "showerror") as error,
+        ):
+            self.assertFalse(mekicopy.MainWindow._on_start_hytrans(window))
+        self.assertEqual(request.call_args_list[-1].args[0], "http://127.0.0.1:5000/ready")
+        log.assert_called_once_with("check_hytrans_ready", failure)
+        error.assert_called_once()
+        info.assert_not_called()
+        window._launch_hytrans.assert_not_called()
+        window._warn_if_port_busy.assert_not_called()
+        window._tracked_process_is_starting.assert_not_called()
+
+    def test_hytrans_worker_reopen_error_reports_failure_without_launching(self) -> None:
+        window = self._hytrans_window("local")
+        profile = SimpleNamespace(model_id="test", dtype="int8")
+        health = {
+            "ok": True, "app": "HYTrans", "backend": "local", "model": "test", "dtype": "int8",
+        }
+        failure = ConnectionResetError("connection reset")
+        with (
+            mock.patch.object(mekicopy, "get_model_profile", return_value=profile),
+            mock.patch.object(
+                mekicopy, "_json_request",
+                side_effect=[health, {"ready": False, "workerConnected": False}, failure],
+            ) as request,
+            mock.patch.object(mekicopy, "_log_runtime_error") as log,
+            mock.patch.object(mekicopy.messagebox, "showinfo") as info,
+            mock.patch.object(mekicopy.messagebox, "showerror") as error,
+        ):
+            self.assertFalse(mekicopy.MainWindow._on_start_hytrans(window))
+        self.assertEqual(request.call_args_list[-1].args[0], "http://127.0.0.1:5000/worker/reopen")
+        log.assert_called_once_with("restart_hytrans_worker", failure)
+        error.assert_called_once()
+        info.assert_not_called()
+        window._launch_hytrans.assert_not_called()
+        window._warn_if_port_busy.assert_not_called()
+        window._tracked_process_is_starting.assert_not_called()
+
+    def test_running_overlayer_config_error_does_not_claim_settings_applied(self) -> None:
+        window = SimpleNamespace(
+            _overlayer_base_url=lambda: "http://127.0.0.1:6000",
+            _send_overlayer_config=mock.Mock(return_value=False),
+            _warn_if_port_busy=mock.Mock(),
+            _tracked_process_is_starting=mock.Mock(),
+            _launch_overlayer=mock.Mock(),
+        )
+        with (
+            mock.patch.object(mekicopy, "_probe_service", return_value="ready"),
+            mock.patch.object(mekicopy.messagebox, "showinfo") as info,
+            mock.patch.object(mekicopy.messagebox, "showerror") as error,
+        ):
+            mekicopy.MainWindow._on_start_overlayer(window)
+        error.assert_called_once()
+        info.assert_not_called()
+        window._launch_overlayer.assert_not_called()
+        window._warn_if_port_busy.assert_not_called()
+        window._tracked_process_is_starting.assert_not_called()
 
 
 if __name__ == "__main__":

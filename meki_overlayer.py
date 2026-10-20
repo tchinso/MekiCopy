@@ -453,10 +453,20 @@ class OverlayerApp:
 
 
 def _read_request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
-    length = int(handler.headers.get("Content-Length", "0") or "0")
+    try:
+        if handler.headers.get("Transfer-Encoding"):
+            raise ValueError("청크 인코딩 요청은 지원하지 않습니다.")
+        length = int(handler.headers.get("Content-Length", "0") or "0")
+    except ValueError:
+        handler.close_connection = True
+        raise
     if length < 0 or length > MAX_REQUEST_BYTES:
+        handler.close_connection = True
         raise ValueError("요청 본문이 너무 큽니다.")
     raw = handler.rfile.read(length) if length else b"{}"
+    if length and len(raw) != length:
+        handler.close_connection = True
+        raise ValueError("요청 본문이 완전하지 않습니다.")
     if not raw:
         return {}
     return json.loads(raw.decode("utf-8"))
@@ -486,6 +496,19 @@ def make_handler(
         return payload
 
     class OverlayerHandler(BaseHTTPRequestHandler):
+        # Keep responses open for the shared companion transport. Closing each
+        # response can race Windows socket teardown and reset a valid reply.
+        protocol_version = "HTTP/1.1"
+        timeout = 30.0
+
+        def handle(self) -> None:
+            try:
+                super().handle()
+            except (ConnectionError, TimeoutError):
+                # An idle pooled connection or a client closing its window is
+                # normal; it must not become a server-thread traceback.
+                self.close_connection = True
+
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/health":
@@ -544,6 +567,8 @@ def make_handler(
                     _write_json(self, 200, {"ok": True})
                     return
                 _write_json(self, 404, {"ok": False, "error": "not found"})
+            except (ConnectionError, TimeoutError):
+                self.close_connection = True
             except Exception as exc:
                 log_error("http_post", exc)
                 _write_json(self, 500, {"ok": False, "error": str(exc)})

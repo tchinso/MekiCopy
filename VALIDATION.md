@@ -2,6 +2,18 @@
 
 검증일: 2026-10-20 (Windows x64, Python 3.12.14).
 
+## 도구 간 HTTP 응답 유실 수정
+
+- Full의 `MekiCopy/debug_log`·`error_log`와 HYTrans·표시기 로그를 대조했다. 표시기가 HTTP 200으로 처리한 요청도 클라이언트에서는 `WinError 10054`로 실패했다. 같은 Windows 환경의 실제 소켓 시험에서 HTTP/1.0 서버 또는 urllib의 `Connection: close` 요청으로 재현했으며, HTTP/1.1 서버와 응답을 모두 읽은 뒤 정리하는 클라이언트 조합에서는 재현되지 않았다.
+- `companion_http.py`로 본체·상태 감시·HYTrans 표시 전송·음성·자막·브라우저 준비 조회의 루프백 통신을 통합했다. HTTP 오류 본문을 보존하고 번역·표시 POST를 자동 재시도하거나 리디렉션으로 재전송하지 않는다. 외부 다운로드와 클라우드 API의 기존 전송 경로는 유지한다.
+- 표시기·대본·녹음 서버가 HTTP/1.1 응답을 제공하며, 녹음 시작·중지 요청도 본문을 소비한다. 유휴 연결에는 30초 제한을 둔다. HYTrans의 Windows 서버는 Selector 루프를 사용하여 응답 수신 후 Proactor 정리 콜백의 `WinError 10022`도 방지한다. 실제 요청 100회 비교에서 Selector 오류 0회, Proactor 정리 오류 17회를 확인했다.
+- HYTrans 준비 조회 실패는 `check_hytrans_ready`로 정확히 기록하고 실패로 안내한다. 표시기 설정 적용 실패 후에는 설정 적용·연결 시험 성공 안내를 표시하지 않는다.
+- 최종 전체 Python **311개 통과**. 실제 Windows DLL·실시간 통합 시험, 반복·동시 HTTP 요청, 타임아웃·응답 유실 시 POST 1회 실행, 오류 응답 본문, 연결 정리 대기 상한을 포함한다. 실시간 통합·음성 시험에서 HTTP/1.1 테스트 전용 우회를 제거하고 실제 제품 핸들러·클라이언트를 사용했다. 로그: `.cache/connection-fix/source-tests.log`. 변경되지 않은 브라우저 worker의 앞선 11개 통과 결과는 재사용했다.
+- Lite·Full 모두 빌드 종료 코드 **0**, frozen 실행 검사와 Full 네이티브 엔진·음성 모델 검사, 공통 파일 일치 검사를 통과했다. 로그: `.cache/connection-fix/lite-build.log`, `.cache/connection-fix/full-build.log`.
+- 새 실행 파일의 상태·준비 조회, 설정 적용, HYTrans → 표시기 전송·실제 화면 반영, 음성 대본 전송을 각 60회 반복했다. Lite **480회**, Full **490회** 요청에서 오류 0회이며 Full은 실제 네이티브 번역 10회를 포함한다. 두 배포본 모두 프로세스 생존과 `WinError 10054`·`WinError 10022`·Traceback 로그 부재를 확인했다. 결과: `.cache/connection-fix/frozen-connections.json`.
+- 최종 두 ZIP의 실제 SHA-256·체크섬 파일, 내부 manifest·파일 목록·크기와 공통 실행 파일 해시를 확인했다. 두 manifest는 소스 fingerprint `34c03b774fed9f195c2b965c737102ae50dad99616fa2efd97daa557f1a1cd62`와 일치하고 `smokeTested=true`다. Lite ZIP은 1,622,546,277 bytes, Full ZIP은 4,112,018,547 bytes다. 결과: `.cache/connection-fix/release-verification.json`.
+- 교체 전 Full의 실행 설정·로그·실행 중 생성 파일은 `.cache/connection-fix/previous-state/Full`에 보존했다. 깨끗한 배포 ZIP 검증 후 기존 설정·API 설정·영역·로컬 hdTrans 실행 파일 17개를 새 Full 실행 폴더에 복원했다. 이전 로그와 일시적인 실행 상태는 백업에 보존하며, 개인 설정은 ZIP에 포함하지 않았다.
+
 ## 작업 선택 및 번역 UX 개편
 
 - 시작 화면에서 화면 번역·소리 번역·영상 자막 생성을 선택하며, 각 작업에 필요한 도구와 설정만 표시한다. 작업 선택으로 돌아가면 실시간 OCR은 중지되고 화면 번역 단축키는 해제된다.

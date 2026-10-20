@@ -1100,21 +1100,9 @@ class RealtimeTranslationConfigTests(unittest.TestCase):
     def test_config_endpoint_rejects_realtime_translation_setting(self) -> None:
         controller = CaptureControllerTests._controller()
         before = controller.health()
-        class TestCaptureHandler(meki_audio_capture.make_handler(controller)):
-            # Preserve the production routes while avoiding a Windows socket
-            # reset race when a HTTP/1.0 response closes its connection.
-            protocol_version = "HTTP/1.1"
-
-            def handle(self):
-                try:
-                    super().handle()
-                except ConnectionResetError:
-                    # Ignore peer teardown after the response was consumed.
-                    pass
-
         server = meki_audio_capture.ThreadingHTTPServer(
             ("127.0.0.1", 0),
-            TestCaptureHandler,
+            meki_audio_capture.make_handler(controller),
         )
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
@@ -1128,6 +1116,13 @@ class RealtimeTranslationConfigTests(unittest.TestCase):
             )
             response = connection.getresponse()
             payload = json.loads(response.read().decode("utf-8"))
+            original_socket = connection.sock
+            connection.request("GET", "/health")
+            health_response = connection.getresponse()
+            health_response.read()
+            self.assertEqual(response.version, 11)
+            self.assertIs(connection.sock, original_socket)
+            self.assertEqual(health_response.status, 200)
             connection.close()
         finally:
             server.shutdown()
@@ -1138,6 +1133,37 @@ class RealtimeTranslationConfigTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("MekiAudioCapture 창의 체크박스", payload["error"])
         self.assertEqual(controller.health(), before)
+
+    def test_start_stop_request_bodies_do_not_corrupt_a_persistent_connection(self) -> None:
+        controller = types.SimpleNamespace(
+            start=mock.Mock(), stop=mock.Mock(), health=lambda: {"ok": True}
+        )
+        server = meki_audio_capture.ThreadingHTTPServer(
+            ("127.0.0.1", 0), meki_audio_capture.make_handler(controller)
+        )
+        server.daemon_threads = True
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        try:
+            original_socket = None
+            for path in ("/start", "/stop"):
+                connection.request("POST", path, body=b"{}")
+                response = connection.getresponse()
+                self.assertEqual(json.loads(response.read()), {"ok": True})
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.version, 11)
+                if original_socket is None:
+                    original_socket = connection.sock
+                self.assertIs(connection.sock, original_socket)
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+        controller.start.assert_called_once_with()
+        controller.stop.assert_called_once_with()
 
 
 if __name__ == "__main__":

@@ -1573,10 +1573,21 @@ class CaptureController:
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
-    length = int(handler.headers.get("Content-Length", "0") or 0)
+    try:
+        if handler.headers.get("Transfer-Encoding"):
+            raise ValueError("청크 인코딩 요청은 지원하지 않습니다.")
+        length = int(handler.headers.get("Content-Length", "0") or 0)
+    except ValueError:
+        handler.close_connection = True
+        raise
     if length < 0 or length > MAX_REQUEST_BYTES:
+        handler.close_connection = True
         raise ValueError("요청 본문이 너무 큽니다.")
-    return json.loads(handler.rfile.read(length).decode("utf-8")) if length else {}
+    raw = handler.rfile.read(length) if length else b"{}"
+    if length and len(raw) != length:
+        handler.close_connection = True
+        raise ValueError("요청 본문이 완전하지 않습니다.")
+    return json.loads(raw.decode("utf-8"))
 
 
 def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -1599,6 +1610,17 @@ def make_handler(
         return payload
 
     class Handler(BaseHTTPRequestHandler):
+        # Persistent responses avoid a Windows teardown race with local clients;
+        # an idle socket still releases its handler thread after 30 seconds.
+        protocol_version = "HTTP/1.1"
+        timeout = 30.0
+
+        def handle(self) -> None:
+            try:
+                super().handle()
+            except (ConnectionError, TimeoutError):
+                self.close_connection = True
+
         def do_GET(self) -> None:
             if self.path.split("?", 1)[0] == "/health":
                 _write_json(self, 200, health_payload())
@@ -1607,8 +1629,11 @@ def make_handler(
 
         def do_POST(self) -> None:
             try:
+                # Even start/stop bodies must be consumed before the next
+                # request is read from a persistent connection.
+                payload = _read_json(self)
                 if self.path == "/config":
-                    controller.configure(_read_json(self))
+                    controller.configure(payload)
                 elif self.path == "/start":
                     controller.start()
                 elif self.path == "/stop":
@@ -1617,6 +1642,8 @@ def make_handler(
                     _write_json(self, 404, {"ok": False, "error": "not found"})
                     return
                 _write_json(self, 200, health_payload())
+            except (ConnectionError, TimeoutError):
+                self.close_connection = True
             except Exception as exc:
                 log_error("http_request", exc)
                 _write_json(self, 409, {"ok": False, "error": str(exc)})

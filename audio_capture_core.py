@@ -8,6 +8,7 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+from companion_http import urlopen
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -223,7 +224,7 @@ def _post_json(url: str, payload: dict, timeout: float = 10.0) -> dict:
         headers={"Content-Type": "application/json; charset=utf-8"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urlopen(request, timeout=timeout) as response:
         raw = response.read().decode("utf-8")
     return json.loads(raw) if raw else {}
 

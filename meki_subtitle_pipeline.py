@@ -18,6 +18,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from companion_http import urlopen
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -380,7 +381,7 @@ def translate_via_hytrans(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace").strip()

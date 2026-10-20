@@ -10,6 +10,7 @@ import secrets
 import time
 import urllib.error
 import urllib.request
+from companion_http import urlopen
 from urllib.parse import urlparse
 from typing import Callable
 
@@ -239,7 +240,7 @@ def _post_overlay_text(url: str, text: str) -> None:
         headers={"Content-Type": "application/json; charset=utf-8"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=5) as response:
+    with urlopen(request, timeout=5) as response:
         if response.status >= 400:
             raise RuntimeError(f"overlay returned HTTP {response.status}")
 

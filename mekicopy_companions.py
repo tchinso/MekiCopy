@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Callable
 import uuid
 
 from mekicopy_runtime import _get_app_dir
+from companion_http import urlopen
 from runtime_paths import writable_app_subdir
 
 if TYPE_CHECKING:
@@ -69,7 +70,7 @@ def _json_request(
         headers=request_headers,
         method=method,
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urlopen(request, timeout=timeout) as response:
         raw = response.read().decode("utf-8")
     if not raw:
         return {}

@@ -1,8 +1,7 @@
 """Opt-in native payload test; no download, user files or cloud credentials.
 
-OCR strings and HYTrans's socket transport are mocked. The overlay uses an
-HTTP/1.1 test client to avoid Windows HTTP/1.0 connection teardown races.
-The Windows DLL,
+OCR strings and HYTrans's socket transport are mocked. The overlay uses the
+production HTTP handler and client. The Windows DLL,
 FastAPI routes, native queue, TkTaskRunner, realtime scheduler, overlay HTTP
 server, Tk label redraw and display acknowledgement all execute for real.
 """
@@ -10,9 +9,6 @@ server, Tk label redraw and display acknowledgement all execute for real.
 from __future__ import annotations
 
 import asyncio
-from contextlib import closing
-import http.client
-import json
 import os
 from pathlib import Path
 import shutil
@@ -79,44 +75,13 @@ class NativeRealtimeIntegrationTests(unittest.TestCase):
                 self.assertTrue(backend.status()["ready"])
                 root = tk.Tk()
                 overlay = OverlayerApp(root, OverlayConfig(topmost=False))
-                class TestOverlayHandler(make_handler(overlay)):
-                    protocol_version = "HTTP/1.1"
-
-                    def handle(self):
-                        try:
-                            super().handle()
-                        except ConnectionResetError:
-                            # The client has already consumed its length-delimited
-                            # response and is closing the persistent connection.
-                            pass
-
-                server = ThreadingHTTPServer(("127.0.0.1", 0), TestOverlayHandler)
+                server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(overlay))
                 server.daemon_threads = True
                 server_thread = threading.Thread(target=server.serve_forever, daemon=True)
                 server_thread.start()
                 runner = TkTaskRunner(root)
                 overlay_url = f"http://127.0.0.1:{server.server_port}"
-                def overlay_request(url, payload=None, *, timeout=3, method=None):
-                    parsed = urlsplit(url)
-                    verb = method or ("POST" if payload is not None else "GET")
-                    body = None if payload is None else json.dumps(payload).encode("utf-8")
-                    path = parsed.path + ("?" + parsed.query if parsed.query else "")
-                    # Health is read-only. A POST must execute exactly once,
-                    # including when its response cannot be read completely.
-                    for attempt in range(3):
-                        try:
-                            with closing(http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=timeout)) as connection:
-                                connection.request(verb, path, body=body,
-                                                   headers={"Content-Type": "application/json; charset=utf-8"})
-                                response = connection.getresponse()
-                                received = response.read()
-                                if response.status >= 400:
-                                    raise RuntimeError(f"Overlay HTTP {response.status}: {received!r}")
-                                return json.loads(received.decode("utf-8"))
-                        except ConnectionResetError:
-                            if verb != "GET" or attempt == 2:
-                                raise
-                            time.sleep(0.05)
+                overlay_request = companions._json_request
 
                 source = iter((first, first, second))
                 client = TestClient(hytrans_server.app, client=("127.0.0.1", 12345))

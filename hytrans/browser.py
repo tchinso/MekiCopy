@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import threading
 import time
-import urllib.request
+from companion_http import urlopen
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -200,7 +200,7 @@ class BrowserManager:
         websocket_url: str | None = None
         while time.monotonic() < deadline:
             try:
-                with urllib.request.urlopen(target_url, timeout=2) as response:
+                with urlopen(target_url, timeout=2) as response:
                     targets = json.load(response)
                 websocket_url = next(
                     (item["webSocketDebuggerUrl"] for item in targets

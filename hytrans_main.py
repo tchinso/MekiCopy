@@ -7,7 +7,7 @@ import socket
 import sys
 import threading
 import time
-import urllib.request
+from companion_http import urlopen
 
 import uvicorn
 
@@ -73,7 +73,7 @@ def wait_server_ready(host: str, port: int, timeout: float = 15.0) -> bool:
     start = time.time()
     while time.time() - start < timeout:
         try:
-            with urllib.request.urlopen(url, timeout=1) as response:
+            with urlopen(url, timeout=1) as response:
                 if response.status == 200:
                     return True
         except Exception:
@@ -148,6 +148,10 @@ def main() -> int:
             log_level="warning",
             access_log=False,
             timeout_graceful_shutdown=5,
+            # Windows Proactor socket teardown can report WinError 10022 after
+            # a complete loopback response. HYTrans uses Popen for its browser,
+            # so it does not need Proactor's async subprocess support.
+            loop="asyncio:SelectorEventLoop" if sys.platform == "win32" else "auto",
         )
         server = uvicorn.Server(config)
         configure_shutdown_handler(

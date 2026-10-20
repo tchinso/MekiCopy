@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from companion_http import urlopen
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
 
@@ -156,7 +157,7 @@ def probe_health(
     url = f"{base_url.rstrip('/')}/health"
     try:
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=max(0.05, float(timeout_seconds))) as response:
+        with urlopen(request, timeout=max(0.05, float(timeout_seconds))) as response:
             raw = response.read().decode("utf-8")
     except (OSError, urllib.error.URLError, urllib.error.HTTPError, ValueError) as exc:
         return HealthProbeResult(False, f"health request failed: {exc}")

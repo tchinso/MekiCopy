@@ -19,6 +19,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 from typing import Any, Callable
+from companion_http import urlopen
 
 from hytrans.model_files import get_model_profile
 from hytrans.api_settings import BACKEND_LABELS, load_api_settings, normalize_backend
@@ -571,7 +572,7 @@ class MekiSubtitleWindow(tk.Toplevel):
                 raise SubtitleCancelledError("사용자가 자막 생성을 취소했습니다.")
             try:
                 request = urllib.request.Request(f"{base_url}/ready")
-                with urllib.request.urlopen(request, timeout=2) as response:
+                with urlopen(request, timeout=2) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 backend = str(payload.get("backend") or "local")
                 if payload.get("ready") and (backend not in {"local", "translator_api"} or payload.get("workerConnected")):
@@ -592,7 +593,7 @@ class MekiSubtitleWindow(tk.Toplevel):
                         headers={"Content-Type": "application/json"},
                         method="POST",
                     )
-                    with urllib.request.urlopen(reopen, timeout=5):
+                    with urlopen(reopen, timeout=5):
                         pass
                     requested_reopen = True
             except (OSError, urllib.error.URLError, urllib.error.HTTPError, ValueError) as exc:

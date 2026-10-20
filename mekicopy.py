@@ -2075,31 +2075,46 @@ class MainWindow(tk.Tk):
             self._send_hytrans_logging_config(log_errors=False)
             try:
                 ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=1)
-                if backend == "hdtrans" and not ready.get("ready"):
-                    self._on_hdtrans_settings()
-                    return True
-                if backend in PROVIDERS and not ready.get("ready"):
-                    messagebox.showerror(
-                        "MekiCopy",
-                        f"HYTrans API 설정을 확인해 주세요:\n{ready.get('error') or ready.get('state') or '준비되지 않음'}",
-                        parent=self,
-                    )
-                    return False
-                if backend in {"local", "translator_api"} and not (ready.get("workerConnected") or ready.get("ready")):
+            except Exception as exc:
+                _log_runtime_error("check_hytrans_ready", exc)
+                messagebox.showerror(
+                    "MekiCopy",
+                    f"HYTrans 준비 상태를 확인하지 못했습니다:\n{exc}",
+                    parent=self,
+                )
+                return False
+            if backend == "hdtrans" and not ready.get("ready"):
+                self._on_hdtrans_settings()
+                return True
+            if backend in PROVIDERS and not ready.get("ready"):
+                messagebox.showerror(
+                    "MekiCopy",
+                    f"HYTrans API 설정을 확인해 주세요:\n{ready.get('error') or ready.get('state') or '준비되지 않음'}",
+                    parent=self,
+                )
+                return False
+            if backend in {"local", "translator_api"} and not (ready.get("workerConnected") or ready.get("ready")):
+                try:
                     _json_request(
                         f"{self._hytrans_base_url()}/worker/reopen",
                         {},
                         timeout=3,
                         method="POST",
                     )
-                    messagebox.showinfo(
+                except Exception as exc:
+                    _log_runtime_error("restart_hytrans_worker", exc)
+                    messagebox.showerror(
                         "MekiCopy",
-                        "HYTrans 비공개 번역 worker를 다시 시작했습니다.",
+                        f"HYTrans 번역 worker를 다시 시작하지 못했습니다:\n{exc}",
                         parent=self,
                     )
-                    return True
-            except Exception as exc:
-                _log_runtime_error("restart_hytrans_worker", exc)
+                    return False
+                messagebox.showinfo(
+                    "MekiCopy",
+                    "HYTrans 비공개 번역 worker를 다시 시작했습니다.",
+                    parent=self,
+                )
+                return True
             messagebox.showinfo("MekiCopy", "HYTrans 서버가 이미 실행 중입니다.", parent=self)
             return True
         except Exception:
@@ -2303,7 +2318,13 @@ class MainWindow(tk.Tk):
     def _on_start_overlayer(self) -> None:
         try:
             _probe_service("MekiOverlayer", self._overlayer_base_url(), timeout=1)
-            self._send_overlayer_config()
+            if not self._send_overlayer_config():
+                messagebox.showerror(
+                    "MekiCopy",
+                    "MekiOverlayer에 현재 설정을 적용하지 못했습니다. 연결 상태를 확인해 주세요.",
+                    parent=self,
+                )
+                return
             messagebox.showinfo(
                 "MekiCopy",
                 "MekiOverlayer가 이미 실행 중입니다. 현재 설정을 적용했습니다.",
@@ -2404,7 +2425,13 @@ class MainWindow(tk.Tk):
             messagebox.showerror("MekiCopy", "\n".join(failures), parent=owner)
             return
 
-        self._send_overlayer_config()
+        if not self._send_overlayer_config():
+            messagebox.showerror(
+                "MekiCopy",
+                "MekiOverlayer 설정을 적용하지 못해 연결 테스트를 중단했습니다.",
+                parent=owner,
+            )
+            return
         try:
             _json_request(
                 f"{self._hytrans_base_url()}/overlay-test",
