@@ -98,21 +98,103 @@ class MeikiOcrGpuSelectionTests(unittest.TestCase):
             ],
         )
 
-    def test_ort_gpu_preloader_runs_without_path_based_dll_gate(self) -> None:
-        fake_ort = SimpleNamespace(preload_dlls=mock.Mock())
-        original_preload_ready = mekicopy_ocr._ORT_PRELOAD_READY
-        try:
-            mekicopy_ocr._ORT_PRELOAD_READY = False
-            with mock.patch.dict(sys.modules, {"onnxruntime": fake_ort}):
-                mekicopy_ocr._preload_onnxruntime_gpu_dlls()
-        finally:
-            mekicopy_ocr._ORT_PRELOAD_READY = original_preload_ready
 
-        fake_ort.preload_dlls.assert_called_once_with(
-            cuda=True,
-            cudnn=True,
-            msvc=True,
-        )
+
+class OcrGpuRuntimePreparationTests(unittest.TestCase):
+    def setUp(self):
+        self.ready = mock.patch.object(mekicopy_ocr, "_ORT_PRELOAD_READY", False)
+        self.available = mock.patch.object(mekicopy_ocr, "_ORT_GPU_RUNTIME_AVAILABLE", False)
+        self.ready.start()
+        self.available.start()
+        self.addCleanup(self.ready.stop)
+        self.addCleanup(self.available.stop)
+        self.addCleanup(mekicopy_ocr.take_ocr_progress)
+
+    def test_cpu_machine_never_downloads_or_preloads_gpu_runtime(self):
+        prepare = mock.Mock()
+        ort = SimpleNamespace(preload_dlls=mock.Mock())
+        with mock.patch.object(mekicopy_ocr, "_cuda_driver_is_usable", return_value=False), \
+             mock.patch.dict(sys.modules, {"gpu_runtime": SimpleNamespace(prepare_gpu_runtime=prepare),
+                                          "onnxruntime": ort}):
+            self.assertFalse(mekicopy_ocr._preload_onnxruntime_gpu_dlls())
+        prepare.assert_not_called()
+        ort.preload_dlls.assert_not_called()
+
+    def test_cached_or_bundled_directories_are_registered_and_preloaded_once(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as temporary:
+            cuda = Path(temporary) / "cuda"
+            cudnn = Path(temporary) / "cudnn"
+            cuda.mkdir()
+            cudnn.mkdir()
+            (cuda / "cudart64_13.dll").touch()
+            (cudnn / "cudnn64_9.dll").touch()
+            prepare = mock.Mock(return_value=[cuda, cudnn])
+            ort = SimpleNamespace(preload_dlls=mock.Mock(),
+                                  get_available_providers=lambda: ["CUDAExecutionProvider"])
+            with mock.patch.object(mekicopy_ocr, "_cuda_driver_is_usable", return_value=True), \
+                 mock.patch.object(mekicopy_ocr, "_register_native_dll_directories") as register, \
+                 mock.patch.dict(sys.modules, {"gpu_runtime": SimpleNamespace(prepare_gpu_runtime=prepare),
+                                              "onnxruntime": ort}):
+                self.assertTrue(mekicopy_ocr._preload_onnxruntime_gpu_dlls())
+                self.assertTrue(mekicopy_ocr._preload_onnxruntime_gpu_dlls())
+            prepare.assert_called_once()
+            register.assert_called_once_with([cuda, cudnn])
+            self.assertEqual(ort.preload_dlls.call_args_list, [
+                mock.call(cuda=True, cudnn=False, msvc=True, directory=str(cuda)),
+                mock.call(cuda=False, cudnn=True, msvc=True, directory=str(cudnn)),
+            ])
+
+    def test_network_failure_preserves_cpu_ocr(self):
+        prepare = mock.Mock(side_effect=OSError("offline"))
+        factory = mock.Mock(return_value=_engine("CPUExecutionProvider", "CPUExecutionProvider"))
+        ort = SimpleNamespace(preload_dlls=mock.Mock(),
+                              get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"])
+        with mock.patch.object(mekicopy_ocr, "_cuda_driver_is_usable", return_value=True), \
+             mock.patch.object(mekicopy_ocr, "_log_runtime_error"), \
+             mock.patch.dict(sys.modules, {"gpu_runtime": SimpleNamespace(prepare_gpu_runtime=prepare),
+                                          "onnxruntime": ort}):
+            allow_cuda = mekicopy_ocr._preload_onnxruntime_gpu_dlls()
+            engine = mekicopy_ocr._create_best_meikiocr_engine(SimpleNamespace(MeikiOCR=factory),
+                                                              allow_cuda=allow_cuda)
+        self.assertFalse(allow_cuda)
+        self.assertEqual(engine.active_provider, "CPUExecutionProvider")
+        factory.assert_called_once_with(provider="CPUExecutionProvider")
+        ort.preload_dlls.assert_not_called()
+
+    def test_progress_keeps_only_latest_status(self):
+        mekicopy_ocr._publish_ocr_progress("first")
+        mekicopy_ocr._publish_ocr_progress("second")
+        self.assertEqual(mekicopy_ocr.take_ocr_progress(), "second")
+        self.assertIsNone(mekicopy_ocr.take_ocr_progress())
+
+
+class CudaDriverProbeTests(unittest.TestCase):
+    def test_download_requires_initialized_driver_cuda13_and_a_device(self):
+        import mekicopy_runtime as runtime
+        for init, version, devices, expected in ((0, 13000, 1, True), (100, 13000, 1, False),
+                                                 (0, 12000, 1, False), (0, 13000, 0, False)):
+            with self.subTest(init=init, version=version, devices=devices):
+                driver = mock.Mock()
+                driver.cuInit.return_value = init
+                def write_version(pointer):
+                    pointer._obj.value = version
+                    return 0
+                def write_count(pointer):
+                    pointer._obj.value = devices
+                    return 0
+                driver.cuDriverGetVersion.side_effect = write_version
+                driver.cuDeviceGetCount.side_effect = write_count
+                with mock.patch.object(runtime.ctypes, "WinDLL", return_value=driver), \
+                     mock.patch.object(runtime.os, "name", "nt"):
+                    self.assertEqual(runtime._cuda_driver_is_usable(), expected)
+
+    def test_missing_driver_is_cpu_only(self):
+        import mekicopy_runtime as runtime
+        with mock.patch.object(runtime.ctypes, "WinDLL", side_effect=OSError("missing")), \
+             mock.patch.object(runtime.os, "name", "nt"):
+            self.assertFalse(runtime._cuda_driver_is_usable())
 
 
 class OcrTranslationTests(unittest.TestCase):
@@ -177,3 +259,100 @@ class OcrTranslationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OcrCancellationTests(unittest.TestCase):
+    def tearDown(self):
+        mekicopy_ocr.take_ocr_progress()
+
+    def test_cancelled_progress_is_not_delivered_to_ui(self):
+        import threading
+        cancelled = threading.Event()
+        mekicopy_ocr._publish_ocr_progress("downloading", cancelled.is_set)
+        cancelled.set()
+        self.assertIsNone(mekicopy_ocr.take_ocr_progress())
+
+    def test_runtime_download_cancellation_does_not_stick_cpu_fallback(self):
+        import threading
+        cancelled = threading.Event()
+        def prepare(_root, progress):
+            cancelled.set()
+            progress("downloading")
+        ort = SimpleNamespace(preload_dlls=mock.Mock(),
+                              get_available_providers=lambda: ["CUDAExecutionProvider"])
+        with mock.patch.object(mekicopy_ocr, "_ORT_PRELOAD_READY", False), \
+             mock.patch.object(mekicopy_ocr, "_ORT_GPU_RUNTIME_AVAILABLE", False), \
+             mock.patch.object(mekicopy_ocr, "_cuda_driver_is_usable", return_value=True), \
+             mock.patch.dict(sys.modules, {"gpu_runtime": SimpleNamespace(prepare_gpu_runtime=prepare),
+                                          "onnxruntime": ort}):
+            with self.assertRaises(mekicopy_ocr.OcrCancelledError):
+                mekicopy_ocr._preload_onnxruntime_gpu_dlls(cancelled.is_set)
+            self.assertFalse(mekicopy_ocr._ORT_PRELOAD_READY)
+            self.assertFalse(mekicopy_ocr._ORT_GPU_RUNTIME_AVAILABLE)
+        ort.preload_dlls.assert_not_called()
+
+    def test_waiting_for_engine_lock_can_be_cancelled_without_releasing_owner(self):
+        import threading
+        lock = threading.Lock()
+        lock.acquire()
+        cancelled = threading.Event()
+        finished = threading.Event()
+        errors = []
+        def wait():
+            try:
+                with mekicopy_ocr._ocr_lock(lock, cancelled.is_set):
+                    self.fail("cancelled waiter entered critical section")
+            except mekicopy_ocr.OcrCancelledError:
+                errors.append("cancelled")
+            finally:
+                finished.set()
+        thread = threading.Thread(target=wait)
+        thread.start()
+        cancelled.set()
+        try:
+            self.assertTrue(finished.wait(1))
+            self.assertEqual(errors, ["cancelled"])
+            self.assertTrue(lock.locked())
+        finally:
+            lock.release()
+            thread.join(timeout=1)
+
+    def test_realtime_ocr_passes_cancellation_to_initialization(self):
+        from PIL import Image
+        cancelled = mock.Mock(return_value=False)
+        engine = mock.Mock()
+        engine.run_ocr.return_value = [{"text": "hello"}]
+        with mock.patch.object(mekicopy_ocr, "_get_ocr_engine", return_value=engine) as get_engine, \
+             mock.patch.object(mekicopy_ocr, "_prepare_native_runtime_paths"):
+            self.assertEqual(mekicopy_ocr.recognize_image(Image.new("RGB", (10, 10)),
+                                                       is_cancelled=cancelled), "hello")
+        get_engine.assert_called_once_with(cancelled)
+
+
+class DetachedOcrProgressTests(unittest.TestCase):
+    def test_settings_poll_consumes_download_status_on_ui_thread(self):
+        import mekicopy
+        window = SimpleNamespace(_closing=False, _settings_file_state=("file", 1, 1),
+                                 _current_settings_file_state=lambda: ("file", 1, 1),
+                                 _refresh_realtime_lock=mock.Mock(),
+                                 _schedule_settings_poll=mock.Mock())
+        with mock.patch.object(mekicopy, "take_ocr_progress", return_value="GPU runtime 45%"):
+            mekicopy.DetachedOcrButtonApp._poll_settings(window)
+        self.assertEqual(window._ocr_progress_text, "GPU runtime 45%")
+        window._refresh_realtime_lock.assert_called_once()
+        window._schedule_settings_poll.assert_called_once()
+
+    def test_busy_detached_button_displays_progress_and_restores_action_after_work(self):
+        import mekicopy
+        runner = mock.Mock()
+        button = mock.Mock()
+        window = SimpleNamespace(_task_runner=runner, button=button,
+                                 _ocr_progress_text="GPU runtime 45%", settings=AppSettings(realtime_ocr_enabled=False),
+                                 ocr_action_label=lambda: "translate")
+        with mock.patch.object(mekicopy, "detached_translation_locked", return_value=False):
+            runner.is_running.return_value = True
+            mekicopy.DetachedOcrButtonApp._refresh_realtime_lock(window)
+            button.config.assert_called_with(text="GPU runtime 45%", state="disabled")
+            runner.is_running.return_value = False
+            mekicopy.DetachedOcrButtonApp._refresh_realtime_lock(window)
+            button.config.assert_called_with(text="translate", state="normal")

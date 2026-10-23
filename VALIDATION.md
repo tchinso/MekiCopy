@@ -1,111 +1,44 @@
-# MekiCopy 검증 기록
+# MekiCopy 검증
 
-검증일: 2026-10-20 (Windows x64, Python 3.12.14).
+검증일: 2026-10-23. Windows x64, Python 3.12.14.
 
-## 도구 간 HTTP 응답 유실 수정
+## 소스·구성요소
 
-- Full의 `MekiCopy/debug_log`·`error_log`와 HYTrans·표시기 로그를 대조했다. 표시기가 HTTP 200으로 처리한 요청도 클라이언트에서는 `WinError 10054`로 실패했다. 같은 Windows 환경의 실제 소켓 시험에서 HTTP/1.0 서버 또는 urllib의 `Connection: close` 요청으로 재현했으며, HTTP/1.1 서버와 응답을 모두 읽은 뒤 정리하는 클라이언트 조합에서는 재현되지 않았다.
-- `companion_http.py`로 본체·상태 감시·HYTrans 표시 전송·음성·자막·브라우저 준비 조회의 루프백 통신을 통합했다. HTTP 오류 본문을 보존하고 번역·표시 POST를 자동 재시도하거나 리디렉션으로 재전송하지 않는다. 외부 다운로드와 클라우드 API의 기존 전송 경로는 유지한다.
-- 표시기·대본·녹음 서버가 HTTP/1.1 응답을 제공하며, 녹음 시작·중지 요청도 본문을 소비한다. 유휴 연결에는 30초 제한을 둔다. HYTrans의 Windows 서버는 Selector 루프를 사용하여 응답 수신 후 Proactor 정리 콜백의 `WinError 10022`도 방지한다. 실제 요청 100회 비교에서 Selector 오류 0회, Proactor 정리 오류 17회를 확인했다.
-- HYTrans 준비 조회 실패는 `check_hytrans_ready`로 정확히 기록하고 실패로 안내한다. 표시기 설정 적용 실패 후에는 설정 적용·연결 시험 성공 안내를 표시하지 않는다.
-- 최종 전체 Python **311개 통과**. 실제 Windows DLL·실시간 통합 시험, 반복·동시 HTTP 요청, 타임아웃·응답 유실 시 POST 1회 실행, 오류 응답 본문, 연결 정리 대기 상한을 포함한다. 실시간 통합·음성 시험에서 HTTP/1.1 테스트 전용 우회를 제거하고 실제 제품 핸들러·클라이언트를 사용했다. 로그: `.cache/connection-fix/source-tests.log`. 변경되지 않은 브라우저 worker의 앞선 11개 통과 결과는 재사용했다.
-- Lite·Full 모두 빌드 종료 코드 **0**, frozen 실행 검사와 Full 네이티브 엔진·음성 모델 검사, 공통 파일 일치 검사를 통과했다. 로그: `.cache/connection-fix/lite-build.log`, `.cache/connection-fix/full-build.log`.
-- 새 실행 파일의 상태·준비 조회, 설정 적용, HYTrans → 표시기 전송·실제 화면 반영, 음성 대본 전송을 각 60회 반복했다. Lite **480회**, Full **490회** 요청에서 오류 0회이며 Full은 실제 네이티브 번역 10회를 포함한다. 두 배포본 모두 프로세스 생존과 `WinError 10054`·`WinError 10022`·Traceback 로그 부재를 확인했다. 결과: `.cache/connection-fix/frozen-connections.json`.
-- 최종 두 ZIP의 실제 SHA-256·체크섬 파일, 내부 manifest·파일 목록·크기와 공통 실행 파일 해시를 확인했다. 두 manifest는 소스 fingerprint `34c03b774fed9f195c2b965c737102ae50dad99616fa2efd97daa557f1a1cd62`와 일치하고 `smokeTested=true`다. Lite ZIP은 1,622,546,277 bytes, Full ZIP은 4,112,018,547 bytes다. 결과: `.cache/connection-fix/release-verification.json`.
-- 교체 전 Full의 실행 설정·로그·실행 중 생성 파일은 `.cache/connection-fix/previous-state/Full`에 보존했다. 깨끗한 배포 ZIP 검증 후 기존 설정·API 설정·영역·로컬 hdTrans 실행 파일 17개를 새 Full 실행 폴더에 복원했다. 이전 로그와 일시적인 실행 상태는 백업에 보존하며, 개인 설정은 ZIP에 포함하지 않았다.
+- Python 전체 테스트 **399개 통과**, JavaScript worker **13개 통과**. `pip check`에서 의존성 충돌 없음.
+- 실제 hdTrans 0.4.4 DLL: UTF-8 반복 번역, 문맥 초기화·작업 경계, 사용자 사전 오류·재로드, 동시 요청, 실제 Tk 오버레이 표시 완료·취소를 검증했다.
+- GPU: 공식 PyPI wheel 7개(1,166,225,776 bytes)의 실제 다운로드, 압축·DLL·라이선스 해시, 원자 설치를 검증했다. 네트워크 호출을 실패시키는 조건에서 설치 캐시 재사용을 확인했고, 다운로드한 DLL 20개를 실제 Windows 로더로 불러왔다.
+- FFmpeg/FFprobe 9.0.2: 공식 ZIP·개별 파일 해시, 버전, 합성 WAV의 스트림 검사·오디오 추출을 확인했다. 다운로드 취소·동시 설치·오프라인 재사용·손상 복구·게시 실패 회귀 테스트를 포함한다.
+- Lite는 NVIDIA CUDA/cuDNN 및 FFmpeg를 최초 사용 시 준비한다. 사용 가능한 NVIDIA 드라이버·장치가 없는 경우 GPU 파일을 다운로드하지 않으며 GPU 준비 실패 시 CPU OCR을 사용한다.
+- GPU 다운로드·압축 해제·잠금 대기의 실시간 OCR 취소, 분리 버튼의 진행 표시, 강제 종료 후 임시 다운로드 정리를 검증했다.
+- UI 작업·서버 입력·설정·경로·번역 큐·모델 저장·자막 취소·배포 재사용 조건의 회귀 검사를 포함한다.
+- 의존성 목록과 출처·해시는 [빌드 안내](BUILDING.md), `requirements-build.txt`, `assets/*manifest.json`에 있다.
 
-## 작업 선택 및 번역 UX 개편
+## 배포본
 
-- 시작 화면에서 화면 번역·소리 번역·영상 자막 생성을 선택하며, 각 작업에 필요한 도구와 설정만 표시한다. 작업 선택으로 돌아가면 실시간 OCR은 중지되고 화면 번역 단축키는 해제된다.
-- OCR 결과 복사와 오버레이 번역 모드 선택을 제거했다. GUI·분리 버튼·북마크 CLI는 모두 번역 후 표시하며, 기존 `overlay_translation_mode=false` 설정도 번역으로 전환한다.
-- 행동의 큰 버튼 하나가 수동 모드에서는 `번역 후 표시`, 실시간 모드에서는 `실시간 OCR 시작/중지`로 동작한다. 기존 버튼의 색과 232px 높이를 유지한다. 실시간 모드에서는 수동 번역·분리 버튼·전역 단축키를 차단한다.
-- 번역 서비스·API·hdTrans·포트 설정을 일반으로 옮겼다. `실시간/수동 번역` 탭에는 실시간 모드·간격과 요청한 수동 옵션 다섯 개를 배치했으며, 실시간 모드에서는 수동 옵션을 비활성화하고 기존 값은 보존한다.
-- 최종 전체 Python **298개 통과**. 실제 Windows hdTrans DLL 및 실시간 통합 검사를 포함한다. 로그: `.cache/ux-tests.log`. 변경되지 않은 브라우저 worker의 앞선 11개 통과 결과는 재사용했다.
-- 소스 `--self-test-ui`가 격리된 `.cache/ux-selftest` 설정으로 통과했다. 시작 선택 화면, 작업별 화면·탭, 작업 선택 복귀, 버튼 문구·높이, 분리 버튼 상태, 최소 창 크기, 트레이 복원과 설정 창을 검사한다.
-- Lite·Full 모두 빌드 종료 코드 **0**. Lite의 frozen UI·트레이·분리 버튼·OCR·각 서비스 검사와 Full의 실제 hdTrans·음성 모델 검사, 공통 파일 일치 및 manifest 검증을 통과했다. 로그: `.cache/ux-lite-build.log`, `.cache/ux-full-build.log`.
-- 최종 ZIP의 실제 SHA-256과 체크섬 파일, 내부 manifest·파일 목록·크기, 현재 소스 fingerprint `795ff723598dd9fbe86c5bf0bf2cdf2c39d88726da9b72fed8dedfa46ff05217`, 두 배포본의 `smokeTested=true`와 공통 실행 파일 해시 일치를 확인했다. Lite ZIP은 1,622,530,399 bytes, Full ZIP은 4,112,002,685 bytes다. 결과: `.cache/ux-release-verification.json`.
-- 교체 전 실행 중이던 Full 앱은 정상 종료했다. 종료 시 저장된 기존 설정은 `.cache/ux-previous-state/Full/MekiCopy/settings.cfg`에 보존했으며 배포 ZIP에는 포함하지 않았다.
+- Lite·Full 빌드와 EXE 자체 검사·서버 상태 검사가 통과했다. Full은 검증된 Lite 실행 파일을 재사용했고 공통 파일의 일치를 확인했다.
+- Lite ZIP: **382,911,374 bytes**. 기존 1,622,546,277 bytes에서 **76.40% 감소**.
+- Full ZIP: **4,113,484,506 bytes**. GPU·FFmpeg·모델·hdTrans·MagPie를 포함한다.
+- ZIP 자체 SHA-256 및 내부 전체 파일의 크기·SHA-256을 manifest와 대조했다. Lite 3,382개, Full 3,612개 파일 모두 일치했다. 중복·누락·예상하지 않은 파일이 없고 소스 fingerprint·설치 의존성이 빌드 환경과 일치한다.
+- 기존 개인 설정 4개는 배포 ZIP 검사 후 로컬 Full 실행 폴더에 복원하고 해시를 확인했다. 배포 ZIP에는 개인 설정을 넣지 않았다.
 
-## 기본 설정 및 실시간 OCR 간격 변경
-
-- 기본값을 전역 단축키 OFF, 번역 서비스 hdTrans, 실시간 처리 ON, 최소 인식 간격 1초로 변경했다. 기존에 명시 저장한 유효 설정은 유지하며 누락된 설정에는 새 기본값을 적용한다. 실시간 처리 허용과 시작 버튼으로 실행하는 기존 구분은 유지한다.
-- 최소 인식 간격은 0.5 / 1 / 1.5 / 2 / 2.5초다. 제거된 3초 저장값은 기본 1초로 정규화한다. 성공한 실제 오버레이 표시 후 대기는 0.5초로 줄였으며 OCR 시작부터의 최소 간격도 함께 지킨다.
-- 최종 전체 Python **283개**, 브라우저 worker **11개**가 통과했다. 실제 Windows hdTrans DLL·실시간 통합 검사와 표시 완료 후 0.5초 예약 검사를 포함한다. 로그: `.cache/hdtrans/defaults-tests.log`, `.cache/hdtrans/defaults-worker-tests.log`.
-- Lite 빌드와 실행 검사가 통과했다. Full은 새 Lite 실행 파일을 재사용하여 네이티브 엔진·음성 모델 실행 검사, 공통 파일 일치, manifest, ZIP·SHA-256 생성을 통과했다. Full 최종 파일 교체는 기존 실행본의 잠금으로 최초 실패했으나 정상 종료 후 검증된 임시 결과를 다시 배치했다. 이전 실행 데이터와 배포 파일은 `.cache/hdtrans/previous-full-before-defaults-20261020-193054`에 보존했다. 로그: `.cache/hdtrans/defaults-lite-build.log`, `.cache/hdtrans/defaults-full-build.log`.
-- 두 최종 실행 파일 내부의 기본 설정·지원 간격·0.5초 스케줄러 동작을 확인했다. 두 ZIP의 파일 목록·크기·manifest, 현재 소스 fingerprint `898e18152ff61edb87fcde9daf2bd507eb2f262eabe08d0548eef1cd38727f83`, `smokeTested=true`, 실제 ZIP SHA-256과 체크섬 파일의 일치를 확인했다. 결과: `.cache/hdtrans/defaults-release-verification.json`.
-
-## 설정 UI 및 코드 정리
-
-- `번역` 설정 탭 하단에 `실시간 처리 사용`과 `최소 인식 간격(초)`을 배치했다. 별도 실시간 OCR 하위 탭은 없으며 안내는 옆의 `?`에 마우스를 올릴 때만 표시한다. 마우스 이탈·탭 전환·창 숨김·위젯 파괴 시 도움말 창과 바인딩을 정리한다.
-- 설정 화면을 페이지별 빌더로 분리하고 `mekicopy_tooltip.py`에 도움말 수명을 모았다. 오버레이 설정 전달은 `mekicopy_companions.overlay_config_payload`, Tk 경로 준비는 `runtime_paths.prepare_tk_environment`로 통합했다. 메인 파일의 배포 실행 검사는 `mekicopy_selftest.py`로 분리하고 미사용 import·전역 변수·중복 초기화·변경 이력식 주석을 정리했다.
-- 기존 동작을 보존한다. 시작·중지 버튼은 본체 `영역` 탭에 있으며 필수 조건, 세션 취소, 서비스 감시, 네이티브 WinEvent 처리는 그대로 검증한다. 작업 제출 뒤 설정을 바꿔도 메인·분리 버튼·실시간 요청이 제출 시점의 포트와 스타일을 사용하는 계약 검사를 추가했다.
-- 최종 전체 Python **282개**, 브라우저 worker **11개** 통과. Python 검사에는 실제 Windows DLL·실시간 통합, 오버레이 네이티브 이벤트 회귀, UI 위치·툴팁 정리, source/frozen 및 한글 경로의 Tk 초기화가 포함된다. 로그: `.cache/hdtrans/maintenance-tests.log`, `.cache/hdtrans/maintenance-worker-tests.log`.
-- README를 70줄의 설치·빠른 시작 안내로 정리했다. 상세 사용법·번역·설정과 문제 해결·모듈 구조는 `docs/`로 분리했다. 로컬 문서 링크·앵커 33개를 확인했다.
-- Lite·Full 최종 빌드는 모두 종료 코드 **0**이다. 실행 파일 검사, Full의 네이티브 엔진·음성 모델 검사, 공통 파일 일치, manifest 검증을 통과하고 ZIP·SHA-256을 생성했다. 두 ZIP 내부 manifest가 배포 폴더와 같으며 현재 소스 fingerprint `3e6725d14cefc84d08904596b24ddc75e1451fa508fba71b71cf1b8ec57d177a` 및 `smokeTested=true`를 확인했다.
-- 빌드 로그: `.cache/hdtrans/maintenance-lite-build.log`, `.cache/hdtrans/maintenance-full-build.log`. 최종 아카이브 확인: `.cache/hdtrans/maintenance-release-verification.json`.
-
-## 오버레이 안정성 검증 (앞선 빌드)
-- 오버레이어 번역 모드·확정 영역·HYTrans와 MekiOverlayer 연결 및 번역 준비·실시간 처리 사용을 모두 확인해야 시작한다. 설정만 켜거나 서비스를 복구해도 자동 시작하지 않는다. 필수 조건이 해제되면 예약과 진행 중인 세션의 늦은 결과를 취소한다.
-- 서비스 확인은 작업 스레드에서 실행하며, 프로세스 종료·교체·포트·번역 모델 변경 전의 늦은 상태 결과를 거부한다. OCR 직전에도 서비스를 다시 확인한다. 수동으로 실행한 외부 서비스도 사용할 수 있다.
-- 첨부 로그의 오버레이 반복 종료 코드 `3221226505 (0xC0000409)`를 Windows에서 재현했다. WinEvent 콜백의 `root.after()`가 Tcl에 재진입하면서 `PyEval_RestoreThread`로 종료됐다. 콜백은 플래그만 기록하고 Tk 타이머가 처리하도록 변경했다. 매 번역마다 동일한 설정으로 창을 숨겼다가 다시 표시하는 동작도 제거했다.
-- 전체 Python **274개**, 브라우저 worker **11개** 통과. Python 실행에는 실제 Windows DLL 및 실시간 통합 시험, 32가지 시작 조건 조합, 서비스 종료·교체·외부 재실행, 오래된 상태 결과 거부를 포함한다. 별도 frozen UI 검사에서 최소 창 크기의 버튼 배치도 확인했다. 전체 결과: `.cache/hdtrans/ocr-overlay-tests.log`.
-- 새 Windows 네이티브 회귀 시험에서 번역/설정 갱신 120회와 외부 WinEvent 40회 후 프로세스 정상 종료 및 `730x200+400+300` 위치·크기 유지를 확인했다. 기존의 위험한 콜백 동작을 시험에 주입하면 같은 네이티브 종료가 재현된다.
-- 새 Lite의 실제 `MekiOverlayer.exe`에서도 외부 WinEvent 180회, 처리 로그 42묶음, 동일 PID·HWND 및 이동한 창 영역 `[420,260,1220,490]` 유지를 확인했다. 실행 파일 SHA-256은 `7b9373bb589ce048ae6f1832421aef2f555116e856e7fc0febcbee2c6df9a07d`다. 결과: `.cache/hdtrans/frozen-overlay-stress-lite.json`.
-- 추가 frozen HTTP 설정·텍스트 반복 시험은 Windows 연결 종료 오류 `10054`로 완료하지 못했다. urllib, 직접 소켓 및 .NET 시험에서 오버레이 프로세스는 살아 있었고 네이티브 오류 로그는 비어 있었다. 이 추가 시험의 미완료를 소스의 설정/텍스트·네이티브 통합 시험 통과 및 frozen 네이티브 이벤트 시험 통과와 구분한다. 기록: `.cache/hdtrans/frozen-overlay-http-limitations.json`.
-- Lite·Full 재빌드 모두 종료 코드 **0**으로 완료했다. frozen 실행 검사, Full의 네이티브 엔진·음성 모델 검사, 공통 파일 일치 검사, manifest, ZIP 및 SHA-256 생성이 통과했다. 두 manifest는 현재 소스 fingerprint와 일치하고 `smokeTested=true`이며, 스트레스 시험한 오버레이 실행 파일의 해시도 두 배포본에 일치한다. 빌드 로그: `.cache/hdtrans/ocr-overlay-lite-build.log`, `.cache/hdtrans/ocr-overlay-full-build.log`.
-
-## 주요 변경 파일
-
-- `hytrans/hdtrans_backend.py`, `hdtrans_settings.py`, `app.py`, `config.py`, `api_settings.py`: 네이티브 엔진, 제한된 순차 큐, 준비 상태·설정·문맥·사전 API, 명시적 클라우드 공급자 분류.
-- `hytrans/hdtrans_download.py`, `HYTrans.spec`, `build_mekicopy.ps1`, `release_packaging.py`: 고정 버전·해시 검증 설치, 세대별 안전 교체, 공유 쓰기 경로, Lite/Full 패키징·검증.
-- `hdtrans_settings_window.py`, `mekicopy_settings_window.py`: 다중 공식 사용자 사전 편집·저장·재적용·오류 진단, 문맥 옵션·초기화, 설치·취소·업데이트 확인.
-- `mekicopy_realtime.py`, `mekicopy.py`, `mekicopy_settings.py`, `mekicopy_capture.py`: 단일 실시간 OCR 작업, 성공 기준 중복 제거, 단조 시계 일정, 늦은 결과 취소, 버튼·단축키·분리창 잠금, 작업 스레드별 MSS 캡처.
-- `overlay_receipts.py`, `meki_overlayer.py`, `mekicopy_companions.py`: 실제 Tk 그리기 완료 시각 확인, 요청 식별·취소, 기존 호출 형식 유지.
-- `audio_capture_core.py`, `meki_audio_capture.py`, `meki_subtitle_pipeline.py`, `meki_subtitle_window.py`: 음성 세션 및 새 자막 파일별 작업 경계. 실제 독립 다중 문맥을 제공한다고 가정하지 않음.
-- `companion_watchdog.py`: 지속되는 네이티브 호출 타임아웃을 기존 프로세스 복구 경로에 연결.
-- `mekicopy_tasks.py`: 종료된 창 참조를 백그라운드 작업에 남기지 않도록 정리. 네이티브 설정 창도 UI 스레드에서 Tcl 변수를 해제한다.
-- `README.md`, `BUILDING.md`, `tests/`: 사용·배포 설명과 집중·회귀·실제 DLL 검증.
-
-## 연결·버전 근거
-
-`ctypes.CDLL`로 공식 **v0.2.1**의 `hdTransEngine.dll` Cdecl C API를 직접 호출한다. `J2KEngine.dll`과 요청별 CLI 프로세스를 사용하지 않는다. 공식 태그의 `include/core/hdtrans.h`, `src/cshared/hdtrans_c.cpp`, `docs/api.md`에서 함수 시그니처, UTF-8 바이트 길이, `size_t`, 포인터·메모리 해제 규약을 확인했다. 이 태그의 API 문서는 C 예제를 제공하므로 해당 헤더·구현과 함께 대조했다.
-
-엔진 릴리스 **v0.2.1**, 사전 **0.2.1+c9ab89c732ad**, 소스 커밋 `afc752d4ccf2534b2fe206760435214902ce3c68`을 하나의 검증된 묶음으로 고정했다. 공식 Windows ZIP과 각 DLL·스냅샷·소스 ZIP의 SHA-256을 검증한다. 정확한 해시와 공식 문서 링크는 [BUILDING.md](BUILDING.md)에 기록했다.
-
-## 실행 검증
+## 재현
 
 ```powershell
-$env:HYTRANS_NATIVE_TEST_INSTALLATION = (Resolve-Path '.cache/hdtrans/full/installations/0.2.1-windows-x64').Path
+$env:HYTRANS_NATIVE_TEST_INSTALLATION = (Resolve-Path '.cache/hdtrans/full/installations/0.4.4-windows-x64').Path
 .\.build-python\Scripts\python.exe -m unittest discover -s tests -v
-node --test tests/test_translator_api_worker.mjs
+node --test tests/test_*.mjs
 ```
 
-- Python 전체 **258개 통과**, 브라우저 worker **11개 통과**.
-- 전체 Python 실행에 실제 Windows DLL 테스트 4개와 실시간 통합 테스트 1개를 포함했다. 문맥 학습·OFF·Reset·작업 전환, 다중 사용자 사전 우선순위·잘못된 파일/줄 진단·수정/재로드, 동시 번역, 반복 UTF-8 메모리 복사·해제를 실제 엔진으로 검증했다.
-- 실시간 통합은 실제 DLL·네이티브 큐·FastAPI 경로·TkTaskRunner·실시간 스케줄러·오버레이 HTTP 서버·Tk 그리기·표시 확인·취소를 실행했다. OCR 문자열과 HYTrans의 소켓 전송은 모의 처리했다. 중복 원문이 엔진에 한 번만 전달되고, 이미 시작된 번역의 늦은 결과가 중지 후 표시되지 않는 것을 확인했다.
-- 다운로드 오류·취소·경합·이전 정상 설치 보존·버전 불일치·오프라인 설치는 모의 릴리스 테스트와 실제 고정 릴리스 파일 검증을 구분했다. 실제 Windows 배포 파일과 대응 소스는 공식 URL에서 받아 해시를 확인했다.
-- `sampleimage.jpeg`를 실제 OCR 모델로 인식하여 비어 있지 않은 일본어 199자를 얻었다. 이 환경에서는 CUDA 오류 801 이후 CPU로 정상 전환했다.
-- 로컬 TCP 연결 종료 시 간헐적인 Windows `ConnectionResetError`가 최소 표준 라이브러리 서버에서도 재현되었다. 두 소켓 기반 테스트는 같은 제품 경로를 HTTP/1.1 테스트 핸들러로 실행하고, 상태 조회만 재시도한다. 번역·표시 POST는 재시도하지 않는다. 제품 통신을 테스트 성공 목적으로 변경하지 않았다.
+## 증거 파일
 
-## 빌드 검증
+- `.cache/refactor/source-tests.log`
+- `.cache/refactor/worker-tests.log`
+- `.cache/refactor/gpu-first-use.log`
+- `.cache/refactor/gpu-native-load.log`
+- `.cache/refactor/lite-build.log`
+- `.cache/refactor/full-build.log`
+- `.cache/refactor/release-verification.json`
 
-Lite/Full 최종 결과와 실행 파일 검사 로그는 `.cache/hdtrans/lite-build.log`, `.cache/hdtrans/full-build.log`에 남긴다. 빌드 스크립트는 전체 소스 검증 결과를 재사용하고 실행 파일·Tk·OCR·음성·서버 검사, Full 네이티브 오프라인 준비·번역·종료, 릴리스 manifest·공통 파일 일치를 별도로 검사한다.
+## 검증 범위
 
-**Lite·Full 모두 빌드 종료 코드 0으로 완료했다.** 실행 파일 검사와 manifest 검증을 통과했고, Full의 공통 파일 일치 검사도 통과했다. 두 manifest의 소스 fingerprint가 현재 소스와 일치하며 모두 `smokeTested=true`다. Lite에 엔진 DLL이 없고 Full에 고정 엔진·사전이 포함되는 것을 최종 확인했다. 두 ZIP과 `.sha256` 파일을 저장소 루트에 생성했다.
-
-```powershell
-.\build_mekicopy.ps1 -PythonExe .\.build-python\Scripts\python.exe -PackageFlavor Lite -SkipDependencyInstall -SkipSourceTests
-.\build_mekicopy.ps1 -PythonExe .\.build-python\Scripts\python.exe -PackageFlavor Full -SkipDependencyInstall -SkipSourceTests -ReuseLiteBuild -FullHdTransRoot .cache\hdtrans\full -FullMagpieRoot MekiCopy-Full\MagPie
-```
-
-실제 frozen Lite의 새 쓰기 경로에서 `HYTrans.exe --self-test-hdtrans`를 실행했다. 공식 파일의 최초 네트워크 다운로드·해시 검증·초기화·번역·종료가 코드 0으로 완료됐다(10.39초). 두 번째 실행도 코드 0으로 완료됐고(2.18초), `오늘은 좋은 날씨입니다.`를 반환했다. 설치 경로·세대 개수·active 포인터 해시/시간·DLL/스냅샷 시간이 그대로여서 정상 설치를 교체하거나 다시 내려받지 않은 것을 확인했다. Lite 릴리스 manifest 해시도 변경되지 않았다. 기록은 `.cache/hdtrans/lite-frozen-first-use`에 보존했다.
-
-자식 프로세스에 실패하는 프록시를 지정하여 네트워크를 차단하는 추가 검사는 자동 승인 검토에서 `blocked by policy`로 거부됐다. 구체적인 이유는 제공되지 않았고 해당 방식의 검사는 실행하지 않았다. 따라서 실제 Lite의 일반 설치 재사용, 모의 네트워크 실패하의 오프라인 재사용, Full의 사전 포함 파일 경로 실행을 네트워크가 물리적으로 차단된 실행과 구분한다.
-
-## 범위와 제한
-
-- 실제 클라우드 API 및 브라우저 모델의 전체 번역 실행은 API 키·사용자 활성화 없이 검증하지 않았다. 해당 엔진은 기존 회귀·프로토콜·worker 테스트와 frozen 서버 검사로 확인한다.
-- 실제 게임 화면·마이크/루프백 발화·영상 전체 파일을 연속 재생하는 수동 사용 시험은 수행하지 않았다. 해당 작업의 기존 처리 경로와 새 경계·취소 처리는 자동 테스트로 확인한다.
-- GPU OCR은 이 환경에서 사용하지 못했으며 CPU OCR을 실제 검증했다. 빌드 대상은 Windows x64이다.
-- hdTrans C API에는 프로세스당 문맥 하나만 있다. 작업 소유자 전환 시 초기화하며 이전 작품의 문맥을 복원하지 않는다. 시작한 DLL 호출은 HTTP 요청 취소와 함께 강제 취소하지 않는다.
-- hdTrans의 AGPL-3.0-or-later 원문 고지·제3자 고지·정확한 대응 소스를 배포 묶음에 보존했다. 기존 MekiCopy `LICENSE`는 GPL v2 문서이며 임의로 변경하지 않았다. 공개 재배포 전 결합 배포의 라이선스 조건과 대응 소스 제공 범위를 권리자와 확인해야 한다.
+실제 NVIDIA GPU 추론, 사용자 API 키를 사용하는 클라우드 번역, 브라우저 모델의 전체 번역, 장시간 게임 화면·실제 루프백 발화 시험은 별도 사용 환경 검증이 필요하다. GPU DLL 로드는 실제 GPU 추론 성공과 구분한다. 이미 진행 중인 네이티브 번역·HTTP 요청은 완료 또는 요청 제한 시간까지 정리한 뒤 취소 결과를 반영한다.

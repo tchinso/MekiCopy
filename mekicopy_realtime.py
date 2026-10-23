@@ -239,6 +239,8 @@ def detached_translation_locked(path: Path, *, now=None) -> bool:
     """
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return False
         age = (time.time() if now is None else now) - float(payload["updatedAt"])
         return (payload.get("active") is True and payload.get("translation") is True
                 and 0 <= age <= 4.0)

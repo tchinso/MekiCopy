@@ -16,7 +16,7 @@ from companion_http import urlopen
 
 
 @contextmanager
-def local_server():
+def local_server(request_seen=None):
     requests = []
     requests_lock = threading.Lock()
 
@@ -38,6 +38,8 @@ def local_server():
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             with requests_lock:
                 requests.append((self.command, self.path, body, dict(self.headers)))
+            if request_seen is not None:
+                request_seen.set()
             if self.path == "/disconnect":
                 self.connection.shutdown(socket.SHUT_RDWR)
                 self.close_connection = True
@@ -133,9 +135,11 @@ class CompanionHttpTests(unittest.TestCase):
             self.assertEqual(len(requests), 1)
 
     def test_response_timeout_does_not_retry_a_post(self):
-        with local_server() as (base_url, requests):
+        request_seen = threading.Event()
+        with local_server(request_seen) as (base_url, requests):
             with self.assertRaises(TimeoutError):
                 urlopen(base_url + "/timeout", data=b"execute-once", timeout=0.03)
+            self.assertTrue(request_seen.wait(2), "server never received the request")
             self.assertEqual(len(requests), 1)
 
     def test_cleanup_wait_is_bounded_separately_from_a_long_request_deadline(self):

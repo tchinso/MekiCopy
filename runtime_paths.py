@@ -11,7 +11,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 DATA_DIR_ENV = "MEKICOPY_DATA_DIR"
 FORCE_DATA_DIR_ENV = "MEKICOPY_FORCE_DATA_DIR"
@@ -183,7 +183,7 @@ def writable_app_subdir(app_name: str, *relative_parts: str) -> Path:
     child at each candidate and fall back only after that concrete write fails.
     """
     relative = Path(*relative_parts)
-    if relative.is_absolute() or ".." in relative.parts:
+    if relative.anchor or relative.drive or ".." in relative.parts:
         raise ValueError(f"relative application path required: {relative}")
 
     override = os.environ.get(DATA_DIR_ENV, "")
@@ -219,7 +219,10 @@ def log_dir(app_name: str, kind: str) -> Path:
 
 
 @contextmanager
-def exclusive_file_lock(path: str | Path, timeout: float = 30.0) -> Iterator[None]:
+def exclusive_file_lock(
+    path: str | Path, timeout: float = 30.0, *,
+    check_cancel: Callable[[], None] | None = None,
+) -> Iterator[None]:
     """Acquire a small cross-process lock file.
 
     Tcl/Tk's script folders are copied lazily when the executable lives below a
@@ -243,6 +246,8 @@ def exclusive_file_lock(path: str | Path, timeout: float = 30.0) -> Iterator[Non
 
         locked = False
         while not locked:
+            if check_cancel is not None:
+                check_cancel()
             try:
                 if os.name == "nt":
                     import msvcrt

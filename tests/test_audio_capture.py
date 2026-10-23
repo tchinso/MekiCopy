@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import tempfile
 import sys
@@ -32,6 +33,32 @@ from audio_capture_core import (
 
 
 class TokenTableTests(unittest.TestCase):
+    def test_download_without_content_length_reports_progress_and_cancellation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "model.onnx"
+            response = io.BytesIO(b"model data")
+            response.headers = {}
+            with mock.patch.object(audio_capture_core.urllib.request, "urlopen", return_value=response):
+                with self.assertRaises(InterruptedError):
+                    audio_capture_core._download_file(
+                        "https://example.invalid/model", target,
+                        mock.Mock(side_effect=InterruptedError("cancelled")),
+                    )
+            self.assertFalse(target.exists())
+            self.assertEqual(list(target.parent.iterdir()), [])
+
+    def test_empty_pcm_input_returns_empty_audio(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "empty.wav"
+            raw = Path(temporary) / "audio.f32"
+            with wave.open(str(source), "wb") as output:
+                output.setnchannels(1)
+                output.setsampwidth(2)
+                output.setframerate(48_000)
+            audio = audio_capture_core.wav_to_mono_16k(source, raw)
+            self.assertEqual(len(audio), 0)
+            self.assertEqual(raw.read_bytes(), b"")
+
     def test_accepts_contiguous_ids_in_unicode_path(self) -> None:
         with tempfile.TemporaryDirectory(prefix="메키토큰-") as temporary:
             tokens = Path(temporary) / "tokens.txt"
@@ -90,8 +117,7 @@ class VadPresetTests(unittest.TestCase):
 
     def test_fast_keeps_a_short_dialogue_boundary(self) -> None:
         audio = np.zeros(32_000, dtype=np.float32)
-        # A 0.16-second turn gap survives FAST's short padding but used to be
-        # rejoined by the former 0.50-second combined padding.
+        # FAST padding preserves this 0.16-second dialogue boundary.
         intervals = [(3_200, 6_400), (8_960, 12_160)]
         segments = build_segments(audio, intervals, "FAST")
         self.assertEqual(len(segments), 2)
@@ -930,7 +956,7 @@ class RealtimeTranslationSessionTests(unittest.TestCase):
 
         translate_text.assert_called_once()
 
-    def test_stopped_live_session_drains_after_the_legacy_deadline(self) -> None:
+    def test_stopped_live_session_drains_after_long_recording(self) -> None:
         session = self._session()
         session._started = True
         # A former live session set this value during Stop and skipped every
@@ -1097,6 +1123,43 @@ class RealtimeTranslationSessionTests(unittest.TestCase):
 
 
 class RealtimeTranslationConfigTests(unittest.TestCase):
+    def test_stop_thread_start_failure_restores_recoverable_state(self):
+        controller = CaptureControllerTests._controller()
+        controller.state = "RECORDING"
+        controller.record_thread = mock.Mock()
+        controller.realtime_session = mock.Mock()
+        with (
+            mock.patch.object(meki_audio_capture.threading.Thread, "start", side_effect=RuntimeError("no thread")),
+            mock.patch.object(controller, "_reap_unresponsive_recording") as reaper,
+        ):
+            controller.stop()
+        self.assertEqual(controller.state, "ERROR")
+        self.assertIsNone(controller.process_thread)
+        self.assertTrue(controller.stop_event.is_set())
+        controller.realtime_session.abort.assert_called_once()
+        reaper.assert_called_once()
+
+    def test_nonobject_start_request_is_rejected_without_starting_capture(self):
+        controller = types.SimpleNamespace(start=mock.Mock(), health=lambda: {"ok": True})
+        server = meki_audio_capture.ThreadingHTTPServer(
+            ("127.0.0.1", 0), meki_audio_capture.make_handler(controller),
+        )
+        server.daemon_threads = True
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        try:
+            connection.request("POST", "/start", body=b"[]")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 400)
+            self.assertFalse(json.loads(response.read())["ok"])
+            controller.start.assert_not_called()
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
+
     def test_config_endpoint_rejects_realtime_translation_setting(self) -> None:
         controller = CaptureControllerTests._controller()
         before = controller.health()

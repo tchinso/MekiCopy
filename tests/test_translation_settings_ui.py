@@ -17,26 +17,17 @@ from mekicopy_settings import AppSettings, load_settings, save_settings
 
 
 class TranslationSettingsPersistenceTests(unittest.TestCase):
-    def test_legacy_clipboard_mode_loads_as_translation_and_saves_enabled(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "settings.cfg"
-            path.write_text(
-                "[settings]\noverlay_translation_mode = false\n"
-                "realtime_ocr_enabled = false\n",
-                encoding="utf-8",
-            )
-            with mock.patch.object(mekicopy_settings, "SETTINGS_FILE", str(path)):
-                settings = load_settings()
-        self.assertTrue(settings.overlay_translation_mode)
-        self.assertFalse(settings.realtime_ocr_enabled)
-        settings.overlay_translation_mode = False
+    def test_realtime_mode_round_trips(self) -> None:
+        settings = AppSettings(realtime_ocr_enabled=False)
         with mock.patch.object(mekicopy_settings, "_write_state_text", return_value=True) as write:
             self.assertTrue(save_settings(settings))
-        parser = configparser.ConfigParser()
-        parser.read_string(write.call_args.args[1])
-        self.assertTrue(parser.getboolean("settings", "overlay_translation_mode"))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.cfg"
+            path.write_text(write.call_args.args[1], encoding="utf-8")
+            with mock.patch.object(mekicopy_settings, "SETTINGS_FILE", str(path)):
+                self.assertFalse(load_settings().realtime_ocr_enabled)
 
-    def test_legacy_settings_default_to_hdtrans_mt15(self) -> None:
+    def test_unknown_model_defaults_to_hdtrans_mt15(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.cfg"
             path.write_text("[settings]\nhytrans_model_id = mt2\n", encoding="utf-8")
@@ -270,11 +261,9 @@ class TranslationSettingsUiTests(unittest.TestCase):
         self.root.update()
 
     def test_realtime_settings_are_collected_with_overlay_settings(self) -> None:
-        self.root.settings.overlay_translation_mode = False
         self.window.realtime_ocr_enabled_var.set(True)
         self.window.realtime_ocr_interval_var.set("1.5")
         collected = self.window._collect_settings()
-        self.assertTrue(collected.overlay_translation_mode)
         self.assertTrue(collected.realtime_ocr_enabled)
         self.assertEqual(collected.realtime_ocr_interval, 1.5)
 

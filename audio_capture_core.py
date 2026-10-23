@@ -528,10 +528,14 @@ def _download_file(
                     if percent >= last_report + 5:
                         progress(f"모델 다운로드 중... {percent}%")
                         last_report = percent
+                elif progress:
+                    progress(f"모델 다운로드 중... {copied // (1024 * 1024)} MiB")
             output.flush()
             os.fsync(output.fileno())
         if partial.stat().st_size <= 0:
             raise RuntimeError(f"빈 모델 파일이 다운로드되었습니다: {url}")
+        if total and copied != total:
+            raise RuntimeError(f"모델 다운로드가 불완전합니다: {copied}/{total} bytes")
         os.replace(partial, destination)
     except Exception:
         try:
@@ -614,7 +618,11 @@ def ensure_models(
     # A first launch can race with another companion process. Serialize the
     # complete model set so no process observes a half-extracted archive or a
     # shared .part file while it is still being written.
-    with exclusive_file_lock(root / ".model-download.lock", timeout=3_600):
+    check_wait = (
+        (lambda: progress("공용 음성 모델 준비를 기다리고 있습니다..."))
+        if progress is not None else None
+    )
+    with exclusive_file_lock(root / ".model-download.lock", timeout=3_600, check_cancel=check_wait):
         required_speech = [speech_dir / name for name in model.required_files]
         speech_models = {path.name: path for path in required_speech}
         if not model_paths_are_valid(speech_models):
@@ -649,7 +657,7 @@ def ensure_models(
     )
 
 
-def wav_to_mono_16k(wav_path: Path, raw_path: Path) -> np.memmap:
+def wav_to_mono_16k(wav_path: Path, raw_path: Path) -> np.ndarray:
     """Convert a PCM16 48 kHz WAV to a disk-backed 16 kHz mono array."""
     with wave.open(str(wav_path), "rb") as source:
         channels = source.getnchannels()
@@ -662,26 +670,34 @@ def wav_to_mono_16k(wav_path: Path, raw_path: Path) -> np.memmap:
             raise ValueError(f"지원하지 않는 녹음 샘플레이트입니다: {sample_rate}")
         ratio = sample_rate // INTERNAL_SAMPLE_RATE
         output_frames = frames // ratio
+        if output_frames == 0:
+            raw_path.write_bytes(b"")
+            return np.empty(0, dtype=np.float32)
         target = np.memmap(raw_path, dtype=np.float32, mode="w+", shape=(output_frames,))
         write_at = 0
         remainder = np.empty((0, channels), dtype=np.float32)
-        while True:
-            raw = source.readframes(48_000)
-            if not raw:
-                break
-            block = np.frombuffer(raw, dtype="<i2").reshape(-1, channels).astype(np.float32)
-            block *= 1.0 / 32768.0
-            if remainder.size:
-                block = np.concatenate((remainder, block), axis=0)
-            usable = (len(block) // ratio) * ratio
-            remainder = block[usable:].copy()
-            if not usable:
-                continue
-            mono = block[:usable].mean(axis=1).reshape(-1, ratio).mean(axis=1)
-            count = min(len(mono), output_frames - write_at)
-            target[write_at : write_at + count] = mono[:count]
-            write_at += count
-        target.flush()
+        try:
+            while True:
+                raw = source.readframes(48_000)
+                if not raw:
+                    break
+                block = np.frombuffer(raw, dtype="<i2").reshape(-1, channels).astype(np.float32)
+                block *= 1.0 / 32768.0
+                if remainder.size:
+                    block = np.concatenate((remainder, block), axis=0)
+                usable = (len(block) // ratio) * ratio
+                remainder = block[usable:].copy()
+                if not usable:
+                    continue
+                mono = block[:usable].mean(axis=1).reshape(-1, ratio).mean(axis=1)
+                count = min(len(mono), output_frames - write_at)
+                target[write_at : write_at + count] = mono[:count]
+                write_at += count
+            target.flush()
+        finally:
+            target._mmap.close()
+    if write_at == 0:
+        return np.empty(0, dtype=np.float32)
     return np.memmap(raw_path, dtype=np.float32, mode="r", shape=(write_at,))
 
 

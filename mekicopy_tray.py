@@ -234,8 +234,7 @@ class WindowsTrayIcon:
                 self.WM_RBUTTONUP,
             ):
                 # A ctypes WndProc must remain tiny. Calling into Tk from here can
-                # re-enter Tcl while Windows is dispatching the native message and
-                # has caused hard process crashes. The Tk thread polls this event.
+                # re-enter Tcl during native message dispatch. Tk polls this event.
                 self._restore_requested.set()
                 return 0
             return user32.DefWindowProcW(hwnd, msg, wparam, lparam)

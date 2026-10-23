@@ -57,7 +57,7 @@ def _valid_runtime_assets(root: Path) -> bool:
         transformers = manifest["transformers"]
         ort_web = manifest["onnxRuntimeWeb"]
         if (
-            transformers.get("version") != "4.3.0"
+            transformers.get("version") != "4.3.1"
             or transformers.get("buildOverride", {}).get("onnxRuntimeWeb") != "1.30.0"
             or ort_web.get("version") != "1.30.0"
         ):

@@ -1,12 +1,12 @@
 {
   "transformers": {
     "package": "@huggingface/transformers",
-    "version": "4.3.0",
-    "sourceCommit": "a1728dd363256efffb6e8678138cb6ad755d051d",
-    "upstreamNpmIntegrity": "sha512-fL1A/WUZwouPrOlYxU5dzIwD2T5J781JiB2jDR8bFe5DwCj0Gfudq+NEXCMno49kQgajHA7xQkrRLJlqG1veEA==",
+    "version": "4.3.1",
+    "sourceCommit": "511bb61a7c46b73e33f1af3fb308fbd1afe98c02",
+    "upstreamNpmIntegrity": "sha512-5+voSeUCFK6PCKlY15dPhNOKq3/zOTxDN7oC+Wy9dFb1QZ0TSQomZRRy7URRK8YRuUoE9fGMQTTPC5d/pWBJhA==",
     "buildOverride": {
       "onnxRuntimeWeb": "1.30.0",
-      "node": "24.19.0",
+      "node": "24.22.1",
       "pnpm": "11.25.0"
     }
   },
@@ -19,13 +19,13 @@
   "files": [
     {
       "path": "transformers.min.js",
-      "size": 581761,
-      "sha256": "c0b6879e3974d628b1a1553791ec7141d21038f68a16aeedc888628fe9eb0271"
+      "size": 586056,
+      "sha256": "668aef169155c79d7b22a9dfd9dc6dd01792469bcb80e3951005dd28359d7903"
     },
     {
       "path": "transformers.LICENSE.txt",
-      "size": 11560,
-      "sha256": "3ddf9be5c28fe27dad143a5dc76eea25222ad1dd68934a047064e56ed2fa40c5"
+      "size": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
     },
     {
       "path": "onnxruntime-web.LICENSE.txt",
@@ -44,8 +44,8 @@
     },
     {
       "path": "worker.js",
-      "size": 23740,
-      "sha256": "52de25f9d114125c1fc9783b190585de3853496187884ddbdf3156b986835fa7"
+      "size": 23431,
+      "sha256": "656b089aa879b2410e02691e8ea05bb1427e6f76d989b7dc3bc13da4ecfffb98"
     },
     {
       "path": "translator_api_worker.html",
@@ -54,8 +54,8 @@
     },
     {
       "path": "translator_api_worker.js",
-      "size": 17227,
-      "sha256": "555618936526b92be7f010299023c5207041e7719ba6debfb837efb3ebdba124"
+      "size": 17398,
+      "sha256": "81183b4db21f35b9cae3d8a853b8aa6a2d9fc178feed4e5954e4436efbc93598"
     },
     {
       "path": "wasm/ort-wasm-simd-threaded.asyncify.mjs",

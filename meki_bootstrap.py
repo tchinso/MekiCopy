@@ -51,6 +51,8 @@ def main() -> int:
         result = module.main()
         return int(result) if result is not None else 0
     except SystemExit as exc:
+        if exc.code is None:
+            return 0
         return int(exc.code) if isinstance(exc.code, int) else 1
     except BaseException as exc:
         log_error("bootstrap", exc, component=component)

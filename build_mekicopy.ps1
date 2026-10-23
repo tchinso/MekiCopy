@@ -16,7 +16,7 @@ $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
-$PipVersion = "26.2.1"
+$PipVersion = "26.2.2"
 $RequirementsFile = Join-Path $PSScriptRoot "requirements-build.txt"
 $OnnxRuntimeGpuVersion = "1.31.0"
 
@@ -86,7 +86,7 @@ function Resolve-BuildPython {
         $candidates.Add($RequestedPython)
     }
     else {
-        $localBuildPython = Join-Path $PSScriptRoot ".build-python\python.exe"
+        $localBuildPython = Join-Path $PSScriptRoot ".build-python\Scripts\python.exe"
         $candidates.Add($localBuildPython)
 
         foreach ($commandName in @("python", "python3")) {
@@ -176,68 +176,8 @@ function Assert-RuntimeAssetManifest {
         [Parameter(Mandatory = $true)][string]$Description
     )
 
-    $manifestPath = Join-Path $AssetsRoot "runtime_manifest.json"
-    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-        throw "$Description runtime manifest is missing: $manifestPath"
-    }
-    try {
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw |
-            ConvertFrom-Json -ErrorAction Stop
-    }
-    catch {
-        throw "$Description runtime manifest is invalid JSON: $manifestPath"
-    }
-
-    if ($manifest.transformers.version -cne "4.3.0") {
-        throw "$Description has an unexpected Transformers.js version"
-    }
-    if ($manifest.onnxRuntimeWeb.version -cne "1.30.0") {
-        throw "$Description has an unexpected ONNX Runtime Web version"
-    }
-
-    $requiredPaths = @(
-        "transformers.min.js",
-        "transformers.LICENSE.txt",
-        "onnxruntime-web.LICENSE.txt",
-        "onnxruntime-web.ThirdPartyNotices.txt",
-        "worker.html",
-        "worker.js",
-        "translator_api_worker.html",
-        "translator_api_worker.js",
-        "wasm/ort-wasm-simd-threaded.asyncify.mjs",
-        "wasm/ort-wasm-simd-threaded.asyncify.wasm",
-        "wasm/ort-wasm-simd-threaded.jsep.mjs",
-        "wasm/ort-wasm-simd-threaded.jsep.wasm",
-        "wasm/ort-wasm-simd-threaded.jspi.mjs",
-        "wasm/ort-wasm-simd-threaded.jspi.wasm",
-        "wasm/ort-wasm-simd-threaded.mjs",
-        "wasm/ort-wasm-simd-threaded.wasm"
-    )
-    $entriesByPath = @{}
-    foreach ($entry in @($manifest.files)) {
-        $entriesByPath[[string]$entry.path] = $entry
-    }
-    foreach ($relativePath in $requiredPaths) {
-        $entry = $entriesByPath[$relativePath]
-        if ($null -eq $entry) {
-            throw "$Description manifest is missing '$relativePath'"
-        }
-        $path = Join-Path $AssetsRoot $relativePath
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "$Description asset is missing: $path"
-        }
-        $item = Get-Item -LiteralPath $path
-        if ($item.Length -ne [long]$entry.size) {
-            throw (
-                "$Description asset '$relativePath' is $($item.Length) bytes; " +
-                "expected $($entry.size)"
-            )
-        }
-        $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
-        if ($actualHash -cne ([string]$entry.sha256).ToUpperInvariant()) {
-            throw "$Description asset hash mismatch: $path"
-        }
-    }
+    Write-Host "Verifying $Description browser runtime..."
+    Invoke-CheckedPython @("release_packaging.py", "verify-runtime", "--release", $AssetsRoot)
 }
 
 function Assert-ArtifactPattern {
@@ -717,23 +657,14 @@ root = tk.Tk()
 root.withdraw()
 root.update_idletasks()
 root.destroy()
-expected = {
-    "meikiocr": "0.3.5",
-    "pyinstaller": "6.22.3",
-    "mss": "10.2.0",
-    "pillow": "12.3.0",
-    "numpy": "2.5.4",
-    "opencv-python-headless": "5.0.0.93",
-    "fastapi": "0.143.0",
-    "uvicorn": "0.54.0",
-    "pydantic": "2.14.0",
-    "typer": "0.27.3",
-    "huggingface-hub": "2.2.0",
-    "onnxruntime": "1.31.0",
-    "onnxruntime-gpu": "1.31.0",
-    "sherpa-onnx": "1.13.8",
-    "SoundCard": "0.4.6",
-}
+from pathlib import Path
+import re
+expected = {}
+for requirement in Path("requirements-build.txt").read_text(encoding="utf-8").splitlines():
+    requirement = requirement.strip()
+    if requirement and not requirement.startswith("#"):
+        package, wanted = requirement.split("==", 1)
+        expected[re.sub(r"\[.*\]", "", package)] = wanted
 for package, wanted in expected.items():
     actual = version(package)
     if actual != wanted:
@@ -768,6 +699,13 @@ Invoke-CheckedPythonScript $dependencyProbe
 if (-not $ReuseLiteBuild -and -not $SkipSourceTests) {
     Write-Host "Running source regression tests..."
     Invoke-CheckedPython @("-m", "unittest", "discover", "-s", "tests", "-v")
+    $node = Get-Command node -ErrorAction Stop
+    foreach ($test in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "tests") -Filter "test_*.mjs" -File) {
+        & $node.Source $test.FullName
+        if ($LASTEXITCODE -ne 0) {
+            throw "Browser worker tests failed: $($test.Name)"
+        }
+    }
 }
 
 if ($PackageFlavor -eq "Full") {
@@ -822,8 +760,8 @@ for repo_id, filename in missing_models:
 # MekiAudioCapture/models location on first use and reused afterwards.
 # MekiSubtitle points at exactly that cache instead of publishing model copies.
 
-# MekiSubtitle needs only video decoding tools from the former standalone
-# ReazonSubtitle app. Translation/STT/VAD models remain shared runtime caches.
+# Full includes media tools; Lite prepares them when subtitle generation starts.
+if ($PackageFlavor -eq "Full") {
 $subtitleFfmpegCandidates = @()
 if ($FfmpegRoot) {
     $subtitleFfmpegCandidates += $FfmpegRoot
@@ -839,20 +777,29 @@ $subtitleFfmpegCandidates += @(
 )
 $subtitleFfmpegRoot = $null
 foreach ($candidate in $subtitleFfmpegCandidates) {
-    if ((Test-Path -LiteralPath (Join-Path $candidate "ffmpeg.exe") -PathType Leaf) -and
-        (Test-Path -LiteralPath (Join-Path $candidate "ffprobe.exe") -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $candidate -PathType Container)) {
+        continue
+    }
+    & $script:PythonExe ".\release_packaging.py" verify-media --release $candidate *> $null
+    if ($LASTEXITCODE -eq 0) {
         $subtitleFfmpegRoot = (Resolve-Path -LiteralPath $candidate).Path
         break
     }
 }
 if (-not $subtitleFfmpegRoot) {
-    throw "MekiSubtitle requires FFmpeg and FFprobe. Pass -FfmpegRoot with their directory."
+    Write-Host "Preparing the verified FFmpeg release and license files..."
+    $downloadedMediaRoot = & $script:PythonExe -c "from media_tools_download import ensure_media_tools; print(ensure_media_tools())"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not prepare the verified FFmpeg release. Pass -FfmpegRoot with its complete directory."
+    }
+    $subtitleFfmpegRoot = (Resolve-Path -LiteralPath ([string]$downloadedMediaRoot).Trim()).Path
 }
 foreach ($subtitleTool in @("ffmpeg.exe", "ffprobe.exe")) {
     $subtitleToolPath = Join-Path $subtitleFfmpegRoot $subtitleTool
     if (-not (Test-Path -LiteralPath $subtitleToolPath -PathType Leaf)) {
         throw "MekiSubtitle required FFmpeg tool is missing: $subtitleToolPath"
     }
+}
 }
 
 if (-not $ReuseLiteBuild) {
@@ -880,24 +827,12 @@ if ($ReuseLiteBuild) {
         -Description "verified Lite application runtime"
 }
 else {
-    $previousBuildFfmpegRoot = $env:MEKICOPY_BUILD_FFMPEG_DIR
-    $env:MEKICOPY_BUILD_FFMPEG_DIR = $subtitleFfmpegRoot
-    try {
-        foreach ($spec in $specs) {
-            Invoke-CheckedPython @(
-                "-m", "PyInstaller", "--noconfirm", "--clean",
-                "--distpath", $distRoot,
-                $spec
-            )
-        }
-    }
-    finally {
-        if ($null -eq $previousBuildFfmpegRoot) {
-            Remove-Item Env:MEKICOPY_BUILD_FFMPEG_DIR -ErrorAction SilentlyContinue
-        }
-        else {
-            $env:MEKICOPY_BUILD_FFMPEG_DIR = $previousBuildFfmpegRoot
-        }
+    foreach ($spec in $specs) {
+        Invoke-CheckedPython @(
+            "-m", "PyInstaller", "--noconfirm", "--clean",
+            "--distpath", $distRoot,
+            $spec
+        )
     }
 }
 
@@ -911,14 +846,18 @@ $hyTransRoot = Split-Path -Parent $hyTransExe
 $displayRoot = Split-Path -Parent $overlayerExe
 $audioCaptureRoot = Split-Path -Parent $audioCaptureExe
 if ($PackageFlavor -eq "Full") {
+    Invoke-CheckedPython @(
+        ".\release_packaging.py", "stage-optional", "--release", $distRoot,
+        "--ffmpeg", $subtitleFfmpegRoot
+    )
     # The same verified installer backs Lite first-use and Full preloading.
     # Keep this external to the frozen application so Lite and Full binaries
     # remain byte-for-byte identical and no loaded DLL is overwritten.
     $hdTransPrepareArgs = @(
         "-m", "hytrans.hdtrans_download", "--prepare-build", (Join-Path $hyTransRoot "hdtrans")
     )
-    $hdTransArchiveCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-0.2.1-windows.zip"
-    $hdTransSourceCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-v0.2.1-source.zip"
+    $hdTransArchiveCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-0.4.4-windows.zip"
+    $hdTransSourceCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-v0.4.4-source.zip"
     if ($FullHdTransRoot) {
         $hdTransPrepareArgs += @("--from-bundle-root", $FullHdTransRoot)
     }
@@ -969,6 +908,7 @@ Assert-ArtifactPattern `
     -RelativeDirectory "_internal\onnxruntime\capi" `
     -FilePattern "onnxruntime_pybind11_state*.pyd" `
     -Description "MekiCopy ONNX Runtime Python extension"
+if ($PackageFlavor -eq "Full") {
 $cudaRuntimeArtifacts = @(
     # ONNX Runtime 1.31 is built for CUDA 13. The CUDA extra wheels preserve
     # this single package-relative directory in the frozen one-dir bundle.
@@ -1005,6 +945,7 @@ foreach ($subtitleTool in @("ffmpeg.exe", "ffprobe.exe")) {
         -AppRoot $mekiCopyRoot `
         -RelativePath (Join-Path "_internal\assets\ffmpeg" $subtitleTool) `
         -Description "MekiSubtitle FFmpeg tool"
+}
 }
 Assert-ArtifactFile `
     -AppRoot $mekiCopyRoot `
@@ -1071,6 +1012,8 @@ if ($PackageFlavor -eq "Lite") {
     # companion roots directly so a warmed developer cache cannot leak into it.
     foreach ($liteModelRoot in @(
         (Join-Path $mekiCopyRoot "_internal\runtime_models"),
+        (Join-Path $mekiCopyRoot "_internal\nvidia"),
+        (Join-Path $mekiCopyRoot "_internal\assets\ffmpeg"),
         (Join-Path $hyTransRoot "hdtrans"),
         (Join-Path $hyTransRoot "models"),
         (Join-Path $audioCaptureRoot "models")

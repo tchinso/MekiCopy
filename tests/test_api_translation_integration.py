@@ -32,10 +32,10 @@ class ApiTranslationIntegrationTests(unittest.TestCase):
                 if app is mekicopy.MainWindow:
                     app._start_ocr_task(
                         window, image, source_button=mock.Mock(),
-                        simple_feedback=True, translate=True,
+                        simple_feedback=True,
                     )
                 else:
-                    app._start_ocr_task(window, image, translate=True)
+                    app._start_ocr_task(window, image)
                 operation = window._task_runner.submit.call_args.args[1]
                 window.settings = replace(
                     settings, hytrans_port=8996, overlayer_port=8997,

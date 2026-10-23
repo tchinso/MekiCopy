@@ -14,6 +14,7 @@ processes.
 from __future__ import annotations
 
 import json
+import math
 import queue
 import threading
 import time
@@ -106,10 +107,8 @@ def default_health_evaluator(
 ) -> HealthEvaluator:
     """Build the default identity/UI responsiveness policy.
 
-    GUI companions may add ``uiResponsive`` and
-    ``uiHeartbeatAgeSeconds`` to their health JSON.  The fields are only
-    required when requested, which keeps older/external companion versions
-    compatible with normal process monitoring.
+    GUI companions report ``uiResponsive`` and ``uiHeartbeatAgeSeconds``.
+    Headless services use process and endpoint checks without a UI heartbeat.
     """
 
     max_age = (
@@ -138,6 +137,8 @@ def default_health_evaluator(
             try:
                 age = float(payload["uiHeartbeatAgeSeconds"])
             except (TypeError, ValueError):
+                return "health endpoint reported an invalid GUI heartbeat age"
+            if not math.isfinite(age) or age < 0:
                 return "health endpoint reported an invalid GUI heartbeat age"
             if age > max_age:
                 return f"GUI heartbeat is stale ({age:.1f}s)"
@@ -443,7 +444,12 @@ class CompanionWatchdog:
                 name="MekiCopyCompanionWatchdog",
                 daemon=True,
             )
-            self._thread.start()
+            try:
+                self._thread.start()
+            except Exception:
+                self._thread = None
+                self._stop_event.set()
+                raise
 
     def stop(self, *, join_timeout_seconds: float = 2.0) -> None:
         """Request background shutdown; safe to call repeatedly during UI exit."""

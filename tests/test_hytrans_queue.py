@@ -31,6 +31,54 @@ class _BlockingWorker:
 
 
 class TranslationQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disconnected_caller_does_not_remove_worker_deadline(self) -> None:
+        queue = TranslationQueue()
+        worker = _BlockingWorker()
+        queue.set_worker(worker)
+        runner = asyncio.create_task(queue.run(2048))
+        request = asyncio.create_task(queue.submit("stuck", timeout=0.05))
+        try:
+            await asyncio.wait_for(worker.sent.wait(), 1)
+            request.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await request
+            await asyncio.wait_for(queue.queue.join(), 1)
+            self.assertFalse(queue.worker_available)
+            replacement = _ImmediateWorker(queue)
+            queue.set_worker(replacement)
+            self.assertEqual(await queue.submit("next", timeout=1), "번역")
+        finally:
+            queue.stop()
+            await asyncio.wait_for(runner, 1)
+
+    async def test_deadline_reports_timeout_without_cancelling_request(self) -> None:
+        queue = TranslationQueue()
+        queue.set_worker(_BlockingWorker())
+        runner = asyncio.create_task(queue.run(2048))
+        try:
+            with self.assertRaises(TimeoutError):
+                await queue.submit("stuck", timeout=0.02)
+            await asyncio.wait_for(queue.queue.join(), 1)
+            self.assertFalse(queue.worker_available)
+        finally:
+            queue.stop()
+            await asyncio.wait_for(runner, 1)
+
+    async def test_cancelled_job_does_not_swallow_runner_cancellation(self) -> None:
+        queue = TranslationQueue()
+        worker = _BlockingWorker()
+        queue.set_worker(worker)
+        runner = asyncio.create_task(queue.run(2048))
+        request = asyncio.create_task(queue.submit("cancel", timeout=1))
+        await asyncio.wait_for(worker.sent.wait(), 1)
+        queue.invalidate_worker(worker, reason="test cancellation")
+        runner.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(runner, 1)
+        with self.assertRaises(asyncio.CancelledError):
+            await request
+        queue.stop()
+
     async def test_job_specific_generation_budget_reaches_the_worker(self) -> None:
         translation_queue = TranslationQueue()
         worker = _ImmediateWorker(translation_queue)

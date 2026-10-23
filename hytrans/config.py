@@ -170,9 +170,11 @@ def has_local_wasm_files() -> bool:
 
 def runtime_config() -> RuntimeConfig:
     if options.backend == "hdtrans":
+        from .hdtrans_download import TAG
+
         return RuntimeConfig(
             backend="hdtrans", modelKey="hdtrans", modelId="hdTrans",
-            revision="v0.2.1", dtype="native", promptTemplate="",
+            revision=TAG, dtype="native", promptTemplate="",
             modelMode="native", modelFiles={}, debugLog=options.debug_log,
         )
     if options.backend == "translator_api":

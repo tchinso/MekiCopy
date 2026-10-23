@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import unittest
+from unittest import mock
 
 from mekicopy_tasks import TkTaskRunner
 
@@ -64,6 +65,35 @@ class TkTaskRunnerTests(unittest.TestCase):
         _next_id, (next_delay, _next_callback) = next(iter(root.callbacks.items()))
         self.assertEqual(next_delay, 30)
         runner.close()
+
+    def test_failed_thread_start_releases_task_key(self) -> None:
+        root = _FakeRoot()
+        runner = TkTaskRunner(root)
+        with mock.patch("mekicopy_tasks.threading.Thread.start", side_effect=RuntimeError("no thread")):
+            with self.assertRaises(RuntimeError):
+                runner.submit("work", lambda: None, on_success=lambda _: None,
+                              on_error=lambda _: None)
+        self.assertFalse(runner.is_running("work"))
+        self.assertEqual(runner._callbacks, {})
+        runner.close()
+
+    def test_submission_does_not_run_when_tk_timer_cannot_be_scheduled(self) -> None:
+        root = _FakeRoot()
+        runner = TkTaskRunner(root)
+        root.after = mock.Mock(side_effect=RuntimeError("destroyed"))
+        operation = mock.Mock()
+        self.assertFalse(runner.submit("work", operation, on_success=lambda _: None,
+                                       on_error=lambda _: None))
+        operation.assert_not_called()
+
+    def test_failed_timer_releases_tk_owner_and_callbacks(self) -> None:
+        root = _FakeRoot()
+        runner = TkTaskRunner(root)
+        root.after = mock.Mock(side_effect=RuntimeError("destroyed"))
+        runner._schedule_poll(0, replace=True)
+        self.assertIsNone(runner._root)
+        self.assertFalse(runner.submit("work", lambda: None, on_success=lambda _: None,
+                                      on_error=lambda _: None))
 
     def test_running_task_uses_the_shorter_busy_poll(self) -> None:
         root = _FakeRoot()

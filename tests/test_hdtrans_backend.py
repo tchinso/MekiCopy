@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from hytrans import app as server, config
 from hytrans.api_settings import ApiSettings, PROVIDERS, fingerprint
 from hytrans.hdtrans_backend import HdTransBackend, HdTransError, NativeLibrary, validate_dll_architecture
+from hytrans.hdtrans_download import VERSION
 from hytrans.hdtrans_settings import HdTransSettings, load_hdtrans_settings, save_hdtrans_settings, hdtrans_settings_path
 from hytrans.queue import TranslationQueueOverloadedError
 from meki_subtitle_pipeline import _translation_callable
@@ -47,7 +48,7 @@ class FakeLibrary:
 
     def version(self):
         self.record("version")
-        return "0.2.1"
+        return VERSION
 
     def diagnostics(self):
         self.record("diagnostics")
@@ -72,6 +73,17 @@ class FakeLibrary:
 
 
 class NativeCtypesTests(unittest.TestCase):
+    def test_truncated_pe_headers_report_engine_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hdTransEngine.dll"
+            path.write_bytes(b"MZ")
+            with self.assertRaisesRegex(HdTransError, "truncated DOS"):
+                validate_dll_architecture(path)
+            write_pe(path)
+            path.write_bytes(path.read_bytes()[:0x84])
+            with self.assertRaisesRegex(HdTransError, "truncated PE"):
+                validate_dll_architecture(path)
+
     def test_declares_size_t_utf8_byte_length_original_pointer_and_finally_free(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "hdTransEngine.dll"

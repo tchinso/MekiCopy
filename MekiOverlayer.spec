@@ -1,7 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+from build_runtime_data import ssl_runtime_data
 
-datas = []
+datas = ssl_runtime_data()
 binaries = []
 hiddenimports = [
     "meki_overlayer",

@@ -75,6 +75,7 @@ from mekicopy_ocr import (
     capture_ocr_image,
     ocr_and_translate,
     recognize_image,
+    take_ocr_progress,
 )
 from mekicopy_hotkey import GlobalHotkeyManager
 from mekicopy_region_ui import (
@@ -245,9 +246,12 @@ class DetachedOcrButtonApp:
         self._realtime_locked = detached_translation_locked(
             mekicopy_settings.STATE_DIR / REALTIME_STATE_FILENAME
         )
+        runner = getattr(self, "_task_runner", None)
+        busy = runner is not None and runner.is_running("detached_ocr")
+        progress = getattr(self, "_ocr_progress_text", "") if busy else ""
         if self.button.winfo_exists():
-            self.button.config(text=self.ocr_action_label(), state=(
-                tk.DISABLED if self._realtime_locked or self.settings.realtime_ocr_enabled
+            self.button.config(text=progress or self.ocr_action_label(), state=(
+                tk.DISABLED if busy or self._realtime_locked or self.settings.realtime_ocr_enabled
                 else tk.NORMAL
             ))
 
@@ -359,13 +363,10 @@ class DetachedOcrButtonApp:
             messagebox.showwarning("MekiCopy", str(exc), parent=self.root)
             return
 
-        self._start_ocr_task(
-            image,
-            translate=True,
-        )
+        self._start_ocr_task(image)
 
-    def _start_ocr_task(self, image: Image.Image, *, translate: bool = True) -> None:
-        # Keep the legacy keyword for callers; OCR always translates now.
+    def _start_ocr_task(self, image: Image.Image) -> None:
+        self._ocr_progress_text = ""
         settings = self.settings
         simple_feedback = settings.simple_copy_complete
         hytrans_url = f"http://127.0.0.1:{settings.hytrans_port}"
@@ -387,6 +388,8 @@ class DetachedOcrButtonApp:
             return text
 
         def on_success(text: str) -> None:
+            self._ocr_progress_text = ""
+            self._refresh_realtime_lock()
             if not text.strip():
                 messagebox.showwarning("MekiCopy", "인식된 텍스트가 없습니다.", parent=self.root)
                 return
@@ -398,6 +401,8 @@ class DetachedOcrButtonApp:
                 )
 
         def on_error(exc: Exception) -> None:
+            self._ocr_progress_text = ""
+            self._refresh_realtime_lock()
             _log_runtime_error("detached_translate", exc)
             detail = str(exc)
             if isinstance(exc, urllib.error.HTTPError):
@@ -486,6 +491,9 @@ class DetachedOcrButtonApp:
         self._settings_after_id = None
         if self._closing:
             return
+        progress = take_ocr_progress()
+        if progress is not None:
+            self._ocr_progress_text = progress
         self._refresh_realtime_lock()
         file_state = self._current_settings_file_state()
         if file_state == self._settings_file_state:
@@ -1093,6 +1101,9 @@ class MainWindow(tk.Tk):
         self._global_hotkey_after_id = None
         if self._closing:
             return
+        progress = take_ocr_progress()
+        if progress is not None:
+            self._set_capture_status(progress)
         activations = self._global_hotkey.drain_activations()
         # A fast sequence of key repeats can all arrive in one Tk turn. One
         # OCR request is enough; TkTaskRunner also keeps the actual work single.
@@ -2610,7 +2621,7 @@ class MainWindow(tk.Tk):
 
             def recognize() -> str:
                 image = capture_ocr_image(target.left, target.top, target.width, target.height)
-                return recognize_image(image)
+                return recognize_image(image, is_cancelled=session.cancelled.is_set)
 
             result = perform_cycle(
                 recognize, session=session,
@@ -2681,7 +2692,6 @@ class MainWindow(tk.Tk):
             image,
             source_button=source_button or self.ocr_button,
             simple_feedback=self.settings.simple_copy_complete,
-            translate=True,
             on_finished=on_finished,
         )
 
@@ -2691,7 +2701,6 @@ class MainWindow(tk.Tk):
         *,
         source_button: tk.Button,
         simple_feedback: bool,
-        translate: bool = True,
         on_finished: Callable[[], None] | None = None,
     ) -> bool:
         realtime = getattr(self, "_realtime_ocr", None)
@@ -2795,7 +2804,6 @@ class MainWindow(tk.Tk):
     def apply_settings(
         self, settings: AppSettings, persist: bool, *, api_settings: ApiSettings | None = None
     ) -> bool | None:
-        settings = replace(settings, overlay_translation_mode=True)
         previous = self.settings
         backend = normalize_backend(settings.hytrans_backend)
         previous_api_settings = load_api_settings()

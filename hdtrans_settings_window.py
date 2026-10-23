@@ -11,6 +11,7 @@ from tkinter import filedialog
 import uuid
 import urllib.error
 
+from hytrans.hdtrans_download import DICTIONARY_VERSION, VERSION
 from mekicopy_companions import _json_request
 from mekicopy_tasks import TkTaskRunner
 from mekicopy_theme import configure_window_theme, style_tree
@@ -123,8 +124,8 @@ class HdTransSettingsWindow(tk.Toplevel):
             if str(result.get("state", "")).upper() == "INACTIVE":
                 phase = "HYTrans의 현재 엔진이 hdTrans가 아닙니다. 메인 설정을 저장하여 hdTrans를 시작하세요."
             self.status_var.set(
-                f"엔진 {installed_version or '미준비 (지원 v0.2.1)'} · "
-                f"사전 {result.get('dictionaryVersion') or '미준비 (지원 0.2.1+c9ab89c732ad)'}\n{phase}"
+                f"엔진 {installed_version or f'미준비 (지원 v{VERSION})'} · "
+                f"사전 {result.get('dictionaryVersion') or f'미준비 (지원 {DICTIONARY_VERSION})'}\n{phase}"
             )
         else:
             self.status_var.set(str(result))

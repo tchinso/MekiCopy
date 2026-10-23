@@ -68,8 +68,7 @@ class OverlayerConfigWindowTests(unittest.TestCase):
 @unittest.skipUnless(os.name == "nt", "requires native Windows foreground events and Tk")
 class NativeOverlayerWindowTests(unittest.TestCase):
     def test_foreground_events_and_translation_updates_keep_process_and_geometry(self) -> None:
-        # A subprocess contains the native abort this used to trigger, so the
-        # rest of the test suite still reports a useful failure if it regresses.
+        # Isolate native aborts so the test runner can report a failure.
         script = textwrap.dedent("""\
             import faulthandler
             import json

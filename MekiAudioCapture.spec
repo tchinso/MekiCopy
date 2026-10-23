@@ -1,8 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+from build_runtime_data import ssl_runtime_data
 from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
-datas = []
+datas = ssl_runtime_data()
 if Path("MekiCopy.ico").exists():
     datas.append(("MekiCopy.ico", "."))
 

@@ -185,6 +185,24 @@ class ApiTransportTests(unittest.TestCase):
 
 
 class ApiQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lifecycle_never_creates_untracked_workers(self) -> None:
+        queue = ApiTranslationQueue(mock.Mock(), concurrency=2)
+        with self.assertRaisesRegex(ApiTranslationError, "not started"):
+            await queue.submit("early")
+        queue.start()
+        tasks = list(queue.tasks)
+        queue.start()
+        self.assertEqual(queue.tasks, tasks)
+        await queue.stop()
+        self.assertTrue(all(task.done() for task in tasks))
+        with self.assertRaisesRegex(RuntimeError, "cannot be restarted"):
+            queue.start()
+
+    async def test_queue_limits_cannot_disable_admission_bounds(self) -> None:
+        for kwargs in ({"concurrency": 0}, {"max_queued_jobs": 0}, {"concurrency": -1}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                ApiTranslationQueue(mock.Mock(), **kwargs)
+
     async def test_bounded_admission_and_cancelled_pending_job_never_bills(self) -> None:
         started = threading.Event()
         release = threading.Event()

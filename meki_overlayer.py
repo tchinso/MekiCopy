@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import json
 import os
 import queue
 import socket
@@ -37,6 +36,8 @@ import tkinter as tk
 from tkinter import messagebox
 
 from app_identity import apply_tk_icon, set_windows_app_id
+from companion_json import MAX_REQUEST_BYTES, read_json as _read_request_json, write_json as _write_json
+from display_config import apply_display_config, normalize_font_name, validate_display_colors
 from companion_liveness import UiHeartbeat
 from companion_manual_close import MANUAL_CLOSE_EXIT_CODE, publish_manual_close_signal
 from service_ports import OVERLAYER_DEFAULT_PORT
@@ -54,14 +55,10 @@ from win32_overlay import TopmostWindowController, get_top_level_hwnd
 
 DEFAULT_PORT = OVERLAYER_DEFAULT_PORT
 DEFAULT_GEOMETRY = "780x180+120+120"
-MAX_REQUEST_BYTES = 1024 * 1024
 WDA_NONE = 0x00000000
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 
-def normalize_font_name(font_name: str) -> str:
-    normalized = str(font_name).strip().lstrip("@").strip()
-    return normalized or "Malgun Gothic"
 
 
 def log_error(stage: str, exc: BaseException | str) -> None:
@@ -89,37 +86,7 @@ class OverlayConfig:
         self.text_font = normalize_font_name(self.text_font)
 
     def update_from_dict(self, data: dict[str, Any]) -> None:
-        for key in (
-            "topmost",
-            "hide_titlebar",
-            "fixed_size",
-            "exclude_from_capture",
-            "bg_color",
-            "opacity",
-            "text_color",
-            "text_size",
-            "text_font",
-            "debug_log",
-        ):
-            if key not in data:
-                continue
-            value = data[key]
-            if key in {
-                "topmost",
-                "hide_titlebar",
-                "fixed_size",
-                "exclude_from_capture",
-                "debug_log",
-            }:
-                setattr(self, key, bool(value))
-            elif key == "opacity":
-                setattr(self, key, max(0.1, min(1.0, float(value))))
-            elif key == "text_size":
-                setattr(self, key, max(8, min(96, int(value))))
-            elif key == "text_font":
-                self.text_font = normalize_font_name(str(value))
-            else:
-                setattr(self, key, str(value))
+        apply_display_config(self, data)
         set_debug_enabled(self.debug_log)
 
 
@@ -417,9 +384,13 @@ class OverlayerApp:
             except queue.Empty:
                 break
             handled_event = True
-            if event_type == "config":
-                self.config.update_from_dict(payload)
-                self.apply_config()
+            try:
+                if event_type == "config":
+                    validate_display_colors(self.root, payload)
+                    self.config.update_from_dict(payload)
+                    self.apply_config()
+            except Exception as exc:
+                log_error("ui_event", exc)
         with self._text_lock:
             text = self._pending_text
             request_id = self._pending_request_id
@@ -450,35 +421,6 @@ class OverlayerApp:
             ),
             self._drain_events,
         )
-
-
-def _read_request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
-    try:
-        if handler.headers.get("Transfer-Encoding"):
-            raise ValueError("청크 인코딩 요청은 지원하지 않습니다.")
-        length = int(handler.headers.get("Content-Length", "0") or "0")
-    except ValueError:
-        handler.close_connection = True
-        raise
-    if length < 0 or length > MAX_REQUEST_BYTES:
-        handler.close_connection = True
-        raise ValueError("요청 본문이 너무 큽니다.")
-    raw = handler.rfile.read(length) if length else b"{}"
-    if length and len(raw) != length:
-        handler.close_connection = True
-        raise ValueError("요청 본문이 완전하지 않습니다.")
-    if not raw:
-        return {}
-    return json.loads(raw.decode("utf-8"))
-
-
-def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(data)))
-    handler.end_headers()
-    handler.wfile.write(data)
 
 
 def make_handler(
@@ -569,6 +511,8 @@ def make_handler(
                 _write_json(self, 404, {"ok": False, "error": "not found"})
             except (ConnectionError, TimeoutError):
                 self.close_connection = True
+            except (ValueError, TypeError) as exc:
+                _write_json(self, 400, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 log_error("http_post", exc)
                 _write_json(self, 500, {"ok": False, "error": str(exc)})

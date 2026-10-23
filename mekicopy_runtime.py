@@ -15,13 +15,11 @@ DETACHED_REGION_FILENAME = "detached_button_region.json"
 DETACHED_GEOMETRY_FILENAME = "detached_button_geometry.json"
 
 _DLL_DIR_HANDLES = []
+_DLL_DIRECTORIES: set[str] = set()
 _RUNTIME_PATH_READY = False
 _APP_USER_MODEL_ID_READY = False
 
-# ``onnxruntime-gpu[cuda,cudnn]`` 1.30 uses CUDA 13's consolidated ``cu13``
-# layout. PyInstaller preserves it, so add the directories explicitly before
-# importing ONNX Runtime. A display driver alone does not provide the
-# CUDA/cuDNN libraries required by the CUDA EP.
+# CUDA and cuDNN directories packaged with the Full runtime.
 _NVIDIA_RUNTIME_DLL_SUBDIRECTORIES = (
     os.path.join("nvidia", "cu13", "bin", "x86_64"),
     os.path.join("nvidia", "cudnn", "bin"),
@@ -108,24 +106,51 @@ def _prepare_native_runtime_paths() -> None:
             for relative in _NVIDIA_RUNTIME_DLL_SUBDIRECTORIES
         )
 
-    existing_dirs: list[str] = []
-    for directory in candidate_dirs:
-        if os.path.isdir(directory) and directory not in existing_dirs:
-            existing_dirs.append(directory)
+    _register_native_dll_directories(candidate_dirs)
+    _RUNTIME_PATH_READY = True
 
-    path_items = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
-    for directory in existing_dirs:
+
+def _register_native_dll_directories(directories) -> None:
+    """Keep DLL search handles alive for bundled or cached runtime libraries."""
+    path_items = os.environ.get("PATH", "").split(os.pathsep)
+    for directory in directories:
+        directory = os.path.abspath(os.fspath(directory))
+        key = os.path.normcase(directory)
+        if key in _DLL_DIRECTORIES or not os.path.isdir(directory):
+            continue
         if directory not in path_items:
             path_items.insert(0, directory)
-    os.environ["PATH"] = os.pathsep.join(path_items)
-
-    if hasattr(os, "add_dll_directory"):
-        for directory in existing_dirs:
+        if hasattr(os, "add_dll_directory"):
             try:
                 _DLL_DIR_HANDLES.append(os.add_dll_directory(directory))
             except OSError:
                 continue
-    _RUNTIME_PATH_READY = True
+        _DLL_DIRECTORIES.add(key)
+    os.environ["PATH"] = os.pathsep.join(path_items)
+
+
+def _cuda_driver_is_usable() -> bool:
+    """Require a CUDA 13 driver and an accessible device before downloading."""
+    if os.name != "nt":
+        return False
+    try:
+        driver = ctypes.WinDLL("nvcuda.dll")
+        driver.cuInit.argtypes = [ctypes.c_uint]
+        driver.cuInit.restype = ctypes.c_int
+        driver.cuDriverGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        driver.cuDriverGetVersion.restype = ctypes.c_int
+        driver.cuDeviceGetCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        driver.cuDeviceGetCount.restype = ctypes.c_int
+        if driver.cuInit(0) != 0:
+            return False
+        version = ctypes.c_int()
+        count = ctypes.c_int()
+        return (driver.cuDriverGetVersion(ctypes.byref(version)) == 0
+                and version.value >= 13000
+                and driver.cuDeviceGetCount(ctypes.byref(count)) == 0
+                and count.value > 0)
+    except (OSError, AttributeError):
+        return False
 
 
 def _prepare_windowed_streams() -> None:

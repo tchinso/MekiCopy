@@ -1,35 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os
-from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_all
 from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import copy_metadata
+from build_runtime_data import ssl_runtime_data
 
-# Both flavors use the same executable and runtime. Full-only OCR/model files
-# are attached by build_mekicopy.ps1 after the common application is built.
-datas = [('MekiCopy.ico', '.')]
-# Video subtitle generation uses the existing ReazonSubtitle FFmpeg payload,
-# but only model caches are shared at runtime.  Keep this media utility in the
-# MekiCopy bundle so a release does not depend on a developer-side PATH.
-spec_root = Path(SPECPATH).resolve()
-configured_ffmpeg = os.environ.get('MEKICOPY_BUILD_FFMPEG_DIR', '').strip()
-ffmpeg_candidates = ([Path(configured_ffmpeg)] if configured_ffmpeg else []) + [
-    spec_root / 'assets' / 'ffmpeg',
-    spec_root.parent / 'ReazonSubtitle' / 'assets' / 'ffmpeg',
-    spec_root / 'MekiCopy-Lite' / 'MekiCopy' / '_internal' / 'assets' / 'ffmpeg',
-    spec_root / 'MekiCopy-Full' / 'MekiCopy' / '_internal' / 'assets' / 'ffmpeg',
-]
-subtitle_ffmpeg = next(
-    (path for path in ffmpeg_candidates
-     if all((path / tool).is_file() for tool in ('ffmpeg.exe', 'ffprobe.exe'))),
-    None,
-)
-if subtitle_ffmpeg is None:
-    raise RuntimeError('FFmpeg and FFprobe are required for the standalone bundle')
-datas.append((str(subtitle_ffmpeg), 'assets/ffmpeg'))
+# Optional native libraries and models are attached only to Full. Both
+# distributions retain the same application executable and Python modules.
+datas = [('MekiCopy.ico', '.'), ('assets/gpu_runtime_manifest.json', 'assets')]
+datas += ssl_runtime_data()
 binaries = []
 hiddenimports = [
     'mekicopy',
@@ -54,12 +35,6 @@ binaries += cv2_binaries
 hiddenimports += cv2_hiddenimports
 # Install onnxruntime-gpu last before building; its import package is onnxruntime.
 binaries += collect_dynamic_libs('onnxruntime')
-# The CUDA provider DLL is not self-contained. ONNX Runtime 1.31's CUDA 13
-# extras install the CUDA libraries under nvidia/cu13/bin/x86_64 and cuDNN
-# under nvidia/cudnn/bin. Preserve these package-relative paths because
-# onnxruntime.preload_dlls() searches that layout in a frozen bundle.
-for _gpu_runtime_package in ('nvidia.cu13', 'nvidia.cudnn'):
-    binaries += collect_dynamic_libs(_gpu_runtime_package)
 hiddenimports += collect_submodules('meikiocr')
 hiddenimports += collect_submodules('onnxruntime.capi')
 # MekiSubtitle invokes the same native offline recognizers as
@@ -81,6 +56,11 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Hooks and native dependency scanning may discover installed CUDA libraries.
+# These are supplied by the verified optional runtime installer or Full payload.
+a.binaries = [entry for entry in a.binaries
+              if not entry[0].replace('\\', '/').lower().startswith('nvidia/')
+              and '/nvidia/' not in entry[1].replace('\\', '/').lower()]
 pyz = PYZ(a.pure)
 
 exe = EXE(

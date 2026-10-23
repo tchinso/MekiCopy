@@ -130,6 +130,17 @@ async function until(predicate) {
   assert.fail("worker did not reach expected state");
 }
 
+test("page disposal during availability cannot start a native browser session", async () => {
+  let finishAvailability;
+  const page = makePage(() => new Promise((resolve) => { finishAvailability = resolve; }));
+  await until(() => finishAvailability);
+  page.pagehide();
+  finishAvailability("available");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(page.calls.some((call) => call[0] === "create"), false);
+  assert.equal(page.sockets[0].sent.some((message) => message.type === "ready"), false);
+});
+
 test("downloadable model waits for a trusted click, then translates and caches sessions", async () => {
   const page = makePage((pair) => pair.targetLanguage === "ko" ? "downloadable" : "available");
   assert.equal(page.button.dataset.armed, "true");

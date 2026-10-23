@@ -10,10 +10,12 @@
 
 | 배포판 | 포함 내용 | 처음 사용할 때 |
 |---|---|---|
-| **Lite** | 모든 앱과 번역 기능 | 필요한 엔진·사전·OCR·번역·음성 모델을 다운로드합니다. MagPie는 필요할 때 설치합니다. |
-| **Full** | Lite + hdTrans 엔진·기본 사전, OCR·MT1.5·음성/VAD 모델, MagPie | 포함된 모델을 바로 사용하며 hdTrans는 오프라인 번역이 가능합니다. |
+| **Lite** | 모든 앱과 번역 기능 | 필요한 엔진·사전·모델을 다운로드합니다. GPU OCR에는 CUDA/cuDNN, 영상 자막에는 FFmpeg를 처음 사용할 때 설치합니다. MagPie도 필요할 때 설치합니다. |
+| **Full** | Lite + CUDA/cuDNN·FFmpeg, hdTrans 엔진·기본 사전, OCR·MT1.5·음성/VAD 모델, MagPie | 포함된 구성요소를 바로 사용하며 hdTrans는 오프라인 번역이 가능합니다. |
 
 두 배포판의 기능과 실행 파일은 같습니다. TranslatorAPI 언어 모델은 브라우저에서 관리하므로 Full에도 포함되지 않습니다.
+
+Lite의 GPU 구성요소는 사용 가능한 NVIDIA GPU가 있을 때만 내려받습니다. 다운로드가 실패하면 CPU OCR로 실행합니다. 받은 GPU·영상 도구는 검증된 캐시에 보관하여 다음 실행부터 재사용합니다.
 
 - Windows 10 2004 이상, RAM 8GB 이상이 필요하며 16GB 이상을 권장합니다.
 - OCR은 CPU로 실행할 수 있으며, 사용 가능한 NVIDIA CUDA 환경에서는 GPU를 사용합니다.

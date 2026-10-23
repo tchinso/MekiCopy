@@ -74,6 +74,10 @@ class TkTaskRunner:
         # can therefore be safely replaced so a fast task is delivered without
         # waiting up to the idle interval.
         self._schedule_poll(0, replace=True)
+        if self._closed:
+            return False
+
+        completions = self._completions
 
         def run() -> None:
             try:
@@ -83,14 +87,19 @@ class TkTaskRunner:
                 )
             except Exception as exc:
                 completion = _TaskCompletion(key=key, error=exc)
-            self._completions.put(completion)
+            completions.put(completion)
 
         thread = threading.Thread(
             target=run,
             name=f"MekiCopyTask-{key}",
             daemon=True,
         )
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            self._running_keys.discard(key)
+            self._callbacks.pop(key, None)
+            raise
         return True
 
     def close(self) -> None:
@@ -99,6 +108,7 @@ class TkTaskRunner:
             return
         self._closed = True
         self._callbacks.clear()
+        self._running_keys.clear()
         if self._poll_after_id:
             try:
                 self._root.after_cancel(self._poll_after_id)
@@ -127,7 +137,7 @@ class TkTaskRunner:
                 self._drain,
             )
         except Exception:
-            self._closed = True
+            self.close()
 
     def is_running(self, key: str) -> bool:
         """Return whether a uniquely keyed task is active on the Tk thread."""

@@ -16,13 +16,14 @@ import wave
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import numpy as np
 import soundcard as sc
 
 from app_identity import apply_tk_icon, set_windows_app_id
 from companion_liveness import UiHeartbeat
+from companion_json import read_json, write_json
 from companion_manual_close import MANUAL_CLOSE_EXIT_CODE, publish_manual_close_signal
 from audio_capture_core import (
     CAPTURE_SAMPLE_RATE,
@@ -140,6 +141,17 @@ def work_dir() -> Path:
                 except OSError:
                     pass
     return path
+
+
+class CaptureOptions(NamedTuple):
+    """Immutable settings captured when a recording starts."""
+
+    stt_model: str
+    precision: str
+    preset: str
+    script_url: str
+    hytrans_url: str
+    realtime_translation: bool
 
 
 @dataclass(frozen=True)
@@ -303,8 +315,15 @@ class RealtimeTranslationSession:
             num_threads=REALTIME_VAD_NUM_THREADS,
         )
         self._started = True
-        self._translation_thread.start()
-        self._stt_thread.start()
+        try:
+            self._translation_thread.start()
+            self._stt_thread.start()
+        except Exception:
+            self.abort()
+            for worker in (self._stt_thread, self._translation_thread):
+                if worker.ident is not None:
+                    worker.join(timeout=2)
+            raise
         self._report_live_status("실시간 음성 번역이 켜졌습니다. 발화를 기다리고 있습니다…")
 
     def accept_capture_block(self, block: np.ndarray) -> None:
@@ -818,7 +837,7 @@ class CaptureController:
         self.session_work_dir: Path | None = None
         self.session_id = ""
         self.realtime_session: RealtimeTranslationSession | None = None
-        self.session_options = (
+        self.session_options = CaptureOptions(
             self.stt_model,
             self.precision,
             self.preset,
@@ -1065,7 +1084,7 @@ class CaptureController:
             self.error = ""
             self._session_generation += 1
             generation = self._session_generation
-            session_options = (
+            session_options = CaptureOptions(
                 self.stt_model,
                 self.precision,
                 self.preset,
@@ -1098,7 +1117,7 @@ class CaptureController:
     def _start_recording(
         self,
         generation: int,
-        session_options: tuple[str, str, str, str, str, bool],
+        session_options: CaptureOptions,
     ) -> None:
         (
             stt_model,
@@ -1256,7 +1275,21 @@ class CaptureController:
             daemon=True,
         )
         self.process_thread = process_thread
-        process_thread.start()
+        try:
+            process_thread.start()
+        except Exception as exc:
+            self.process_thread = None
+            if realtime_session is not None:
+                realtime_session.abort()
+            self._set_state_for_session(
+                generation, "ERROR", f"녹음 종료 처리 시작 실패: {exc}", traceback.format_exc(),
+            )
+            try:
+                self._reap_unresponsive_recording(
+                    generation, record_thread, session_work_dir, realtime_session,
+                )
+            except Exception as cleanup_error:
+                log_error("recording_cleanup_start", cleanup_error)
 
     def _reap_unresponsive_recording(
         self,
@@ -1377,7 +1410,7 @@ class CaptureController:
         wav_path: Path | None = None,
         session_work_dir: Path | None = None,
         session_id: str | None = None,
-        session_options: tuple[str, str, str, str, str, bool] | None = None,
+        session_options: CaptureOptions | None = None,
         realtime_session: RealtimeTranslationSession | None = None,
     ) -> None:
         # Optional arguments keep direct diagnostic/unit-test calls convenient;
@@ -1389,11 +1422,7 @@ class CaptureController:
         session_id = self.session_id if session_id is None else session_id
         session_options = self.session_options if session_options is None else session_options
         realtime_session = self.realtime_session if realtime_session is None else realtime_session
-        if len(session_options) == 5:
-            stt_model, precision, preset, script_url, hytrans_url = session_options
-            realtime_translation = False
-        else:
-            stt_model, precision, preset, script_url, hytrans_url, realtime_translation = session_options
+        stt_model, precision, preset, script_url, hytrans_url, realtime_translation = session_options
         if record_thread:
             record_thread.join(timeout=5)
             if record_thread.is_alive():
@@ -1573,30 +1602,11 @@ class CaptureController:
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
-    try:
-        if handler.headers.get("Transfer-Encoding"):
-            raise ValueError("청크 인코딩 요청은 지원하지 않습니다.")
-        length = int(handler.headers.get("Content-Length", "0") or 0)
-    except ValueError:
-        handler.close_connection = True
-        raise
-    if length < 0 or length > MAX_REQUEST_BYTES:
-        handler.close_connection = True
-        raise ValueError("요청 본문이 너무 큽니다.")
-    raw = handler.rfile.read(length) if length else b"{}"
-    if length and len(raw) != length:
-        handler.close_connection = True
-        raise ValueError("요청 본문이 완전하지 않습니다.")
-    return json.loads(raw.decode("utf-8"))
+    return read_json(handler, max_bytes=MAX_REQUEST_BYTES)
 
 
 def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(data)))
-    handler.end_headers()
-    handler.wfile.write(data)
+    write_json(handler, status, payload)
 
 
 def make_handler(
@@ -1644,6 +1654,8 @@ def make_handler(
                 _write_json(self, 200, health_payload())
             except (ConnectionError, TimeoutError):
                 self.close_connection = True
+            except ValueError as exc:
+                _write_json(self, 400, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 log_error("http_request", exc)
                 _write_json(self, 409, {"ok": False, "error": str(exc)})

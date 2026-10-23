@@ -101,6 +101,9 @@ function withTimeout(promise, timeoutMs, message) {
 }
 
 function createSessionNow(pair) {
+  if (disposed) {
+    return Promise.reject(new Error("worker page closed"));
+  }
   const key = pairKey(pair);
   if (sessions.has(key)) {
     return Promise.resolve(sessions.get(key));
@@ -372,6 +375,7 @@ function connectWebSocket() {
 }
 
 function announceReady() {
+  if (disposed || socket?.readyState !== WebSocket.OPEN) return;
   ready = true;
   startupFailed = false;
   button.disabled = true;
@@ -388,6 +392,7 @@ function announceReady() {
 }
 
 function failStartup(error) {
+  if (disposed) return;
   ready = false;
   startupFailed = true;
   pendingGesturePair = DEFAULT_PAIR;

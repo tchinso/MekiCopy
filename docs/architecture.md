@@ -14,15 +14,16 @@ MekiCopy는 Tk 본체와 별도 프로세스로 실행하는 번역·표시·음
 | OCR | `mekicopy_ocr.py` | 모델 준비, GPU/CPU 선택, 인식과 복사 |
 | 실시간 OCR | `mekicopy_realtime.py` | 주기·중복 판정·세션 취소 |
 | UI 작업 | `mekicopy_tasks.py`, `mekicopy_tooltip.py`, `mekicopy_hotkey.py`, `mekicopy_tray.py` | 작업 스레드 결과 전달, 툴팁, 단축키, 트레이 |
-| 외부 도구 | `mekicopy_companions.py`, `companion_http.py`, `companion_watchdog.py`, `companion_liveness.py`, `companion_manual_close.py` | 실행·통신·공통 오버레이 설정·상태 검사·복구·수동 종료 |
+| 외부 도구 | `mekicopy_companions.py`, `companion_http.py`, `companion_json.py`, `companion_watchdog.py`, `companion_liveness.py`, `companion_manual_close.py` | 실행·통신·JSON 객체 검증·상태 검사·복구·수동 종료 |
 | 번역 서버 | `hytrans_main.py`, `hytrans/app.py`, `hytrans/queue.py` | HTTP API, 제한된 순차 작업 큐 |
 | 번역 엔진 | `hytrans/hdtrans_backend.py`, `hytrans/browser.py`, `hytrans/api_client.py` | 네이티브·브라우저·클라우드 번역 |
 | 번역 설정·자산 | `hytrans/config.py`, `hytrans/*settings.py`, `hytrans/*download.py`, `hytrans/model_*.py` | 서비스 설정, 키 보호, 다운로드·무결성 |
 | hdTrans 설정 UI | `hdtrans_settings_window.py` | 설치·사전 편집·문맥 관리 |
-| 오버레이 | `meki_overlayer.py`, `win32_overlay.py`, `overlay_receipts.py` | 창 표시, Windows 이벤트, 표시 완료·취소 |
+| 오버레이 | `meki_overlayer.py`, `win32_overlay.py`, `overlay_receipts.py`, `display_config.py` | 창 표시, 설정 정규화, Windows 이벤트, 표시 완료·취소 |
 | 음성 | `audio_capture_core.py`, `meki_audio_capture.py`, `meki_script.py` | 녹음·VAD·STT·번역과 대본 표시 |
-| 자막 | `meki_subtitle_pipeline.py`, `meki_subtitle_window.py`, `meki_subtitle_paths.py` | 영상 처리, SRT 출력, 작업 UI와 경로 |
+| 자막 | `meki_subtitle_pipeline.py`, `meki_subtitle_window.py`, `meki_subtitle_paths.py`, `process_output.py` | 영상 처리, SRT 원자 저장, 취소 가능한 자식 프로세스 출력 수집, 작업 UI와 경로 |
 | 공통 런타임 | `runtime_paths.py`, `mekicopy_runtime.py`, `meki_bootstrap.py`, `system_logging.py`, `service_ports.py` | 저장·배포 경로, 공통 DLL/Tk 준비, 로그, 포트 |
+| 선택 구성요소 | `gpu_runtime.py`, `media_tools_download.py` | 공식 고정 자산 다운로드·SHA-256 검증·잠금·원자 설치·캐시 재사용 |
 | 실행 검사 | `mekicopy_selftest.py`, `tests/` | frozen 자기검증, 단위·회귀·통합 검사 |
 | 배포 | `build_mekicopy.ps1`, `release_packaging.py`, `*.spec` | 실행 파일 생성·검사, 자산·manifest·ZIP |
 
@@ -81,7 +82,7 @@ hdTrans C API는 프로세스당 하나의 문맥을 사용합니다. 문맥 초
 
 ```powershell
 python -m unittest discover -s tests
-node --test tests/test_translator_api_worker.mjs
+node --test tests/test_*.mjs
 ```
 
 네이티브 통합 시험에는 검증된 설치 경로를 `HYTRANS_NATIVE_TEST_INSTALLATION`으로 지정합니다. 모의 서비스 검사, 실제 DLL 검사, frozen 실행 파일 검사는 서로 다른 범위이며 실행 결과에 구분해 기록합니다.

@@ -74,10 +74,7 @@ function selectWasmFallback(reason) {
 }
 
 function inspectWebGpuAdapter(adapter) {
-  // GPUAdapterInfo is intentionally privacy-limited, so every field may be
-  // empty.  Its fallback flag is the reliable signal when Chromium exposes it;
-  // known software-renderer names are retained as a diagnostic for older
-  // Chromium builds that did not expose that flag yet.
+  // GPUAdapterInfo fields may be hidden by browser privacy controls.
   const info = adapter?.info || null;
   const isFallback = info?.isFallbackAdapter ?? adapter?.isFallbackAdapter;
   const details = [
@@ -264,9 +261,8 @@ function buildPrompt(inputText) {
   const template =
     config?.promptTemplate ||
     "Translate the following segment into {target}, without additional explanation.\n\n{text}";
-  return String(template)
-    .replaceAll("{target}", () => target)
-    .replaceAll("{text}", () => inputText);
+  const values = { source: config?.source || "Japanese", target, text: inputText };
+  return String(template).replace(/\{(source|target|text)\}/g, (_, key) => values[key]);
 }
 
 function extractGeneratedText(result) {
@@ -364,9 +360,7 @@ async function uploadModelResponseToServer(url, response) {
     return;
   }
   if (status.exists && Number(status.size || 0) > 0) {
-    // A server-cache file is published only after an atomic, complete upload.
-    // Some browser cache responses omit Content-Length; treating that as a
-    // mismatch rewrote every already-cached model file on each worker launch.
+    // Server cache files are atomically published; Content-Length is optional.
     if (responseSize <= 0 || Number(status.size) === responseSize) {
       return;
     }

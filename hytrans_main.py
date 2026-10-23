@@ -86,25 +86,30 @@ def main() -> int:
     set_windows_app_id("HYTrans")
     args = parse_args()
     if args.self_test_hdtrans:
-        from hytrans.hdtrans_selftest import run_hdtrans_self_test
         try:
+            from hytrans.hdtrans_selftest import run_hdtrans_self_test
+
             result = run_hdtrans_self_test()
             if sys.stdout is not None:
                 print(json.dumps(result, ensure_ascii=True))
             return 0
         except Exception as exc:
+            error("self_test_hdtrans", exc)
             if sys.stderr is not None:
                 print(str(exc), file=sys.stderr)
             return 1
     if args.self_test_api:
-        from hytrans.api_selftest import run_api_self_test
-
         try:
+            from hytrans.api_selftest import run_api_self_test
+
             result = run_api_self_test()
             if sys.stdout is not None:
                 print(json.dumps(result, ensure_ascii=True))
             return 0
-        except Exception:
+        except Exception as exc:
+            error("self_test_api", exc)
+            if sys.stderr is not None:
+                print(str(exc), file=sys.stderr)
             return 1
     configure_server(
         host=args.host,

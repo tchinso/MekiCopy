@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from companion_watchdog import (
     CompanionWatchdog,
@@ -26,6 +27,14 @@ class _Clock:
 
 
 class HealthEvaluatorTests(unittest.TestCase):
+    def test_nonfinite_and_negative_heartbeat_ages_are_rejected(self):
+        evaluate = default_health_evaluator("MekiScript", max_ui_heartbeat_age_seconds=5)
+        for age in (float("nan"), float("inf"), -1):
+            with self.subTest(age=age):
+                self.assertIn("invalid", evaluate({
+                    "ok": True, "app": "MekiScript", "uiHeartbeatAgeSeconds": age,
+                }))
+
     def test_error_state_is_still_a_usable_control_endpoint(self) -> None:
         evaluate = default_health_evaluator("MekiAudioCapture", require_ui_responsive=True)
         self.assertIsNone(
@@ -71,6 +80,16 @@ class HealthEvaluatorTests(unittest.TestCase):
 
 
 class CompanionWatchdogTests(unittest.TestCase):
+    def test_thread_start_failure_allows_shutdown_and_restart(self):
+        watchdog = CompanionWatchdog()
+        with mock.patch("companion_watchdog.threading.Thread.start", side_effect=RuntimeError):
+            with self.assertRaises(RuntimeError):
+                watchdog.start()
+        watchdog.stop()
+        self.assertIsNone(watchdog._thread)
+        watchdog.start()
+        watchdog.stop()
+
     @staticmethod
     def _unhealthy_probe(*_args: object, **_kwargs: object) -> HealthProbeResult:
         return HealthProbeResult(False, "loopback health endpoint timed out")

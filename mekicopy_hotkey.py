@@ -556,12 +556,18 @@ class GlobalHotkeyManager:
                 self._ready = threading.Event()
                 self._startup_error = None
             if self._thread is None:
+                self._startup_error = None
                 self._thread = threading.Thread(
                     target=self._run,
                     name="MekiCopyGlobalHotkey",
                     daemon=True,
                 )
-                self._thread.start()
+                try:
+                    self._thread.start()
+                except Exception as exc:
+                    self._thread = None
+                    self._startup_error = str(exc) or type(exc).__name__
+                    return False
         if not self._ready.wait(self.START_TIMEOUT_SECONDS):
             self._startup_error = "전역 단축키 처리 스레드 시작 시간이 초과되었습니다."
             return False
@@ -611,13 +617,21 @@ class GlobalHotkeyManager:
             return
         if request.cancelled:
             return
-        request.result = state.configure(
-            enabled=request.enabled,
-            hotkey=request.hotkey,
-            register=api.register,
-            unregister=api.unregister,
-        )
-        request.done.set()
+        try:
+            request.result = state.configure(
+                enabled=request.enabled,
+                hotkey=request.hotkey,
+                register=api.register,
+                unregister=api.unregister,
+            )
+        except Exception as exc:
+            request.result = HotkeyRegistration(
+                ok=False, enabled=request.enabled, hotkey=request.hotkey.text,
+                active=state.registered is not None,
+                error=str(exc) or type(exc).__name__,
+            )
+        finally:
+            request.done.set()
 
     def _fail_pending(self, error: str) -> None:
         while True:

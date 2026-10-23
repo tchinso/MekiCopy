@@ -55,23 +55,23 @@ class TranslationActionTests(unittest.TestCase):
         region.assert_not_called()
         capture.assert_not_called()
 
-    def test_legacy_copy_flag_always_runs_translation_and_display(self) -> None:
+    def test_manual_ocr_runs_translation_and_display(self) -> None:
         for app_type in (mekicopy.MainWindow, mekicopy.DetachedOcrButtonApp):
             with self.subTest(app=app_type.__name__):
                 runner = mock.Mock()
                 runner.submit.return_value = True
                 window = SimpleNamespace(
-                    settings=AppSettings(realtime_ocr_enabled=False, overlay_translation_mode=False),
+                    settings=AppSettings(realtime_ocr_enabled=False),
                     _task_runner=runner,
                 )
                 image = object()
                 if app_type is mekicopy.MainWindow:
                     app_type._start_ocr_task(
                         window, image, source_button=mock.Mock(),
-                        simple_feedback=True, translate=False,
+                        simple_feedback=True,
                     )
                 else:
-                    app_type._start_ocr_task(window, image, translate=False)
+                    app_type._start_ocr_task(window, image)
                 operation = runner.submit.call_args.args[1]
                 with (
                     mock.patch.object(mekicopy, "recognize_image", return_value="こんにちは"),

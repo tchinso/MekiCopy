@@ -136,6 +136,18 @@ class HdTransInstallTests(unittest.TestCase):
         (self.install / "active.json").write_text('{"installation":"../../outside"}')
         self.assertEqual(download.resolve_installation(self.install), installed)
 
+    def test_non_object_pointer_falls_back_to_verified_generation(self) -> None:
+        installed = self.prepare()
+        for value in ([], None, "invalid"):
+            with self.subTest(value=value):
+                (self.install / "active.json").write_text(json.dumps(value))
+                self.assertEqual(download.resolve_installation(self.install), installed)
+
+    def test_non_object_install_manifest_is_rejected(self) -> None:
+        installed = self.prepare()
+        (installed / download.MANIFEST_NAME).write_text("[]")
+        self.assertFalse(download.validate_installation(installed))
+
     def test_retry_after_first_network_failure(self) -> None:
         installed = self.prepare()
         with mock.patch.object(download, "_download", side_effect=OSError("offline")):

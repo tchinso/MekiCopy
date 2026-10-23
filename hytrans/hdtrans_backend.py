@@ -38,11 +38,17 @@ def validate_dll_architecture(path: Path) -> None:
         if handle.read(2) != b"MZ":
             raise HdTransError("hdTransEngine.dll is not a valid Windows PE file")
         handle.seek(0x3C)
-        offset = struct.unpack("<I", handle.read(4))[0]
+        raw_offset = handle.read(4)
+        if len(raw_offset) != 4:
+            raise HdTransError("hdTransEngine.dll has a truncated DOS header")
+        offset = struct.unpack("<I", raw_offset)[0]
         handle.seek(offset)
         if handle.read(4) != b"PE\0\0":
             raise HdTransError("hdTransEngine.dll has an invalid PE header")
-        machine = struct.unpack("<H", handle.read(2))[0]
+        raw_machine = handle.read(2)
+        if len(raw_machine) != 2:
+            raise HdTransError("hdTransEngine.dll has a truncated PE header")
+        machine = struct.unpack("<H", raw_machine)[0]
     bits = ctypes.sizeof(ctypes.c_void_p) * 8
     expected = 0x14C if bits == 32 else (0xAA64 if platform.machine().lower() in {"arm64", "aarch64"} else 0x8664)
     names = {0x14C: "x86 (32-bit)", 0x8664: "x64 (64-bit)", 0xAA64: "ARM64"}
@@ -51,7 +57,7 @@ def validate_dll_architecture(path: Path) -> None:
 
 
 class NativeLibrary:
-    """Cdecl, UTF-8 and original-pointer ownership from v0.2.1 hdtrans.h."""
+    """Cdecl UTF-8 interface with explicit ownership of native output buffers."""
     def __init__(self, path: Path, *, loader: Callable[..., Any] | None = None) -> None:
         validate_dll_architecture(path)
         if not _NATIVE_LIBRARY_LOCK.acquire(blocking=False):
@@ -80,7 +86,7 @@ class NativeLibrary:
                 function.argtypes, function.restype = arguments, result
         except AttributeError as exc:
             self.close()
-            raise HdTransError("hdTrans DLL does not provide the required v0.2.1 C API") from exc
+            raise HdTransError("hdTrans DLL does not provide the required C API") from exc
 
     def initialize(self, dictionary: Path) -> None:
         # The native list is NUL separated with a double-NUL terminator.
@@ -214,6 +220,9 @@ class HdTransBackend:
             raise
 
     async def close(self) -> None:
+        if self._closing:
+            await asyncio.to_thread(self._thread.join)
+            return
         self._closing = True
         self.cancel_install.set()
         # Drain pending requests; the active call finishes before Terminate.
@@ -285,34 +294,52 @@ class HdTransBackend:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _initialize(self) -> dict[str, Any]:
+        if self._native is not None:
+            return self.status()
+        self._update(state="LOADING", phase="hdTrans 설치 확인", ready=False, complete=False, error=None)
+        installer = self._installer
+        if installer is None:
+            from .hdtrans_download import ensure_installation
+            installer = ensure_installation
+        self._install = Path(installer(cancel_event=self.cancel_install, progress=self._progress))
+        if self.cancel_install.is_set():
+            raise HdTransError("hdTrans 설치가 취소되었습니다.")
+        self._write_config(self.settings)
+        self._update(state="LOADING", phase="엔진 및 기본 사전 초기화")
+        native = self._library_factory(self._install / "hdTransEngine.dll")
+        try:
+            native.initialize(self._install / "hdTrans" / "dicts.hdsnap")
+            self._native = native
+            dictionary_version_path = self._install / "hdTrans" / "dicts.txt"
+            dictionary_version = dictionary_version_path.read_text(encoding="utf-8").strip() if dictionary_version_path.is_file() else None
+            self._update(version=native.version(), dictionaryVersion=dictionary_version,
+                         installationPath=str(self._install), userDictionaryError=native.diagnostics(),
+                         state="READY", phase="준비 완료", ready=True, complete=True, error=None)
+        except BaseException:
+            native.close()
+            self._native = None
+            raise
+        return self.status()
+
+    def _translate(self, native: NativeLibrary, text: str, owner: str, reset: bool) -> str:
+        if reset or self._reset_needed or not self.settings.preserve_context or owner != self._owner:
+            native.reset()
+            self._reset_needed = False
+        self._owner = owner
+        self._update(state="BUSY")
+        try:
+            result = native.translate(text).strip()
+            if not result:
+                raise HdTransError("hdTrans returned an empty translation")
+            self._update(userDictionaryError=native.diagnostics(), error=None)
+            return result
+        finally:
+            self._update(state="READY")
+
     def _execute(self, operation: str, *arguments: Any) -> Any:
         if operation == "initialize":
-            if self._native is not None:
-                return self.status()
-            self._update(state="LOADING", phase="hdTrans 설치 확인", ready=False, complete=False, error=None)
-            installer = self._installer
-            if installer is None:
-                from .hdtrans_download import ensure_installation
-                installer = ensure_installation
-            self._install = Path(installer(cancel_event=self.cancel_install, progress=self._progress))
-            if self.cancel_install.is_set():
-                raise HdTransError("hdTrans 설치가 취소되었습니다.")
-            self._write_config(self.settings)
-            self._update(state="LOADING", phase="엔진 및 기본 사전 초기화")
-            native = self._library_factory(self._install / "hdTransEngine.dll")
-            try:
-                native.initialize(self._install / "hdTrans" / "dicts.hdsnap")
-                self._native = native
-                dictionary_version_path = self._install / "hdTrans" / "dicts.txt"
-                dictionary_version = dictionary_version_path.read_text(encoding="utf-8").strip() if dictionary_version_path.is_file() else None
-                self._update(version=native.version(), dictionaryVersion=dictionary_version,
-                             installationPath=str(self._install), userDictionaryError=native.diagnostics(),
-                             state="READY", phase="준비 완료", ready=True, complete=True, error=None)
-            except BaseException:
-                native.close()
-                self._native = None
-                raise
-            return self.status()
+            return self._initialize()
         native = self._native
         if operation == "settings" and native is None:
             settings = normalize_settings(arguments[0])
@@ -323,20 +350,7 @@ class HdTransBackend:
         if native is None:
             raise HdTransError("hdTrans engine is not ready")
         if operation == "translate":
-            text, owner, reset = arguments
-            if reset or self._reset_needed or not self.settings.preserve_context or owner != self._owner:
-                native.reset()
-                self._reset_needed = False
-            self._owner = owner
-            self._update(state="BUSY")
-            try:
-                result = native.translate(text).strip()
-                if not result:
-                    raise HdTransError("hdTrans returned an empty translation")
-                self._update(userDictionaryError=native.diagnostics(), error=None)
-                return result
-            finally:
-                self._update(state="READY")
+            return self._translate(native, *arguments)
         if operation == "reset":
             native.reset()
             self._owner = None

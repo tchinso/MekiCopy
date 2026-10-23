@@ -167,3 +167,28 @@ class ManualTranslationHotkeyTests(unittest.TestCase):
             source_button=window.ocr_button,
             on_finished=window._on_global_hotkey_action_finished,
         )
+
+
+class HotkeyWorkerFailureTests(unittest.TestCase):
+    def test_registration_exception_completes_request(self):
+        import threading
+        import mekicopy_hotkey as hotkey
+        manager = hotkey.GlobalHotkeyManager()
+        request = hotkey._ConfigureRequest(True, parse_hotkey("B"), threading.Event())
+        manager._request_queue.put(request)
+        api = mock.Mock()
+        api.register.side_effect = OSError("registration failed")
+        manager._handle_configuration(HotkeyRegistrationState(), api)
+        self.assertTrue(request.done.is_set())
+        self.assertFalse(request.result.ok)
+        self.assertIn("registration failed", request.result.error)
+        manager.close()
+
+    def test_worker_start_failure_is_reported_and_retriable(self):
+        import mekicopy_hotkey as hotkey
+        manager = hotkey.GlobalHotkeyManager()
+        with mock.patch("mekicopy_hotkey.threading.Thread.start", side_effect=RuntimeError("no thread")):
+            self.assertFalse(manager._ensure_worker())
+        self.assertIsNone(manager._thread)
+        self.assertEqual(manager._startup_error, "no thread")
+        manager.close()

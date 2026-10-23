@@ -1,7 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+from build_runtime_data import ssl_runtime_data
 
 datas = [("MekiCopy.ico", ".")] if Path("MekiCopy.ico").exists() else []
+datas += ssl_runtime_data()
 common = dict(
     pathex=[], binaries=[], datas=datas,
     hookspath=[],

@@ -150,7 +150,12 @@ async def save_model_cache_file(raw_url: str, request: Request) -> dict[str, obj
     target.parent.mkdir(parents=True, exist_ok=True)
     spec = profile.files[relative_path]
 
-    request_size = int(request.headers.get("content-length", "0") or 0)
+    try:
+        request_size = int(request.headers.get("content-length", "0") or 0)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid Content-Length") from None
+    if request_size < 0:
+        raise HTTPException(status_code=400, detail="invalid Content-Length")
     if request_size and request_size != spec.size:
         raise HTTPException(
             status_code=400,
@@ -194,7 +199,13 @@ async def save_model_cache_file(raw_url: str, request: Request) -> dict[str, obj
                 # ASGI may provide very large chunks for the 1.3+ GiB model.
                 # Serialize writes through one worker thread so health and
                 # shutdown requests remain responsive during local caching.
-                await asyncio.to_thread(_write_and_hash_chunk, handle, digest, chunk)
+                write_task = asyncio.create_task(asyncio.to_thread(_write_and_hash_chunk, handle, digest, chunk))
+                try:
+                    await asyncio.shield(write_task)
+                except asyncio.CancelledError:
+                    # A running disk write owns the handle until it finishes.
+                    await write_task
+                    raise
         if total != spec.size:
             raise ValueError(
                 f"incomplete model file: expected {spec.size} bytes, received {total}"

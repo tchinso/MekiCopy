@@ -14,6 +14,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from runtime_paths import app_root
 
@@ -118,7 +119,9 @@ def _tool_names() -> tuple[str, str]:
     return f"ffmpeg{suffix}", f"ffprobe{suffix}"
 
 
-def resolve_media_tools() -> MediaTools:
+def resolve_media_tools(*, download: bool = False,
+                        progress: Callable[[float, str], None] | None = None,
+                        check_cancel: Callable[[], None] | None = None) -> MediaTools:
     """Find a bundled or system FFmpeg/FFprobe pair.
 
     MekiSubtitle deliberately shares STT, VAD, and translation models, but
@@ -140,6 +143,12 @@ def resolve_media_tools() -> MediaTools:
     ffprobe_path = shutil.which("ffprobe") or shutil.which(ffprobe_name)
     if ffmpeg_path and ffprobe_path:
         return MediaTools(ffmpeg=Path(ffmpeg_path), ffprobe=Path(ffprobe_path))
+
+    if download:
+        from media_tools_download import ensure_media_tools
+
+        directory = ensure_media_tools(progress=progress, check_cancel=check_cancel)
+        return MediaTools(ffmpeg=directory / ffmpeg_name, ffprobe=directory / ffprobe_name)
 
     looked = ", ".join(str(path) for path in searched)
     raise FileNotFoundError(

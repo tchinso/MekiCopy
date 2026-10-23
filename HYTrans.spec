@@ -1,11 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+from build_runtime_data import ssl_runtime_data
+from release_packaging import browser_runtime_data
 
 from PyInstaller.utils.hooks import collect_submodules
 
-datas = []
-if Path("assets").exists():
-    datas.append(("assets", "assets"))
+datas = ssl_runtime_data()
+datas += browser_runtime_data(Path("assets"))
 if Path("MekiCopy.ico").exists():
     datas.append(("MekiCopy.ico", "."))
 

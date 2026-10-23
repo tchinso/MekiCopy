@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 from hytrans.hdtrans_backend import HdTransBackend
+from hytrans.hdtrans_download import VERSION
 from hytrans.hdtrans_settings import HdTransSettings
 
 
@@ -40,7 +41,7 @@ class RealHdTransTests(unittest.IsolatedAsyncioTestCase):
         return await self.backend.submit("translate", text, owner, False)
 
     async def test_utf8_translation_version_and_native_ready(self):
-        self.assertEqual(self.backend.status()["version"], "0.2.1")
+        self.assertEqual(self.backend.status()["version"], VERSION)
         self.assertTrue(self.backend.status()["ready"])
         self.assertFalse(self.backend.status()["workerConnected"])
         self.assertTrue(await self.translate("今日はいい天気ですね。"))

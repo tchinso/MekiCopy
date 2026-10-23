@@ -19,10 +19,12 @@ class DisplayReceipts:
     def __init__(self, limit: int = 128) -> None:
         self.lock = threading.RLock()
         self.items: OrderedDict[str, DisplayReceipt] = OrderedDict()
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("receipt limit must be a positive integer")
         self.limit = limit
 
     def create(self, request_id: str) -> DisplayReceipt:
-        if not request_id or len(request_id) > 160:
+        if not isinstance(request_id, str) or not request_id or len(request_id) > 160:
             raise ValueError("requestId must contain 1 to 160 characters")
         with self.lock:
             if request_id in self.items:

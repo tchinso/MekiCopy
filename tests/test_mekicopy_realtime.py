@@ -361,7 +361,7 @@ class RealtimeSettingsTests(unittest.TestCase):
                     self.assertEqual(loaded.realtime_ocr_enabled, enabled)
                     self.assertEqual(loaded.realtime_ocr_interval, interval)
 
-    def test_legacy_settings_and_invalid_intervals_remain_compatible(self):
+    def test_settings_defaults_and_invalid_intervals(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.cfg"
             path.write_text("[settings]\nmain_always_on_top = true\n", encoding="utf-8")
@@ -578,9 +578,6 @@ class RealtimeUiEntryTests(unittest.TestCase):
         detached._realtime_locked = False
         self.assertEqual(self.app.DetachedOcrButtonApp.ocr_action_label(detached), "실시간 번역 모드 사용 중")
         detached.settings.realtime_ocr_enabled = False
-        self.assertEqual(self.app.DetachedOcrButtonApp.ocr_action_label(detached), "번역 후 표시")
-        # Old settings must never restore the removed clipboard-only action.
-        detached.settings.overlay_translation_mode = False
         self.assertEqual(self.app.DetachedOcrButtonApp.ocr_action_label(detached), "번역 후 표시")
 
     def test_global_hotkey_is_blocked_for_entire_active_session(self):

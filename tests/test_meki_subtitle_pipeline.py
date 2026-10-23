@@ -75,6 +75,25 @@ class MekiSubtitlePathTests(unittest.TestCase):
 
 
 class MekiSubtitlePipelineTests(unittest.TestCase):
+    def test_positional_only_translator_options_are_not_passed_as_keywords(self):
+        def translate(text, timeout=7, /):
+            return f"{text}:{timeout}"
+
+        self.assertEqual(
+            pipeline._call_translation(translate, "test", timeout=12, cancel_event=None),
+            "test:7",
+        )
+
+    def test_failed_srt_publication_keeps_destination_and_cleans_temporary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "result.srt"
+            path.write_text("original", encoding="utf-8")
+            with mock.patch.object(pipeline.os, "replace", side_effect=PermissionError):
+                with self.assertRaises(PermissionError):
+                    pipeline.write_srt_atomic([pipeline.SubtitleEntry(0, 1, "new")], path)
+            self.assertEqual(path.read_text(encoding="utf-8"), "original")
+            self.assertEqual(list(path.parent.iterdir()), [path])
+
     def test_prepare_stt_models_passes_the_shared_capture_root(self) -> None:
         owner = Path("C:/suite/MekiAudioCapture")
         model_root = owner / "models"

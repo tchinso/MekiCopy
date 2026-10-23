@@ -1015,7 +1015,6 @@ class SettingsWindow(tk.Toplevel):
             detached_geometry=detached_geometry,
             detached_fixed_width=current.detached_fixed_width,
             detached_fixed_height=current.detached_fixed_height,
-            overlay_translation_mode=True,
             realtime_ocr_enabled=self.realtime_ocr_enabled_var.get(),
             realtime_ocr_interval=normalize_interval(self.realtime_ocr_interval_var.get()),
             hytrans_backend=backend,

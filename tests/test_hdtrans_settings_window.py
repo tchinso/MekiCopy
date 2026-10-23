@@ -13,6 +13,7 @@ from unittest import mock
 
 import hdtrans_settings_window as ui
 from hytrans.hdtrans_settings import HdTransSettings
+from hytrans.hdtrans_download import DICTIONARY_VERSION, VERSION
 
 
 class ImmediateTasks:
@@ -68,8 +69,8 @@ class HdTransSettingsUiTests(unittest.TestCase):
         self.root.settings = SimpleNamespace(hytrans_port=6996)
         self.root._begin_hytrans_restart = mock.Mock(return_value=False)
         self.root._launch_hytrans = mock.Mock()
-        self.status = {"ready": True, "state": "READY", "version": "0.2.1",
-                       "dictionaryVersion": "0.2.1+c9ab89c732ad", "userDictionaryError": None}
+        self.status = {"ready": True, "state": "READY", "version": VERSION,
+                       "dictionaryVersion": DICTIONARY_VERSION, "userDictionaryError": None}
         self.request = mock.Mock(return_value=self.status)
         for patcher in (
             mock.patch.object(ui, "TkTaskRunner", ImmediateTasks),
@@ -124,7 +125,7 @@ class HdTransSettingsUiTests(unittest.TestCase):
         self.assertTrue(self.request.call_args_list[-1].args[0].endswith("/hdtrans/reload"))
         self.assertIn("사용자 사전 진단", self.window.error_var.get())
         self.assertIn(":3: missing tab", self.window.error_var.get())
-        self.assertIn("엔진 0.2.1", self.window.status_var.get())
+        self.assertIn(f"엔진 {VERSION}", self.window.status_var.get())
 
     def test_absent_server_saves_options_for_next_start(self):
         self.request.side_effect = urllib.error.URLError("server absent")

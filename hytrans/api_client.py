@@ -169,6 +169,8 @@ class ApiTranslationQueue:
     """Bound both paid API requests in flight and retained waiting requests."""
 
     def __init__(self, translator: ApiTranslator, *, concurrency: int = 2, max_queued_jobs: int = 16) -> None:
+        if concurrency < 1 or max_queued_jobs < 1:
+            raise ValueError("concurrency and max_queued_jobs must be at least 1")
         self.translator = translator
         self.queue: asyncio.Queue[_ApiJob] = asyncio.Queue(maxsize=max_queued_jobs)
         self.tasks: list[asyncio.Task] = []
@@ -176,12 +178,18 @@ class ApiTranslationQueue:
         self.stopped = False
 
     def start(self) -> None:
+        if self.stopped:
+            raise RuntimeError("a stopped API translation queue cannot be restarted")
+        if self.tasks:
+            return
         self.tasks = [asyncio.create_task(self._run()) for _ in range(self.concurrency)]
 
     async def submit(self, text: str, *, source: str = "Japanese", target: str = "Korean",
                      max_new_tokens: int = 2048) -> str:
         if self.stopped:
             raise ApiTranslationError("Translation API server is stopping", status_code=503)
+        if not self.tasks:
+            raise ApiTranslationError("Translation API server is not started", status_code=503)
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         job = _ApiJob(text, source, target, max_new_tokens, future)
         try:

@@ -1,10 +1,4 @@
-"""Verified, pinned hdTrans bundles shared by portable Lite and Full editions.
-
-Only the reviewed release below is installable. A newer GitHub release is
-reported by the update check, but cannot silently change the C API or snapshot
-format. Installations are immutable generations; changing active.json never
-overwrites a DLL that another HYTrans process has loaded.
-"""
+"""Verified hdTrans bundles installed as immutable, atomically activated generations."""
 from __future__ import annotations
 
 import argparse
@@ -26,36 +20,36 @@ from typing import Callable, Iterator
 from runtime_paths import exclusive_file_lock, writable_app_subdir
 from .paths import app_root
 
-VERSION = "0.2.1"
-TAG = "v0.2.1"
-SOURCE_COMMIT = "afc752d4ccf2534b2fe206760435214902ce3c68"
-DICTIONARY_VERSION = "0.2.1+c9ab89c732ad"
-RELEASE_URL = "https://github.com/sokcuri/hdTrans/releases/tag/v0.2.1"
-ARCHIVE_URL = "https://github.com/sokcuri/hdTrans/releases/download/v0.2.1/hdTrans-0.2.1-windows.zip"
-ARCHIVE_SHA256 = "5825082c11fb96aab7492f1f11dac3119e440d1132f85605b95e838c2cc54fc3"
-ARCHIVE_SIZE = 27582747
-SOURCE_URL = "https://codeload.github.com/sokcuri/hdTrans/zip/refs/tags/v0.2.1"
-SOURCE_SHA256 = "273e6f7d77fa3df75b5b0d9172b1ac0d5698e649645574f40103487c6052e7cd"
-SOURCE_SIZE = 24739033
+VERSION = "0.4.4"
+TAG = "v0.4.4"
+SOURCE_COMMIT = "f6b142c7464aa1886c6bad73a3aa5a6e7895a45c"
+DICTIONARY_VERSION = "0.4.4+cf1c9b493625"
+RELEASE_URL = "https://github.com/sokcuri/hdTrans/releases/tag/v0.4.4"
+ARCHIVE_URL = "https://github.com/sokcuri/hdTrans/releases/download/v0.4.4/hdTrans-0.4.4-windows.zip"
+ARCHIVE_SHA256 = "0ee4407dc6cc1e6269f0100198d3597e092778cc55b9db9b94082bc1ca66db56"
+ARCHIVE_SIZE = 26587697
+SOURCE_URL = "https://codeload.github.com/sokcuri/hdTrans/zip/refs/tags/v0.4.4"
+SOURCE_SHA256 = "a618fd4d8334156d8e16cfd3f32ace36f7fda5d3457c2658fddf388ec99583c3"
+SOURCE_SIZE = 25215037
 MANIFEST_NAME = "install-manifest.json"
-SOURCE_NAME = "hdTrans-v0.2.1-source.zip"
+SOURCE_NAME = "hdTrans-v0.4.4-source.zip"
 Progress = Callable[[dict], None]
 
 # Hashes of individual files extracted from the release ZIP whose published
 # SHA256SUMS/GitHub asset digest is pinned above. These also detect disk damage
 # and deliberately reject mixing snapshots or DLLs from different releases.
 COMMON_FILES = {
-    "hdTrans/dicts.hdsnap": (36085943, "d282a66d43bde0f9508596e25b7fb83dd5232c4720908dba0f816e03ceba1235"),
-    "hdTrans/dicts.txt": (19, "5fa13cac88b1f2d4818ce418c9e42ecfa101fdb3a6e753608d5590ac9d7223a6"),
+    "hdTrans/dicts.hdsnap": (36579732, "366d393b5f0517baa492424e528ecf3b6f928a117f890e77a9a00bf0d7ec56c2"),
+    "hdTrans/dicts.txt": (19, "b37afa939cf1825164e46fc59abc622c7861e22f5acc9bc76a83c4f153ddc301"),
     "LICENSE": (34524, "8d56b405468aad11f87ab5763f901e276e08d9646ff5c8481b1762b6b789e9ed"),
     "THIRD-PARTY-NOTICES.txt": (13556, "54ce84c3871fac6ddccdfcbb7878af752eeff096e3c727b814aec6db6d1fbd51"),
-    "hdTrans/user/hdtrans.config.example.yaml": (541, "6cc83803d9f30c675380ac022d0e054ea5365ee5eaebdeb8bd17a300e35f866f"),
+    "hdTrans/user/hdtrans.config.example.yaml": (656, "6ae2ffca034ab62f1855e104a5f4bc9ba49207cc77c221d562751d45def7094b"),
     "hdTrans/user/userdict.example.txt": (653, "eafb14d2d554e6f2199dc9e7567543058c14b32043096a189e5202103c6a393c"),
     SOURCE_NAME: (SOURCE_SIZE, SOURCE_SHA256),
 }
 DLL_FILES = {
-    "x64": ("hdTransEngine.dll", 4599296, "f8fcca95c38cc5e538c1a6e6d4c6ec3fce1d04d44e3a5c2c970b245cb6117a15"),
-    "x86": ("hdTransEngine_x86.dll", 3820032, "c1d56ecb5b0c92750568321e0535e02b49db4f9a7220945b6c7f66cd2c3444de"),
+    "x64": ("hdTransEngine.dll", 3688960, "a82968803d37a9fcd471be1e25c00fecbcf57270e518291fd4ef8fda213b87ee"),
+    "x86": ("hdTransEngine_x86.dll", 2946048, "a78e22c248c3a981ac773548a6da509f349b6012dd6d80936e7be25eff32d8cf"),
 }
 _verified: dict[tuple[str, tuple], bool] = {}
 _verify_lock = threading.RLock()
@@ -120,6 +114,8 @@ def _hash(path: Path) -> str:
 def validate_installation(path: Path, *, rehash: bool = False) -> bool:
     try:
         manifest = json.loads((path / MANIFEST_NAME).read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict):
+            return False
         if (manifest.get("version"), manifest.get("dictionaryVersion"), manifest.get("architecture"),
                 manifest.get("archiveSha256"), manifest.get("sourceCommit")) != (
                 VERSION, DICTIONARY_VERSION, architecture(), ARCHIVE_SHA256, SOURCE_COMMIT):
@@ -150,6 +146,8 @@ def validate_installation(path: Path, *, rehash: bool = False) -> bool:
 def _selected(root: Path) -> Iterator[Path]:
     try:
         active = json.loads((root / "active.json").read_text(encoding="utf-8"))
+        if not isinstance(active, dict):
+            raise ValueError("Invalid active installation pointer")
         name = str(active["installation"])
         if name and Path(name).name == name and name not in {".", ".."}:
             yield root / "installations" / name

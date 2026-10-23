@@ -20,6 +20,7 @@ import urllib.error
 import urllib.request
 from companion_http import urlopen
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -28,6 +29,7 @@ import numpy as np
 
 from meki_subtitle_paths import MediaTools, resolve_media_tools, shared_audio_capture_app_root, shared_stt_model_root
 from runtime_paths import writable_app_subdir
+from process_output import iter_process_lines
 
 
 SAMPLE_RATE = 16_000
@@ -115,6 +117,7 @@ def probe_media(input_path: Path, ffprobe_path: Path) -> MediaInfo:
         errors="replace",
         creationflags=_creation_flags(),
         check=False,
+        timeout=60,
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or "FFprobe가 파일을 읽지 못했습니다."
@@ -126,12 +129,15 @@ def probe_media(input_path: Path, ffprobe_path: Path) -> MediaInfo:
             raise ValueError("audio stream missing")
         stream = streams[0]
         raw_duration = stream.get("duration") or payload.get("format", {}).get("duration")
+        duration = float(raw_duration or 0.0)
+        if not math.isfinite(duration):
+            raise ValueError("non-finite media duration")
         return MediaInfo(
-            duration=max(0.0, float(raw_duration or 0.0)),
+            duration=max(0.0, duration),
             audio_stream_index=int(stream.get("index", 0)),
             codec_name=str(stream.get("codec_name") or "unknown"),
         )
-    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError, KeyError, AttributeError) as exc:
         raise RuntimeError("영상에서 오디오 스트림 정보를 확인할 수 없습니다.") from exc
 
 
@@ -191,17 +197,10 @@ def extract_original_audio(
         errors="replace",
         creationflags=_creation_flags(),
     )
-    messages: list[str] = []
+    messages: deque[str] = deque(maxlen=8)
     assert process.stdout is not None
     try:
-        while True:
-            _check_cancel(cancel_event)
-            line = process.stdout.readline()
-            if not line:
-                if process.poll() is not None:
-                    break
-                time.sleep(0.02)
-                continue
+        for line in iter_process_lines(process.stdout, lambda: _check_cancel(cancel_event)):
             line = line.strip()
             if not line:
                 continue
@@ -216,7 +215,13 @@ def extract_original_audio(
                     pass
             elif key not in {"progress", "bitrate", "speed", "total_size"}:
                 messages.append(line)
-        return_code = process.wait()
+        while True:
+            _check_cancel(cancel_event)
+            try:
+                return_code = process.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                pass
     except BaseException:
         if process.poll() is None:
             process.terminate()
@@ -230,7 +235,7 @@ def extract_original_audio(
         process.stdout.close()
 
     if return_code != 0 or not wav_path.is_file() or wav_path.stat().st_size <= 44:
-        detail = "\n".join(messages[-8:]).strip()
+        detail = "\n".join(messages).strip()
         raise RuntimeError(detail or "FFmpeg 오디오 추출에 실패했습니다.")
     _status(progress, 1.0, "원본 오디오 추출을 완료했습니다.")
 
@@ -274,12 +279,9 @@ def prepare_stt_models(
 
 
 def _remove_overlap(previous: str, current: str, limit: int = 40) -> str:
-    previous = previous.strip()
-    current = current.strip()
-    for length in range(min(limit, len(previous), len(current)), 1, -1):
-        if previous[-length:] == current[:length]:
-            return current[length:].lstrip()
-    return current
+    from audio_capture_core import remove_overlap
+
+    return remove_overlap(previous, current, limit)
 
 
 def _recognize_segments(
@@ -347,10 +349,16 @@ def _call_translation(
             parameter.kind == inspect.Parameter.VAR_KEYWORD
             for parameter in parameters.values()
         )
-        if accepts_keywords or "timeout" in parameters:
-            kwargs["timeout"] = timeout
-        if accepts_keywords or "cancel_event" in parameters:
-            kwargs["cancel_event"] = cancel_event
+        for name, value in (("timeout", timeout), ("cancel_event", cancel_event)):
+            parameter = parameters.get(name)
+            if accepts_keywords or (
+                parameter is not None
+                and parameter.kind in {
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                }
+            ):
+                kwargs[name] = value
     except (TypeError, ValueError):
         # Callable objects without a discoverable signature follow the simple
         # one-argument contract.
@@ -389,7 +397,7 @@ def translate_via_hytrans(
     except urllib.error.URLError as exc:
         raise RuntimeError("HYTrans에 연결할 수 없습니다. HYTrans를 먼저 실행해 주세요.") from exc
     _check_cancel(cancel_event)
-    if payload.get("ok") is not True:
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
         raise RuntimeError(f"HYTrans 번역이 실패했습니다: {payload}")
     translated = str(payload.get("text") or "").strip()
     if not translated:
@@ -440,7 +448,6 @@ def write_srt_atomic(entries: Iterable[SubtitleEntry], destination: Path) -> int
     """Publish UTF-8-BOM SRT only after the complete job succeeds."""
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
     blocks: list[str] = []
     for entry in entries:
         text = _clean_subtitle_text(entry.korean)
@@ -450,8 +457,21 @@ def write_srt_atomic(entries: Iterable[SubtitleEntry], destination: Path) -> int
         start = _srt_timestamp(entry.start_time)
         end = _srt_timestamp(max(entry.start_time + 0.001, entry.end_time))
         blocks.append(f"{index}\n{start} --> {end}\n{text}\n")
-    temporary.write_text("\n".join(blocks), encoding="utf-8-sig", newline="\n")
-    os.replace(temporary, destination)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8-sig", newline="\n",
+            dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp",
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            output.write("\n".join(blocks))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return len(blocks)
 
 
@@ -505,7 +525,11 @@ def process_video(
 
     selected_model = normalize_stt_model(stt_model or _default_model_key())
     model_name = _model_label(selected_model)
-    tools = media_tools or resolve_media_tools()
+    tools = media_tools or resolve_media_tools(
+        download=True,
+        progress=lambda ratio, message: _status(status, ratio * 0.01, message),
+        check_cancel=lambda: _check_cancel(cancel_event),
+    )
     _check_cancel(cancel_event)
     _status(status, 0.0, "MekiAudioCapture 공용 음성 모델을 확인하고 있습니다.")
 

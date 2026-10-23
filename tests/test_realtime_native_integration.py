@@ -18,14 +18,16 @@ import time
 import unittest
 from unittest import mock
 
+from hytrans.hdtrans_download import VERSION
+
 
 @unittest.skipUnless(os.name == "nt", "requires the actual Windows hdTrans DLL")
 class NativeRealtimeIntegrationTests(unittest.TestCase):
     def test_real_native_translation_tk_ack_dedup_and_late_result_cancellation(self):
         installed = (Path(__file__).resolve().parents[1] / ".cache" / "hdtrans" / "full"
-                     / "installations" / "0.2.1-windows-x64")
+                     / "installations" / f"{VERSION}-windows-x64")
         if not (installed / "hdTransEngine.dll").is_file():
-            self.skipTest("validated local hdTrans v0.2.1 payload is not present; no downloads in tests")
+            self.skipTest(f"validated local hdTrans {VERSION} payload is not present; no downloads in tests")
         import tkinter as tk
         from http.server import ThreadingHTTPServer
         from urllib.parse import urlsplit

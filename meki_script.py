@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-import json
 import os
 import queue
 import sys
@@ -12,6 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 from app_identity import apply_tk_icon, set_windows_app_id
+from companion_json import MAX_REQUEST_BYTES, read_json as _read_json, write_json as _write_json
+from display_config import apply_display_config, normalize_font_name, validate_display_colors
 from companion_liveness import UiHeartbeat
 from companion_manual_close import MANUAL_CLOSE_EXIT_CODE, publish_manual_close_signal
 from runtime_paths import prepare_tk_environment
@@ -35,11 +36,8 @@ from tkinter import messagebox
 
 DEFAULT_PORT = SCRIPT_DEFAULT_PORT
 DEFAULT_GEOMETRY = "780x560+120+120"
-MAX_REQUEST_BYTES = 1024 * 1024
 
 
-def normalize_font_name(value: str) -> str:
-    return str(value).strip().lstrip("@").strip() or "Malgun Gothic"
 
 
 @dataclass
@@ -56,23 +54,7 @@ class ScriptConfig:
     debug_log: bool = False
 
     def update(self, data: dict[str, Any]) -> None:
-        for key in self.__dataclass_fields__:
-            if key not in data:
-                continue
-            value = data[key]
-            if key == "topmost":
-                value = bool(value)
-            elif key == "debug_log":
-                value = bool(value)
-            elif key == "opacity":
-                value = max(0.1, min(1.0, float(value)))
-            elif key.endswith("_size"):
-                value = max(8, min(96, int(value)))
-            elif key.endswith("_font"):
-                value = normalize_font_name(str(value))
-            else:
-                value = str(value)
-            setattr(self, key, value)
+        apply_display_config(self, data)
         set_debug_enabled(self.debug_log)
 
 
@@ -370,15 +352,19 @@ class ScriptWindow:
             except queue.Empty:
                 break
             handled_event = True
-            if kind == "append":
-                self._append(payload)
-            elif kind == "translation":
-                self._translation(payload)
-            elif kind == "config":
-                self.config.update(payload)
-                self.apply_config()
-            elif kind == "clear":
-                self._clear_transcript()
+            try:
+                if kind == "append":
+                    self._append(payload)
+                elif kind == "translation":
+                    self._translation(payload)
+                elif kind == "config":
+                    validate_display_colors(self.root, payload)
+                    self.config.update(payload)
+                    self.apply_config()
+                elif kind == "clear":
+                    self._clear_transcript()
+            except Exception as exc:
+                log_error("ui_event", exc)
         self.root.after(
             (
                 self.ACTIVE_EVENT_POLL_MS
@@ -401,33 +387,6 @@ class ScriptWindow:
             except Exception as exc:
                 log_error("manual_close_signal", exc)
         self.root.destroy()
-
-
-def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
-    try:
-        if handler.headers.get("Transfer-Encoding"):
-            raise ValueError("청크 인코딩 요청은 지원하지 않습니다.")
-        length = int(handler.headers.get("Content-Length", "0") or 0)
-    except ValueError:
-        handler.close_connection = True
-        raise
-    if length < 0 or length > MAX_REQUEST_BYTES:
-        handler.close_connection = True
-        raise ValueError("요청 본문이 너무 큽니다.")
-    raw = handler.rfile.read(length) if length else b"{}"
-    if length and len(raw) != length:
-        handler.close_connection = True
-        raise ValueError("요청 본문이 완전하지 않습니다.")
-    return json.loads(raw.decode("utf-8"))
-
-
-def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(data)))
-    handler.end_headers()
-    handler.wfile.write(data)
 
 
 def make_handler(
@@ -487,6 +446,8 @@ def make_handler(
                 _write_json(self, 200, {"ok": True})
             except (ConnectionError, TimeoutError):
                 self.close_connection = True
+            except (ValueError, TypeError) as exc:
+                _write_json(self, 400, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 log_error("http_request", exc)
                 _write_json(self, 500, {"ok": False, "error": str(exc)})

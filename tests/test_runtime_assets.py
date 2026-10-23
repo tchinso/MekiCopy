@@ -13,7 +13,7 @@ ASSETS = ROOT / "assets"
 class RuntimeAssetManifestTests(unittest.TestCase):
     def test_manifest_versions_and_file_hashes(self) -> None:
         manifest = json.loads((ASSETS / "runtime_manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["transformers"]["version"], "4.3.0")
+        self.assertEqual(manifest["transformers"]["version"], "4.3.1")
         self.assertEqual(manifest["transformers"]["buildOverride"]["onnxRuntimeWeb"], "1.30.0")
         self.assertEqual(manifest["onnxRuntimeWeb"]["version"], "1.30.0")
 

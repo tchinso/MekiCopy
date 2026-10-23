@@ -526,7 +526,13 @@ class MekiSubtitleWindow(tk.Toplevel):
             name="MekiSubtitle-Job",
             daemon=False,
         )
-        self._worker.start()
+        try:
+            self._worker.start()
+        except Exception as exc:
+            self._worker = None
+            self._set_running(False)
+            self.status_var.set("자막 작업을 시작하지 못했습니다.")
+            messagebox.showerror("MekiSubtitle", str(exc), parent=self)
 
     def _emit_status(self, ratio: float, message: str) -> None:
         # Progress is naturally superseded by the newest value.  Keeping only
@@ -603,7 +609,7 @@ class MekiSubtitleWindow(tk.Toplevel):
                     last_message = message
             if time.monotonic() >= deadline:
                 raise TimeoutError("HYTrans 번역 모델 준비 시간이 10분을 초과했습니다.")
-            time.sleep(0.35)
+            self._cancel_event.wait(0.35)
 
     def _translate(self, text: str, *, timeout: float = 600.0, cancel_event=None,
                    context_owner: str | None = None) -> str:

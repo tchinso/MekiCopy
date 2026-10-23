@@ -30,6 +30,14 @@ class MekiScriptServerTests(unittest.TestCase):
         handler.statuses = statuses
         return handler
 
+    def test_non_object_request_is_rejected_before_enqueue(self) -> None:
+        window = SimpleNamespace(enqueue=mock.Mock())
+        for payload in (None, [], "text", 1):
+            with self.subTest(payload=payload):
+                handler = self._post_handler(window, payload)
+                self.assertEqual(handler.statuses, [400])
+        window.enqueue.assert_not_called()
+
     def test_full_ui_queue_returns_retryable_failure_to_the_producer(self) -> None:
         window = SimpleNamespace(enqueue=mock.Mock(return_value=False))
         payload = {"id": "entry-1", "text": "こんにちは"}

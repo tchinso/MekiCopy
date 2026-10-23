@@ -24,6 +24,7 @@ class TranslationJob:
     text: str
     future: asyncio.Future[str]
     created_at: float
+    deadline: float | None = None
     max_new_tokens: int | None = None
     source_language: str | None = None
     target_language: str | None = None
@@ -207,6 +208,7 @@ class TranslationQueue:
             text=text,
             future=loop.create_future(),
             created_at=time.time(),
+            deadline=loop.time() + timeout,
             max_new_tokens=max_new_tokens,
             source_language=source_language,
             target_language=target_language,
@@ -266,11 +268,30 @@ class TranslationQueue:
                 job.abandoned = True
                 if not job.future.done():
                     job.future.cancel()
+            else:
+                job.future.add_done_callback(
+                    lambda future: None if future.cancelled() else future.exception()
+                )
             raise
+
+    async def _dispatch(self, job: TranslationJob, payload: dict[str, Any]) -> None:
+        """Keep the deadline active even after the HTTP caller disconnects."""
+        remaining = max(0, job.deadline - asyncio.get_running_loop().time()) if job.deadline is not None else None
+        try:
+            async with asyncio.timeout(remaining):
+                await job.worker_ws.send_text(json.dumps(payload, ensure_ascii=False))
+                await asyncio.shield(job.future)
+        except TimeoutError:
+            if not job.future.done():
+                job.future.set_exception(TimeoutError("translation worker deadline exceeded"))
+            websocket = self.invalidate_worker(job.worker_ws, reason="translation worker deadline exceeded")
+            await self._close_invalidated_worker(websocket)
 
     async def run(self, default_max_new_tokens: int) -> None:
         if self._stopped:
             return
+        if self.running:
+            raise RuntimeError("translation queue already has a worker task")
         self.running = True
         try:
             while True:
@@ -302,13 +323,15 @@ class TranslationQueue:
                         payload["sourceLanguage"] = job.source_language
                     if job.target_language is not None:
                         payload["targetLanguage"] = job.target_language
-                    await worker.send_text(json.dumps(payload, ensure_ascii=False))
-                    await asyncio.shield(job.future)
+                    await self._dispatch(job, payload)
                 except asyncio.CancelledError:
                     # A job future can be cancelled independently (for example, a
                     # timed-out queued request).  That must not stop the worker
                     # task.  Cancellation of the worker task itself still exits.
-                    if job.future.cancelled():
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
+                    if isinstance(job, TranslationJob) and job.future.cancelled():
                         debug("queue_job_cancelled", f"id: {job.id}")
                         continue
                     raise

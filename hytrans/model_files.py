@@ -367,8 +367,7 @@ def is_complete_model(
     )
 
 
-# Backward-compatible aliases describe the default profile only. Runtime code
-# must call active_model_profile() rather than importing these static values.
+# Default profile metadata. Runtime selection uses active_model_profile().
 MODEL_ID = MT15_PROFILE.model_id
 MODEL_REVISION = MT15_PROFILE.revision
 MODEL_FILE_SPECS = MT15_PROFILE.files

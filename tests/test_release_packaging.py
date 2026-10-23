@@ -19,6 +19,17 @@ class ReleaseReuseTests(unittest.TestCase):
                 with mock.patch.object(packaging, "sha256_file", side_effect=AssertionError("unexpected rehash")):
                     packaging.verify_lite_build(root, root)
 
+    def test_changed_dependency_cannot_reuse_a_lite_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "MekiCopy.exe").write_bytes(b"runtime")
+            with mock.patch.object(packaging, "source_fingerprint", return_value="source"):
+                with mock.patch.object(packaging, "installed_dependencies", return_value={"package": "1"}):
+                    packaging.write_build_manifest(root, root, "Lite")
+                with mock.patch.object(packaging, "installed_dependencies", return_value={"package": "2"}):
+                    with self.assertRaisesRegex(ValueError, "dependencies changed"):
+                        packaging.verify_lite_build(root, root)
+
     def test_changed_source_cannot_reuse_an_older_lite_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -81,7 +92,7 @@ class ReleaseReuseTests(unittest.TestCase):
 
 
 class ReleaseFlavorParityTests(unittest.TestCase):
-    def test_full_may_add_only_model_and_magpie_payloads(self) -> None:
+    def test_full_may_add_only_optional_runtime_and_model_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             lite, full = root / "Lite", root / "Full"
@@ -91,9 +102,11 @@ class ReleaseFlavorParityTests(unittest.TestCase):
                 (directory / "MekiCopy.exe").write_bytes(b"runtime")
             for relative in (
                 "HYTrans/models/owner/model/model.onnx",
-                "HYTrans/hdtrans/installations/0.2.1-windows-x64/hdTransEngine.dll",
+                "HYTrans/hdtrans/installations/0.4.4-windows-x64/hdTransEngine.dll",
                 "MekiAudioCapture/models/vad/vad.onnx",
                 "MekiCopy/_internal/runtime_models/meikiocr/ocr.onnx",
+                "MekiCopy/_internal/nvidia/cudnn/bin/cudnn64_9.dll",
+                "MekiCopy/_internal/assets/ffmpeg/ffmpeg.exe",
                 "MagPie/MagPie.exe",
             ):
                 path = full / relative
@@ -114,6 +127,91 @@ class ReleaseFlavorParityTests(unittest.TestCase):
             (full / "MekiCopy.exe").write_bytes(b"changed")
             with self.assertRaisesRegex(ValueError, "contents differ"):
                 packaging.verify_flavor_parity(lite, full)
+
+
+class BrowserRuntimeValidationTests(unittest.TestCase):
+    def test_browser_packaging_ignores_unlisted_optional_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[1] / "assets/runtime_manifest.json"
+            manifest = json.loads(source.read_text(encoding="utf-8"))
+            for item in manifest["files"]:
+                path = root / item["path"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fixture")
+                item.update(size=path.stat().st_size, sha256=packaging.sha256_file(path))
+            (root / "runtime_manifest.json").write_text(json.dumps(manifest))
+            (root / "ffmpeg").mkdir()
+            (root / "ffmpeg/ffmpeg.exe").write_bytes(b"optional")
+            selected = packaging.browser_runtime_data(root)
+            self.assertEqual(len(selected), len(manifest["files"]) + 1)
+            self.assertFalse(any("ffmpeg" in path for path, _ in selected))
+            self.assertIn((str(root / "wasm/ort-wasm-simd-threaded.wasm"), "assets/wasm"), selected)
+
+    def test_checked_in_runtime_assets_match_manifest(self) -> None:
+        packaging.verify_runtime_assets(Path(__file__).resolve().parents[1] / "assets")
+
+    def test_mixed_runtime_versions_are_rejected_before_reading_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = {
+                "transformers": {"buildOverride": {"onnxRuntimeWeb": "1.30.0"}},
+                "onnxRuntimeWeb": {"version": "1.29.0"},
+            }
+            (root / "runtime_manifest.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "versions disagree"):
+                packaging.verify_runtime_assets(root)
+
+    def test_missing_browser_entry_point_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = {
+                "transformers": {"buildOverride": {"onnxRuntimeWeb": "1.30.0"}},
+                "onnxRuntimeWeb": {"version": "1.30.0"}, "files": [],
+            }
+            (root / "runtime_manifest.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "missing or duplicate"):
+                packaging.verify_runtime_assets(root)
+
+
+class LiteOptionalPayloadTests(unittest.TestCase):
+    def test_optional_payloads_are_rejected_in_every_companion(self) -> None:
+        for relative in (
+            "HYTrans/_internal/assets/ffmpeg/ffmpeg.exe",
+            "MekiAudioCapture/_internal/ffprobe.exe",
+            "MekiDisplay/_internal/nvidia/licenses/license.txt",
+            "HYTrans/_internal/cudart64_13.dll",
+        ):
+            with self.subTest(relative=relative):
+                with self.assertRaisesRegex(ValueError, "Full-only payload"):
+                    packaging.verify_lite_optional_payloads({relative: Path(relative)})
+
+    def test_common_onnx_provider_and_opencv_media_helper_are_allowed(self) -> None:
+        names = (
+            "MekiCopy/_internal/onnxruntime/capi/onnxruntime_providers_cuda.dll",
+            "MekiCopy/_internal/cv2/opencv_videoio_ffmpeg500_64.dll",
+        )
+        packaging.verify_lite_optional_payloads({name: Path(name) for name in names})
+
+
+class MediaPayloadTests(unittest.TestCase):
+    def test_media_probe_requires_matching_executables_and_notices(self) -> None:
+        import media_tools_download
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = {}
+            for name in ("ffmpeg.exe", "ffprobe.exe", "LICENSE", "README.txt"):
+                path = root / name
+                path.write_bytes(name.encode("ascii"))
+                files[name] = (path.stat().st_size, packaging.sha256_file(path))
+            with mock.patch.object(media_tools_download, "FILES", files):
+                packaging.verify_media_tools(root)
+                (root / "LICENSE").unlink()
+                with self.assertRaisesRegex(ValueError, "license files"):
+                    packaging.verify_media_tools(root)
+                (root / "LICENSE").write_bytes(b"changed")
+                with self.assertRaisesRegex(ValueError, "license files"):
+                    packaging.verify_media_tools(root)
 
 
 if __name__ == "__main__":

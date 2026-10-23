@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+from collections import deque
+from contextlib import contextmanager
+from pathlib import Path
 import os
 import threading
 import tkinter as tk
@@ -22,6 +25,8 @@ from mekicopy_companions import overlay_config_payload, request_translation_and_
 from mekicopy_settings import load_settings
 from mekicopy_runtime import (
     _get_app_dir,
+    _cuda_driver_is_usable,
+    _register_native_dll_directories,
     _get_resource_dir,
     _prepare_native_runtime_paths,
     _prepare_tk_library_paths,
@@ -33,6 +38,9 @@ from system_logging import is_debug_enabled as _system_debug_enabled
 
 _OCR_ENGINE = None
 _ORT_PRELOAD_READY = False
+_ORT_GPU_RUNTIME_AVAILABLE = False
+_OCR_PROGRESS: deque[tuple[str, Callable[[], bool] | None]] = deque(maxlen=1)
+_OCR_PROGRESS_LOCK = threading.Lock()
 _OCR_ENGINE_LOCK = threading.Lock()
 _OCR_RUN_LOCK = threading.Lock()
 OCR_MODEL_MANIFEST = {
@@ -77,57 +85,65 @@ configure_capture_runtime(
 )
 
 
-def _patch_onnxruntime_compat() -> None:
-    try:
-        import onnxruntime as ort
-    except Exception:
-        return
-
-    if not hasattr(ort, "set_default_logger_severity"):
-
-        def _noop_set_default_logger_severity(_level: int) -> None:
-            return None
-
-        ort.set_default_logger_severity = _noop_set_default_logger_severity
+def _publish_ocr_progress(message: str, is_cancelled: Callable[[], bool] | None = None) -> None:
+    _check_ocr_cancelled(is_cancelled)
+    with _OCR_PROGRESS_LOCK:
+        _OCR_PROGRESS.append((message, is_cancelled))
+    _log_runtime_message("gpu_runtime", message)
 
 
-def _preload_onnxruntime_gpu_dlls() -> None:
-    """Load bundled/system CUDA dependencies before creating an ORT session.
+def take_ocr_progress() -> str | None:
+    """Consume the newest worker status from an existing Tk polling callback."""
+    with _OCR_PROGRESS_LOCK:
+        item = _OCR_PROGRESS.pop() if _OCR_PROGRESS else None
+    if item is None:
+        return None
+    message, is_cancelled = item
+    return None if is_cancelled is not None and is_cancelled() else message
 
-    ``get_available_providers()`` only confirms that the CUDA provider binary
-    was packaged.  It does not prove its CUDA/cuDNN dependencies can be
-    loaded.  Let ONNX Runtime's supported preloader resolve those dependencies
-    instead of rejecting GPU use based on a fragile, version-specific PATH
-    check.  Session creation below remains the definitive capability test.
-    """
 
-    global _ORT_PRELOAD_READY
+def _preload_onnxruntime_gpu_dlls(is_cancelled: Callable[[], bool] | None = None) -> bool:
+    """Prepare CUDA only for a usable NVIDIA driver; failures keep OCR on CPU."""
+    global _ORT_PRELOAD_READY, _ORT_GPU_RUNTIME_AVAILABLE
+    _check_ocr_cancelled(is_cancelled)
     if _ORT_PRELOAD_READY:
-        return
-
+        return _ORT_GPU_RUNTIME_AVAILABLE
     _ORT_PRELOAD_READY = True
+    _ORT_GPU_RUNTIME_AVAILABLE = False
+    if not _cuda_driver_is_usable():
+        return False
     try:
         import onnxruntime as ort
-    except Exception as exc:
-        _log_runtime_error("import_onnxruntime", exc)
-        return
+        if "CUDAExecutionProvider" not in ort.get_available_providers():
+            return False
+        from gpu_runtime import prepare_gpu_runtime
 
-    preload_dlls = getattr(ort, "preload_dlls", None)
-    if not callable(preload_dlls):
-        _log_runtime_message(
-            "preload_onnxruntime_gpu_dlls",
-            "onnxruntime.preload_dlls is unavailable",
-        )
-        return
+        def progress(message: str) -> None:
+            _publish_ocr_progress(message, is_cancelled)
 
-    try:
-        preload_dlls(cuda=True, cudnn=True, msvc=True)
-        _log_runtime_message(
-            "preload_onnxruntime_gpu_dlls",
-            "requested CUDA, cuDNN, and MSVC runtime preloading",
-        )
+        directories = prepare_gpu_runtime(Path(_get_resource_dir()), progress=progress)
+        _check_ocr_cancelled(is_cancelled)
+        if not directories:
+            raise RuntimeError("GPU runtime contains no DLL directories")
+        _register_native_dll_directories(directories)
+        for directory in directories:
+            path = Path(directory)
+            has_cuda = any(path.glob("cudart*.dll")) or any(path.glob("cublas*.dll"))
+            has_cudnn = any(path.glob("cudnn*.dll"))
+            ort.preload_dlls(cuda=has_cuda, cudnn=has_cudnn, msvc=True, directory=str(path))
+        _ORT_GPU_RUNTIME_AVAILABLE = True
+        _publish_ocr_progress("GPU 준비 완료. OCR 엔진을 시작합니다.", is_cancelled)
+    except OcrCancelledError:
+        _ORT_PRELOAD_READY = False
+        _ORT_GPU_RUNTIME_AVAILABLE = False
+        raise
     except Exception as exc:
-        _log_runtime_error("preload_onnxruntime_gpu_dlls", exc)
+        _log_runtime_error("prepare_ocr_gpu_runtime", exc)
+        if is_cancelled is not None and is_cancelled():
+            _ORT_PRELOAD_READY = False
+            _check_ocr_cancelled(is_cancelled)
+        _publish_ocr_progress("GPU 준비를 완료하지 못해 CPU로 OCR을 시작합니다.", is_cancelled)
+    return _ORT_GPU_RUNTIME_AVAILABLE
 
 
 @lru_cache(maxsize=16)
@@ -260,14 +276,14 @@ def _create_meikiocr_engine(meikiocr_ocr, provider: str):
     return engine
 
 
-def _create_best_meikiocr_engine(meikiocr_ocr):
+def _create_best_meikiocr_engine(meikiocr_ocr, *, allow_cuda: bool = True):
     available_providers = _get_available_ort_providers()
     _log_runtime_message(
         "onnxruntime_providers",
         "available_providers: " + ", ".join(available_providers),
     )
 
-    if "CUDAExecutionProvider" in available_providers:
+    if allow_cuda and "CUDAExecutionProvider" in available_providers:
         try:
             return _create_meikiocr_engine(meikiocr_ocr, "CUDAExecutionProvider")
         except Exception as exc:
@@ -275,15 +291,15 @@ def _create_best_meikiocr_engine(meikiocr_ocr):
     else:
         _log_runtime_message(
             "cuda_provider_unavailable",
-            "CUDAExecutionProvider was not reported; using CPUExecutionProvider",
+            "CUDA is unavailable for this session; using CPUExecutionProvider",
         )
 
     return _create_meikiocr_engine(meikiocr_ocr, "CPUExecutionProvider")
 
 
-def _get_ocr_engine():
+def _get_ocr_engine(is_cancelled: Callable[[], bool] | None = None):
     global _OCR_ENGINE
-    with _OCR_ENGINE_LOCK:
+    with _ocr_lock(_OCR_ENGINE_LOCK, is_cancelled):
         if _OCR_ENGINE is not None:
             return _OCR_ENGINE
 
@@ -292,12 +308,11 @@ def _get_ocr_engine():
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         os.environ.setdefault("TQDM_DISABLE", "1")
         os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-        _patch_onnxruntime_compat()
-        _preload_onnxruntime_gpu_dlls()
+        allow_cuda = _preload_onnxruntime_gpu_dlls(is_cancelled)
         import meikiocr.ocr as meikiocr_ocr
 
         _patch_meikiocr_model_loader(meikiocr_ocr)
-        _OCR_ENGINE = _create_best_meikiocr_engine(meikiocr_ocr)
+        _OCR_ENGINE = _create_best_meikiocr_engine(meikiocr_ocr, allow_cuda=allow_cuda)
         return _OCR_ENGINE
 
 
@@ -305,7 +320,29 @@ class OcrError(RuntimeError):
     """A recoverable OCR engine or input failure."""
 
 
-def recognize_image(image: Image.Image) -> str:
+class OcrCancelledError(OcrError):
+    """OCR initialization was cancelled before native inference started."""
+
+
+def _check_ocr_cancelled(is_cancelled: Callable[[], bool] | None) -> None:
+    if is_cancelled is not None and is_cancelled():
+        raise OcrCancelledError("OCR 작업이 취소되었습니다.")
+
+
+@contextmanager
+def _ocr_lock(lock, is_cancelled: Callable[[], bool] | None):
+    while True:
+        _check_ocr_cancelled(is_cancelled)
+        if lock.acquire(timeout=0.1):
+            break
+    try:
+        _check_ocr_cancelled(is_cancelled)
+        yield
+    finally:
+        lock.release()
+
+
+def recognize_image(image: Image.Image, *, is_cancelled: Callable[[], bool] | None = None) -> str:
     """Run OCR on a captured image without touching Tk or temporary files."""
     try:
         _prepare_native_runtime_paths()
@@ -317,8 +354,10 @@ def recognize_image(image: Image.Image) -> str:
         image_data = np.asarray(rgb_image)[:, :, ::-1].copy()
         if image_data.size == 0:
             raise OcrError("captured image is empty")
-        with _OCR_RUN_LOCK:
-            results = _get_ocr_engine().run_ocr(image_data)
+        with _ocr_lock(_OCR_RUN_LOCK, is_cancelled):
+            engine = _get_ocr_engine(is_cancelled)
+            _check_ocr_cancelled(is_cancelled)
+            results = engine.run_ocr(image_data)
     except OcrError:
         raise
     except Exception as exc:
