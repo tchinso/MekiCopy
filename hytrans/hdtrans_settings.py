@@ -1,7 +1,7 @@
 """Persistent hdTrans options, independent from installed engine versions.
 
 Only the option and ordered official dictionary paths are persisted. The
-native engine's learned names/context always stay in its in-memory session.
+recent source text used as context stays in memory and is never persisted.
 """
 from __future__ import annotations
 

@@ -73,4 +73,4 @@ Lite의 GPU 구성요소는 사용 가능한 NVIDIA GPU가 있을 때만 내려�
 
 ## 라이선스
 
-MekiCopy의 라이선스 문서는 [LICENSE](LICENSE)입니다. 포함된 엔진·모델·라이브러리에는 각각의 라이선스가 적용됩니다. hdTrans의 AGPL 고지, 대응 소스와 결합 배포 시 확인할 사항은 [빌드 안내의 소스·라이선스](BUILDING.md#소스라이선스)를 참고하세요.
+MekiCopy의 라이선스 문서는 [LICENSE](LICENSE)입니다. 포함된 엔진·모델·라이브러리에는 각각의 라이선스가 적용됩니다. hdTrans의 MPL-2.0 고지와 대응 소스는 [빌드 안내의 소스·라이선스](BUILDING.md#소스라이선스)를 참고하세요.

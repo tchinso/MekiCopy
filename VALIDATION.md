@@ -1,5 +1,15 @@
 # MekiCopy 검증
 
+## 2026-10-31 추가 검증
+
+- HyTrans의 대용량 Chromium 캐시 복사를 제거하고 로딩 단계 표시·정체 시간 제한을 검증했다. Translator API의 모델 준비 정체 시 브라우저 창으로 전환하는 복구도 검증했다.
+- hdTrans **0.7.6**, 기본 사전 **0.7.6+93be691cfbd6**으로 갱신했다. 실제 DLL로 UTF-8 번역, 명시적 문맥 전달·초기화·작업 전환, 사용자 사전 진단·재적용, 동시 요청과 Tk 오버레이 표시를 확인했다. 공식 MPL-2.0 LICENSE·NOTICE·제3자 고지·대응 소스를 포함한다.
+- Python **403개**, JavaScript **15개** 회귀 검증을 완료했다. 최종 Full EXE의 HyTrans(WebGPU)·Translator API·hdTrans 모두 실제 일본어→한국어 번역에 성공했다.
+- Full ZIP **4,115,474,366 bytes**, 내부 **3,613개** 파일의 크기·SHA-256과 소스 fingerprint를 확인했다. 개인 설정 5개는 ZIP 검증 후 실행 폴더에 복원했다.
+- 증거: `.cache/hytrans-loading-fix/full-hdtrans076-build.log`, `hdtrans076-source-tests.log`, `hdtrans076-native-final.log`, `frozen-browser-verification.json`, `release-verification.json`. 네이티브 검사 4개는 테스트 환경 경로를 바로잡은 뒤 별도로 재실행해 통과했다.
+
+## 2026-10-23 검증 기록
+
 검증일: 2026-10-23. Windows x64, Python 3.12.14.
 
 ## 소스·구성요소
@@ -24,7 +34,8 @@
 ## 재현
 
 ```powershell
-$env:HYTRANS_NATIVE_TEST_INSTALLATION = (Resolve-Path '.cache/hdtrans/full/installations/0.4.4-windows-x64').Path
+$hdTransActive = (Get-Content -Raw '.cache/hdtrans/full/active.json' | ConvertFrom-Json).installation
+$env:HYTRANS_NATIVE_TEST_INSTALLATION = (Resolve-Path (Join-Path '.cache/hdtrans/full/installations' $hdTransActive)).Path
 .\.build-python\Scripts\python.exe -m unittest discover -s tests -v
 node --test tests/test_*.mjs
 ```

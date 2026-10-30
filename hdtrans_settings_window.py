@@ -70,9 +70,9 @@ class HdTransSettingsWindow(tk.Toplevel):
         tk.Checkbutton(context, text="이전 대화 문맥 보존", variable=self.preserve_var).pack(side=tk.LEFT)
         tk.Button(context, text="문맥 초기화", command=self._reset).pack(side=tk.RIGHT)
         tk.Label(body, justify=tk.LEFT, anchor="w", wraplength=680, text=(
-            "hdTrans는 프로세스당 문맥 하나를 사용합니다. OCR·음성·자막 작업이 바뀌면 문맥을 초기화합니다. "
+            "최근 입력을 문맥으로 참고합니다. OCR·음성·자막 작업이 바뀌면 문맥을 초기화합니다. "
             "다른 게임으로 바꿀 때는 문맥 초기화를 누르세요. 문맥은 디스크에 저장하지 않습니다.\n"
-            "사용자 사전 재적용은 문맥을 초기화합니다. 외부 편집 감지에 따른 재로드도 문맥을 초기화할 수 있습니다."
+            "사용자 사전 재적용은 문맥을 초기화합니다."
         )).pack(fill=tk.X, pady=4)
         dictionaries = tk.LabelFrame(body, text="사용자 사전 (UTF-8 · 일본어<TAB>한국어 · 선택적 공식 품사 필드)", padx=8, pady=8)
         dictionaries.pack(fill=tk.BOTH, expand=True, pady=6)

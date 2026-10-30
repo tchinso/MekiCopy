@@ -19,6 +19,18 @@ from meki_subtitle_window import MekiSubtitleWindow
 
 
 class ApiTranslationIntegrationTests(unittest.TestCase):
+    def test_browser_model_probe_reports_actual_loading_stage(self) -> None:
+        for backend in ("local", "translator_api"):
+            with self.subTest(backend=backend), mock.patch.object(
+                companions, "_json_request", side_effect=[
+                    {"ok": True, "app": "HYTrans", "backend": backend},
+                    {"backend": backend, "workerConnected": True, "ready": False,
+                     "state": "WORKER_LOADING", "loadingMessage": "model download (40%)"},
+                ],
+            ):
+                with self.assertRaisesRegex(RuntimeError, r"model download \(40%\)"):
+                    companions._probe_service("HYTrans", "http://127.0.0.1:6996")
+
     def test_manual_translation_dispatch_keeps_settings_from_task_submission(self) -> None:
         for app in (mekicopy.MainWindow, mekicopy.DetachedOcrButtonApp):
             with self.subTest(app=app.__name__):

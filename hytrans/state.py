@@ -17,6 +17,7 @@ class AppState:
     dtype: Optional[str] = None
     model_mode: Optional[str] = None
     warning: Optional[str] = None
+    loading_message: Optional[str] = None
     error: Optional[str] = None
     started_at: float = time.time()
 
@@ -35,4 +36,6 @@ class AppState:
         }
         if self.warning:
             payload["warning"] = self.warning
+        if self.loading_message:
+            payload["loadingMessage"] = self.loading_message
         return payload

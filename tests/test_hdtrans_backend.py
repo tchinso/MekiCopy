@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from hytrans import app as server, config
 from hytrans.api_settings import ApiSettings, PROVIDERS, fingerprint
-from hytrans.hdtrans_backend import HdTransBackend, HdTransError, NativeLibrary, validate_dll_architecture
+from hytrans.hdtrans_backend import MAX_CONTEXT_CHARS, HdTransBackend, HdTransError, NativeLibrary, validate_dll_architecture
 from hytrans.hdtrans_download import VERSION
 from hytrans.hdtrans_settings import HdTransSettings, load_hdtrans_settings, save_hdtrans_settings, hdtrans_settings_path
 from hytrans.queue import TranslationQueueOverloadedError
@@ -38,6 +38,7 @@ class FakeLibrary:
         self.release = threading.Event()
         self.hold = False
         self.error = ""
+        self.contexts = []
 
     def record(self, name, *args):
         self.calls.append((name, *args))
@@ -60,7 +61,8 @@ class FakeLibrary:
     def reload(self):
         self.record("reload")
 
-    def translate(self, text):
+    def translate(self, text, context=""):
+        self.contexts.append(context)
         self.record("translate", text)
         self.started.set()
         if self.hold:
@@ -111,6 +113,28 @@ class NativeCtypesTests(unittest.TestCase):
                 NativeLibrary(path, loader=lambda _: dll)
             native.close()
 
+    def test_explicit_context_uses_utf8_byte_lengths_and_frees_the_native_buffer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hdTransEngine.dll"
+            write_pe(path)
+            dll = mock.Mock()
+            buffer = ctypes.create_string_buffer("문맥 번역".encode())
+            pointer = ctypes.addressof(buffer)
+            def translate(context, context_size, text, text_size, out, outn):
+                self.assertEqual((context, context_size), ("前の台詞".encode(), len("前の台詞".encode())))
+                self.assertEqual((text, text_size), ("日本語".encode(), len("日本語".encode())))
+                ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = pointer
+                ctypes.cast(outn, ctypes.POINTER(ctypes.c_size_t))[0] = len("문맥 번역".encode())
+                return 0
+            dll.hdTrans_TranslateContext.side_effect = translate
+            native = NativeLibrary(path, loader=lambda _: dll)
+            try:
+                self.assertEqual(native.translate("日本語", context="前の台詞"), "문맥 번역")
+                dll.hdTrans_Translate.assert_not_called()
+                self.assertEqual(dll.hdTrans_FreeMem.call_args.args[0].value, pointer)
+            finally:
+                native.close()
+
     def test_architecture_mismatch_is_explicit(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "wrong.dll"
@@ -153,13 +177,25 @@ class NativeQueueTests(unittest.IsolatedAsyncioTestCase):
         await self.backend.close()
         self.temporary.cleanup()
 
+    async def test_history_is_bounded_and_reload_clears_explicit_context(self):
+        await self.backend.submit("translate", "長" * (MAX_CONTEXT_CHARS + 100), "ocr", False)
+        await self.backend.submit("translate", "next", "ocr", False)
+        self.assertEqual(len(self.native.contexts[-1]), MAX_CONTEXT_CHARS)
+        await self.backend.submit("reload")
+        await self.backend.submit("translate", "after reload", "ocr", False)
+        self.assertEqual(self.native.contexts[-1], "")
+
     async def test_context_same_owner_preserved_owner_boundary_and_manual_reset(self):
         await self.backend.submit("translate", "first", "ocr:1", False)
         await self.backend.submit("translate", "second", "ocr:1", False)
+        self.assertEqual(self.native.contexts, ["", "first"])
         self.assertEqual([c[0] for c in self.native.calls].count("reset"), 1)
         await self.backend.submit("translate", "audio", "audio", False)
+        self.assertEqual(self.native.contexts[-1], "")
         await self.backend.submit("reset")
-        self.assertEqual([c[0] for c in self.native.calls].count("reset"), 3)
+        await self.backend.submit("translate", "after reset", "audio", False)
+        self.assertEqual(self.native.contexts[-1], "")
+        self.assertEqual([c[0] for c in self.native.calls].count("reset"), 4)
         self.assertEqual(len(set(self.native.threads)), 1)
 
     async def test_option_transition_reload_and_translate_are_serialized(self):
@@ -167,6 +203,7 @@ class NativeQueueTests(unittest.IsolatedAsyncioTestCase):
             await self.backend.submit("settings", HdTransSettings(False))
         await self.backend.submit("translate", "one", "ocr", False)
         await self.backend.submit("translate", "two", "ocr", False)
+        self.assertEqual(self.native.contexts, ["", ""])
         self.assertEqual([c[0] for c in self.native.calls].count("reset"), 3)
         await self.backend.submit("reload")
         self.assertIn(("reload",), self.native.calls)

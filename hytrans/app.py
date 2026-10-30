@@ -61,6 +61,7 @@ worker_open_task: asyncio.Task[None] | None = None
 shutdown_handler: Callable[[], None] | None = None
 shutdown_token: str | None = None
 TRANSLATOR_API_STARTUP_TIMEOUT_SECONDS = 10 * 60
+LOCAL_WORKER_LOADING_TIMEOUT_SECONDS = 10 * 60
 
 
 class ModelFileResponse(FileResponse):
@@ -229,6 +230,7 @@ def _clear_current_worker(websocket: WebSocket, reason: str) -> bool:
     state.device_detail = None
     state.warning = None
     state.error = reason
+    state.loading_message = None
     return True
 
 
@@ -486,6 +488,7 @@ async def on_startup() -> None:
     state.warning = None
     state.error = None
     state.started_at = time.time()
+    state.loading_message = None
     api_active_requests = 0
     api_translation_queue = None
     hdtrans_backend = None
@@ -563,6 +566,7 @@ async def health(response: Response) -> dict[str, object]:
         "backend": options.backend,
         "workerConnected": state.worker_connected,
         "ready": state.worker_ready,
+        "loadingMessage": state.loading_message,
         "model": state.model if options.backend != "local" else profile.model_id,
         "dtype": ("api" if options.backend in PROVIDERS else
                   "native" if options.backend == "hdtrans" else
@@ -846,10 +850,12 @@ async def worker_ws(websocket: WebSocket) -> None:
     state.warning = None
     state.error = None
     debug("worker_connected", "websocket connected")
-    startup_deadline = (
-        time.monotonic() + TRANSLATOR_API_STARTUP_TIMEOUT_SECONDS
-        if options.backend == "translator_api" else None
-    )
+    state.loading_message = None
+    translator_api = options.backend == "translator_api"
+    startup_timeout = (TRANSLATOR_API_STARTUP_TIMEOUT_SECONDS if translator_api
+                       else LOCAL_WORKER_LOADING_TIMEOUT_SECONDS)
+    startup_deadline = time.monotonic() + startup_timeout
+    last_loading_message = "worker connected"
 
     try:
         while True:
@@ -860,9 +866,13 @@ async def worker_ws(websocket: WebSocket) -> None:
                         timeout=max(0, startup_deadline - time.monotonic()),
                     )
                 except asyncio.TimeoutError:
-                    detail = "Translator API worker did not become ready within 10 minutes"
+                    detail = ("Translator API worker did not become ready within 10 minutes"
+                              if translator_api else
+                              "HYTrans local worker stopped making loading progress for "
+                              f"10 minutes; last stage: {last_loading_message}")
                     if _clear_current_worker(websocket, detail):
-                        error("translator_api_startup_timeout", detail)
+                        error("translator_api_startup_timeout" if translator_api
+                              else "local_worker_loading_timeout", detail)
                     await websocket.close(code=1011)
                     return
             else:
@@ -875,7 +885,14 @@ async def worker_ws(websocket: WebSocket) -> None:
 
             if msg_type == "loading":
                 state.state = "WORKER_LOADING"
-                debug("worker_loading", str(message.get("message", "")))
+                last_loading_message = str(message.get("message", ""))
+                state.loading_message = last_loading_message
+                if not translator_api:
+                    # Local downloads can legitimately take longer than ten
+                    # minutes. Bound inactivity, including a hung ONNX session
+                    # after the final file, rather than total download time.
+                    startup_deadline = time.monotonic() + startup_timeout
+                debug("worker_loading", last_loading_message)
 
             elif msg_type == "activation_required" and options.backend == "translator_api":
                 activation_error = None
@@ -932,6 +949,7 @@ async def worker_ws(websocket: WebSocket) -> None:
                     await websocket.close(code=1008)
                     return
                 state.worker_ready = True
+                state.loading_message = None
                 state.state = "READY"
                 state.device = message.get("device")
                 state.device_detail = message.get("deviceDetail")

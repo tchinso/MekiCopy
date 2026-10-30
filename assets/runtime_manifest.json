@@ -44,8 +44,8 @@
     },
     {
       "path": "worker.js",
-      "size": 23431,
-      "sha256": "656b089aa879b2410e02691e8ea05bb1427e6f76d989b7dc3bc13da4ecfffb98"
+      "size": 23853,
+      "sha256": "e5ff214075c98f5504b7be014ee1e4b4573e1798e9f8e135119a7a81d52f9e45"
     },
     {
       "path": "translator_api_worker.html",
@@ -54,8 +54,8 @@
     },
     {
       "path": "translator_api_worker.js",
-      "size": 17398,
-      "sha256": "81183b4db21f35b9cae3d8a853b8aa6a2d9fc178feed4e5954e4436efbc93598"
+      "size": 17578,
+      "sha256": "1788b2340ed26e934e4259054745ea7ad5a5de2f239484e70c9e68f5a4a1b5ef"
     },
     {
       "path": "wasm/ort-wasm-simd-threaded.asyncify.mjs",

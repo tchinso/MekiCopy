@@ -20,36 +20,37 @@ from typing import Callable, Iterator
 from runtime_paths import exclusive_file_lock, writable_app_subdir
 from .paths import app_root
 
-VERSION = "0.4.4"
-TAG = "v0.4.4"
-SOURCE_COMMIT = "f6b142c7464aa1886c6bad73a3aa5a6e7895a45c"
-DICTIONARY_VERSION = "0.4.4+cf1c9b493625"
-RELEASE_URL = "https://github.com/sokcuri/hdTrans/releases/tag/v0.4.4"
-ARCHIVE_URL = "https://github.com/sokcuri/hdTrans/releases/download/v0.4.4/hdTrans-0.4.4-windows.zip"
-ARCHIVE_SHA256 = "0ee4407dc6cc1e6269f0100198d3597e092778cc55b9db9b94082bc1ca66db56"
-ARCHIVE_SIZE = 26587697
-SOURCE_URL = "https://codeload.github.com/sokcuri/hdTrans/zip/refs/tags/v0.4.4"
-SOURCE_SHA256 = "a618fd4d8334156d8e16cfd3f32ace36f7fda5d3457c2658fddf388ec99583c3"
-SOURCE_SIZE = 25215037
+VERSION = "0.7.6"
+TAG = "v0.7.6"
+SOURCE_COMMIT = "37f6a5302156658c36ffc7a0a7b17de8042553d0"
+DICTIONARY_VERSION = "0.7.6+93be691cfbd6"
+DATA_DIR = "hdtrans-data"
+LICENSE_ID = "MPL-2.0"
+RELEASE_URL = "https://github.com/sokcuri/hdTrans/releases/tag/v0.7.6"
+ARCHIVE_URL = "https://github.com/sokcuri/hdTrans/releases/download/v0.7.6/hdTrans-0.7.6-windows.zip"
+ARCHIVE_SHA256 = "e7ab6b3f746c7830a2cc168444d6468cb035ad14a23fa32b54d7c66148bcd373"
+ARCHIVE_SIZE = 30141879
+SOURCE_URL = "https://codeload.github.com/sokcuri/hdTrans/zip/refs/tags/v0.7.6"
+SOURCE_SHA256 = "7a2aa283d01638bfd259268f06003e5aaa49eded00905674826d6e22a4c77f90"
+SOURCE_SIZE = 26989640
 MANIFEST_NAME = "install-manifest.json"
-SOURCE_NAME = "hdTrans-v0.4.4-source.zip"
+SOURCE_NAME = "hdTrans-v0.7.6-source.zip"
 Progress = Callable[[dict], None]
 
-# Hashes of individual files extracted from the release ZIP whose published
-# SHA256SUMS/GitHub asset digest is pinned above. These also detect disk damage
-# and deliberately reject mixing snapshots or DLLs from different releases.
+# Verified against the official release asset digest and SHA256SUMS.txt.
 COMMON_FILES = {
-    "hdTrans/dicts.hdsnap": (36579732, "366d393b5f0517baa492424e528ecf3b6f928a117f890e77a9a00bf0d7ec56c2"),
-    "hdTrans/dicts.txt": (19, "b37afa939cf1825164e46fc59abc622c7861e22f5acc9bc76a83c4f153ddc301"),
-    "LICENSE": (34524, "8d56b405468aad11f87ab5763f901e276e08d9646ff5c8481b1762b6b789e9ed"),
-    "THIRD-PARTY-NOTICES.txt": (13556, "54ce84c3871fac6ddccdfcbb7878af752eeff096e3c727b814aec6db6d1fbd51"),
-    "hdTrans/user/hdtrans.config.example.yaml": (656, "6ae2ffca034ab62f1855e104a5f4bc9ba49207cc77c221d562751d45def7094b"),
-    "hdTrans/user/userdict.example.txt": (653, "eafb14d2d554e6f2199dc9e7567543058c14b32043096a189e5202103c6a393c"),
-    SOURCE_NAME: (SOURCE_SIZE, SOURCE_SHA256),
+    'hdtrans-data/dicts.hdsnap': (36256119, 'e9139b058ee48693be6a96e896707e7c0d7a0f6ee756bc3eaa28d17860c5a457'),
+    'hdtrans-data/dicts.txt': (19, '49bea788a9e36730a4b5a5e1e0eda77003bd728d95bd81b62004bea2e070c9b6'),
+    'LICENSE': (16726, '3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04'),
+    'NOTICE': (265, '3d2b82acad351f24427f21dd561785fe6e2a70352d83bd478a153c9a263d7f35'),
+    'THIRD-PARTY-NOTICES.txt': (15823, '89b623e11a33711d0ccc65e9a368e6bdd286629ae9140b988937a74f773dbcf4'),
+    'hdtrans-data/user/hdtrans.config.example.yaml': (781, 'a39699002bafc821a46d089229fed5e3aa08026b471d97c9dca2388c9eb31ea1'),
+    'hdtrans-data/user/userdict.example.txt': (653, 'eafb14d2d554e6f2199dc9e7567543058c14b32043096a189e5202103c6a393c'),
+    'hdTrans-v0.7.6-source.zip': (26989640, '7a2aa283d01638bfd259268f06003e5aaa49eded00905674826d6e22a4c77f90'),
 }
 DLL_FILES = {
-    "x64": ("hdTransEngine.dll", 3688960, "a82968803d37a9fcd471be1e25c00fecbcf57270e518291fd4ef8fda213b87ee"),
-    "x86": ("hdTransEngine_x86.dll", 2946048, "a78e22c248c3a981ac773548a6da509f349b6012dd6d80936e7be25eff32d8cf"),
+    'x64': ('hdTransEngine.dll', 5316096, '693d0ba0b5b75f4a26a1962f936debf7c9cc41a2be5f65705052ec5c577196a1'),
+    'x86': ('hdTransEngine_x86.dll', 4319744, '47810b14d54e305f59061ce925cc0ded8669c7e0d898a882d15c0dac43ea1953'),
 }
 _verified: dict[tuple[str, tuple], bool] = {}
 _verify_lock = threading.RLock()
@@ -117,8 +118,8 @@ def validate_installation(path: Path, *, rehash: bool = False) -> bool:
         if not isinstance(manifest, dict):
             return False
         if (manifest.get("version"), manifest.get("dictionaryVersion"), manifest.get("architecture"),
-                manifest.get("archiveSha256"), manifest.get("sourceCommit")) != (
-                VERSION, DICTIONARY_VERSION, architecture(), ARCHIVE_SHA256, SOURCE_COMMIT):
+                manifest.get("archiveSha256"), manifest.get("sourceCommit"), manifest.get("license")) != (
+                VERSION, DICTIONARY_VERSION, architecture(), ARCHIVE_SHA256, SOURCE_COMMIT, LICENSE_ID):
             return False
         metadata = []
         for relative, (size, _) in expected_files().items():
@@ -134,7 +135,7 @@ def validate_installation(path: Path, *, rehash: bool = False) -> bool:
         for relative, (_, digest) in expected_files().items():
             if _hash(path / relative) != digest:
                 return False
-        if (path / "hdTrans/dicts.txt").read_text(encoding="utf-8").strip() != DICTIONARY_VERSION:
+        if (path / "hdtrans-data/dicts.txt").read_text(encoding="utf-8").strip() != DICTIONARY_VERSION:
             return False
         with _verify_lock:
             _verified[key] = True
@@ -201,7 +202,7 @@ def installation_status() -> dict:
         "architecture": architecture(),
         "installationPath": str(path) if path else None,
         "dllPath": str(path / "hdTransEngine.dll") if path else None,
-        "dictionaryPath": str(path / "hdTrans/dicts.hdsnap") if path else None,
+        "dictionaryPath": str(path / "hdtrans-data/dicts.hdsnap") if path else None,
         "releaseUrl": RELEASE_URL,
         "restartRequired": False,
     }
@@ -280,7 +281,7 @@ def _write_manifest(path: Path) -> None:
         "architecture": architecture(), "archiveSha256": ARCHIVE_SHA256,
         "sourceCommit": SOURCE_COMMIT, "releaseUrl": RELEASE_URL,
         "sourceUrl": SOURCE_URL, "sourceSha256": SOURCE_SHA256,
-        "license": "AGPL-3.0-or-later", "files": {
+        "license": LICENSE_ID, "files": {
             relative: {"size": size, "sha256": digest}
             for relative, (size, digest) in expected_files().items()
         },
@@ -289,7 +290,7 @@ def _write_manifest(path: Path) -> None:
     (path / "SOURCE.txt").write_text(
         f"hdTrans {TAG}\nCorresponding source (included): {SOURCE_NAME}\n"
         f"Upstream source: {SOURCE_URL}\nCommit: {SOURCE_COMMIT}\n"
-        f"Release: {RELEASE_URL}\nLicense: AGPL-3.0-or-later (see LICENSE)\n"
+        f"Release: {RELEASE_URL}\nLicense: {LICENSE_ID} (see LICENSE and NOTICE)\n"
         "Rebuild: see docs/build.md and CMakePresets.json in the included source.\n"
         "Windows release DLL statically links the MSVC CRT; no separate CRT DLL is needed.\n"
         "The dictionary snapshot and DLL must come from this same release.\n",

@@ -133,7 +133,9 @@ function createSessionNow(pair) {
     timer = setTimeout(() => {
       if (finished) return;
       timedOut = true;
-      rejectTimeout(new Error(`${pairLabel(pair)} Translator API 모델 준비가 2분 동안 진행되지 않았습니다. 인터넷 연결과 브라우저 저장 공간을 확인한 뒤 다시 시도하세요.`));
+      const failure = new Error(`${pairLabel(pair)} Translator API 모델 준비가 2분 동안 진행되지 않았습니다. 인터넷 연결과 브라우저 저장 공간을 확인한 뒤 다시 시도하세요.`);
+      failure.name = "ModelIdleTimeoutError";
+      rejectTimeout(failure);
     }, MODEL_IDLE_TIMEOUT_MS);
   };
   renewTimeout();
@@ -311,7 +313,8 @@ async function handleTranslateRequest(request) {
     }
     sendToServer({ type: "result", id: request.id, text: translated.trim() });
   } catch (error) {
-    if (!MANUAL_ACTIVATION && error?.name === "NotAllowedError") {
+    if (!MANUAL_ACTIVATION &&
+        (error?.name === "NotAllowedError" || error?.name === "ModelIdleTimeoutError")) {
       sendToServer({
         type: "manual_activation_required",
         message: errorDetail(error),
@@ -398,7 +401,8 @@ function failStartup(error) {
   pendingGesturePair = DEFAULT_PAIR;
   const message = actionableError(error, DEFAULT_PAIR);
   if (!MANUAL_ACTIVATION &&
-      (error?.name === "NotAllowedError" || error?.name === "ActivationTimeoutError")) {
+      (error?.name === "NotAllowedError" || error?.name === "ActivationTimeoutError" ||
+       error?.name === "ModelIdleTimeoutError")) {
     setStatus("브라우저에서 직접 모델 시작 버튼을 누를 수 있도록 창을 여는 중...", false);
     sendToServer({
       type: "manual_activation_required",

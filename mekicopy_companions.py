@@ -110,7 +110,7 @@ def _probe_service(expected_app: str, base_url: str, timeout: float = 2.0) -> st
         raise RuntimeError("HYTransWorker가 연결되어 있지 않습니다.")
     if ready.get("ready") is not True:
         worker_state = ready.get("state") or "모델 준비 중"
-        detail = ready.get("error")
+        detail = ready.get("error") or ready.get("loadingMessage")
         suffix = f" ({detail})" if detail else ""
         raise RuntimeError(f"HYTrans 번역 모델이 준비되지 않았습니다: {worker_state}{suffix}")
     state = str(ready.get("state") or "READY")

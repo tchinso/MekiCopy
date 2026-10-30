@@ -334,6 +334,22 @@ class TranslatorApiWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.state.state, "ERROR")
         self.assertIn("did not become ready", server.state.error or "")
 
+    async def test_local_worker_loading_stall_is_logged_and_clears_the_worker(self) -> None:
+        worker = _WorkerSocket()
+        await worker.send({"type": "loading", "message": "initializing ONNX session"})
+        with (
+            mock.patch.object(config.options, "backend", "local"),
+            mock.patch.object(server, "LOCAL_WORKER_LOADING_TIMEOUT_SECONDS", 0.02),
+            mock.patch.object(server, "error") as log,
+        ):
+            await asyncio.wait_for(server.worker_ws(worker), timeout=2)
+        self.assertEqual(worker.close_code, 1011)
+        self.assertFalse(server.state.worker_connected)
+        self.assertFalse(server.state.worker_ready)
+        self.assertEqual(server.state.state, "ERROR")
+        self.assertIn("initializing ONNX session", server.state.error or "")
+        log.assert_called_once_with("local_worker_loading_timeout", server.state.error)
+
 
 if __name__ == "__main__":
     unittest.main()

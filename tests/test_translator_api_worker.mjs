@@ -205,9 +205,10 @@ test("availability that never settles reports a fatal timeout", async () => {
   assert.match(page.sockets[0].sent.find((message) => message.type === "fatal").message, /30초|사용 가능 여부/);
 });
 
-test("create that never settles reports a fatal timeout and destroys a late session", async () => {
+test("visible creation timeout reports a fatal error and destroys a late session", async () => {
   let resolveCreation;
   const page = makePage("available", true, {
+    search: "?manual=1",
     create(_options, makeSession) {
       const session = makeSession(_options);
       return new Promise((resolve) => { resolveCreation = () => resolve(session); });
@@ -246,6 +247,7 @@ test("model progress renews the idle timeout until creation succeeds", async () 
 test("duplicate progress events cannot keep a stalled creation pending forever", async () => {
   let reportProgress;
   const page = makePage("available", true, {
+    search: "?manual=1",
     create(options) {
       options.monitor({ addEventListener(_type, listener) { reportProgress = listener; } });
       return new Promise(() => {});
@@ -258,6 +260,23 @@ test("duplicate progress events cannot keep a stalled creation pending forever",
   reportProgress({ loaded: 1, total: 3 });
   page.advance(1_000);
   await until(() => page.sockets[0].sent.some((message) => message.type === "fatal"));
+});
+
+test("stalled headless creation requests a visible browser and rejects a late session", async () => {
+  let resolveCreation;
+  const page = makePage("available", true, {
+    create(options, makeSession) {
+      const session = makeSession(options);
+      return new Promise((resolve) => { resolveCreation = () => resolve(session); });
+    },
+  });
+  await until(() => resolveCreation);
+  page.advance(120_000);
+  await until(() => page.sockets[0].sent.some((message) => message.type === "manual_activation_required"));
+  assert.equal(page.sockets[0].sent.some((message) => message.type === "fatal"), false);
+  resolveCreation();
+  await until(() => page.sessions[0].destroyed);
+  assert.equal(page.sockets[0].sent.some((message) => message.type === "ready"), false);
 });
 
 test("missing automatic click requests a visible browser", async () => {

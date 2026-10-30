@@ -856,8 +856,8 @@ if ($PackageFlavor -eq "Full") {
     $hdTransPrepareArgs = @(
         "-m", "hytrans.hdtrans_download", "--prepare-build", (Join-Path $hyTransRoot "hdtrans")
     )
-    $hdTransArchiveCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-0.4.4-windows.zip"
-    $hdTransSourceCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-v0.4.4-source.zip"
+    $hdTransArchiveCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-0.7.6-windows.zip"
+    $hdTransSourceCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-v0.7.6-source.zip"
     if ($FullHdTransRoot) {
         $hdTransPrepareArgs += @("--from-bundle-root", $FullHdTransRoot)
     }

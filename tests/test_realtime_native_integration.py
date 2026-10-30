@@ -18,15 +18,14 @@ import time
 import unittest
 from unittest import mock
 
-from hytrans.hdtrans_download import VERSION
+from hytrans.hdtrans_download import DATA_DIR, VERSION, resolve_installation
 
 
 @unittest.skipUnless(os.name == "nt", "requires the actual Windows hdTrans DLL")
 class NativeRealtimeIntegrationTests(unittest.TestCase):
     def test_real_native_translation_tk_ack_dedup_and_late_result_cancellation(self):
-        installed = (Path(__file__).resolve().parents[1] / ".cache" / "hdtrans" / "full"
-                     / "installations" / f"{VERSION}-windows-x64")
-        if not (installed / "hdTransEngine.dll").is_file():
+        installed = resolve_installation(Path(__file__).resolve().parents[1] / ".cache" / "hdtrans" / "full")
+        if installed is None:
             self.skipTest(f"validated local hdTrans {VERSION} payload is not present; no downloads in tests")
         import tkinter as tk
         from http.server import ThreadingHTTPServer
@@ -49,9 +48,9 @@ class NativeRealtimeIntegrationTests(unittest.TestCase):
         native_started, native_release, native_completed = (threading.Event() for _ in range(3))
 
         class RecordingNative(NativeLibrary):
-            def translate(self, text):
+            def translate(self, text, context=""):
                 calls.append(text)
-                translated = super().translate(text)
+                translated = super().translate(text, context=context)
                 translations[text] = translated.strip()
                 if text == obsolete:
                     native_started.set()
@@ -62,13 +61,13 @@ class NativeRealtimeIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="mekicopy-native-ocr-") as directory:
             isolated = Path(directory)
-            (isolated / "hdTrans").mkdir()
+            (isolated / DATA_DIR).mkdir()
             shutil.copy2(installed / "hdTransEngine.dll", isolated / "hdTransEngine.dll")
-            snapshot = installed / "hdTrans" / "dicts.hdsnap"
+            snapshot = installed / DATA_DIR / "dicts.hdsnap"
             try:
-                os.link(snapshot, isolated / "hdTrans" / "dicts.hdsnap")
+                os.link(snapshot, isolated / DATA_DIR / "dicts.hdsnap")
             except OSError:
-                shutil.copy2(snapshot, isolated / "hdTrans" / "dicts.hdsnap")
+                shutil.copy2(snapshot, isolated / DATA_DIR / "dicts.hdsnap")
             backend = HdTransBackend(settings=HdTransSettings(preserve_context=True),
                                      installer=lambda **kwargs: isolated,
                                      library_factory=RecordingNative)

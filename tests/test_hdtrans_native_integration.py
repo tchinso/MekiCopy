@@ -26,7 +26,7 @@ class RealHdTransTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temporary.name)
         installation = Path(os.environ["HYTRANS_NATIVE_TEST_INSTALLATION"])
         shutil.copy2(installation / "hdTransEngine.dll", self.root)
-        shutil.copytree(installation / "hdTrans", self.root / "hdTrans")
+        shutil.copytree(installation / "hdtrans-data", self.root / "hdtrans-data")
         self.save = mock.patch("hytrans.hdtrans_backend.save_hdtrans_settings", return_value=True)
         self.save.start()
         self.backend = HdTransBackend(settings=HdTransSettings(), installer=lambda **kwargs: self.root)

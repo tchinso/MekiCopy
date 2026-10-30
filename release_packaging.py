@@ -174,7 +174,7 @@ def verify_no_saved_api_settings(files: dict[str, Path]) -> None:
 
 def verify_hdtrans_payload(release_root: Path, flavor: str) -> dict | None:
     from hytrans.hdtrans_download import (
-        ARCHIVE_SHA256, DICTIONARY_VERSION, SOURCE_COMMIT, VERSION,
+        ARCHIVE_SHA256, DATA_DIR, DICTIONARY_VERSION, LICENSE_ID, SOURCE_COMMIT, VERSION,
         resolve_installation, validate_installation,
     )
     root = release_root / "HYTrans" / "hdtrans"
@@ -187,12 +187,12 @@ def verify_hdtrans_payload(release_root: Path, flavor: str) -> dict | None:
         raise ValueError("Full requires a verified, compatible hdTrans DLL/dictionary/source bundle")
     # Only official examples are packaged. Saved user files/configs belong in
     # the writable runtime store, never in a distributed Full engine generation.
-    for user_file in installed.joinpath("hdTrans", "user").iterdir():
+    for user_file in installed.joinpath(DATA_DIR, "user").iterdir():
         if user_file.name not in {"hdtrans.config.example.yaml", "userdict.example.txt"}:
             raise ValueError(f"Saved hdTrans user settings must not be distributed: {user_file.name}")
     return {"version": VERSION, "dictionaryVersion": DICTIONARY_VERSION,
             "archiveSha256": ARCHIVE_SHA256, "sourceCommit": SOURCE_COMMIT,
-            "license": "AGPL-3.0-or-later"}
+            "license": LICENSE_ID}
 
 
 def write_build_manifest(

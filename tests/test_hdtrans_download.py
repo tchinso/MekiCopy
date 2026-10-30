@@ -24,12 +24,12 @@ class HdTransInstallTests(unittest.TestCase):
         self.source.write_bytes(b"corresponding source")
         self.payload = {
             "hdTransEngine.dll": b"native C API DLL",
-            "hdTrans/dicts.hdsnap": b"same release snapshot",
-            "hdTrans/dicts.txt": (download.DICTIONARY_VERSION + "\n").encode(),
-            "LICENSE": b"AGPL license",
+            "hdtrans-data/dicts.hdsnap": b"same release snapshot",
+            "hdtrans-data/dicts.txt": (download.DICTIONARY_VERSION + "\n").encode(),
+            "LICENSE": b"MPL license",
             "THIRD-PARTY-NOTICES.txt": b"notices",
-            "hdTrans/user/hdtrans.config.example.yaml": b"# config example",
-            "hdTrans/user/userdict.example.txt": b"# dictionary example",
+            "hdtrans-data/user/hdtrans.config.example.yaml": b"# config example",
+            "hdtrans-data/user/userdict.example.txt": b"# dictionary example",
             download.SOURCE_NAME: self.source.read_bytes(),
         }
         with zipfile.ZipFile(self.archive, "w") as package:
@@ -74,7 +74,7 @@ class HdTransInstallTests(unittest.TestCase):
 
     def test_corrupted_file_and_mismatched_snapshot_version_are_rejected(self) -> None:
         installed = self.prepare()
-        (installed / "hdTrans/dicts.hdsnap").write_bytes(b"damaged")
+        (installed / "hdtrans-data/dicts.hdsnap").write_bytes(b"damaged")
         self.assertFalse(download.validate_installation(installed))
         repaired = self.prepare()
         self.assertNotEqual(installed, repaired)

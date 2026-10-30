@@ -23,9 +23,11 @@ import uuid
 from typing import Callable, Any
 
 from .hdtrans_settings import HdTransSettings, load_hdtrans_settings, normalize_settings, save_hdtrans_settings
+from .hdtrans_download import DATA_DIR
 from .queue import TranslationQueueOverloadedError
 
 _NATIVE_LIBRARY_LOCK = threading.Lock()
+MAX_CONTEXT_CHARS = 8000
 
 
 class HdTransError(RuntimeError):
@@ -74,6 +76,7 @@ class NativeLibrary:
             "hdTrans_Initialize": ([ctypes.c_char_p], ctypes.c_int),
             "hdTrans_Terminate": ([], None),
             "hdTrans_Translate": ([ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t)], ctypes.c_int),
+            "hdTrans_TranslateContext": ([ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t)], ctypes.c_int),
             "hdTrans_Reset": ([], ctypes.c_int),
             "hdTrans_Reload": ([], ctypes.c_int),
             "hdTrans_UserDictError": ([ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t)], ctypes.c_int),
@@ -109,8 +112,12 @@ class NativeLibrary:
             if pointer.value:
                 self.dll.hdTrans_FreeMem(pointer)
 
-    def translate(self, text: str) -> str:
+    def translate(self, text: str, context: str = "") -> str:
         encoded = text.encode("utf-8")
+        if context:
+            previous = context.encode("utf-8")
+            return self._buffer(self.dll.hdTrans_TranslateContext,
+                                previous, len(previous), encoded, len(encoded))
         return self._buffer(self.dll.hdTrans_Translate, encoded, len(encoded))
 
     def diagnostics(self) -> str:
@@ -170,6 +177,7 @@ class HdTransBackend:
         self._native: NativeLibrary | None = None
         self._install: Path | None = None
         self._owner: str | None = None
+        self._context = ""
         self._reset_needed = False
         self._timed_out_job: NativeJob | None = None
         self._closing = False
@@ -276,7 +284,7 @@ class HdTransBackend:
 
     def _write_config(self, settings: HdTransSettings) -> None:
         assert self._install is not None
-        user = self._install / "hdTrans" / "user"
+        user = self._install / DATA_DIR / "user"
         user.mkdir(parents=True, exist_ok=True)
         # A second, empty official TSV makes per-file reload diagnostics
         # observable even when the sole selected user file is malformed.
@@ -285,7 +293,7 @@ class HdTransBackend:
         paths = [*settings.user_dictionaries, str(sentinel.resolve())]
         text = "# Managed by MekiCopy; user files remain outside this version.\nuserdict:\n"
         text += "".join("  - " + json.dumps(path.replace("\\", "/"), ensure_ascii=False) + "\n" for path in paths)
-        text += "ehnd: false\n"
+        text += "ehnd: false\nstrict_dict: false\n"
         destination = user / "hdtrans.config.yaml"
         temporary = destination.with_name(f"{destination.name}.{uuid.uuid4().hex}.tmp")
         try:
@@ -309,9 +317,9 @@ class HdTransBackend:
         self._update(state="LOADING", phase="엔진 및 기본 사전 초기화")
         native = self._library_factory(self._install / "hdTransEngine.dll")
         try:
-            native.initialize(self._install / "hdTrans" / "dicts.hdsnap")
+            native.initialize(self._install / DATA_DIR / "dicts.hdsnap")
             self._native = native
-            dictionary_version_path = self._install / "hdTrans" / "dicts.txt"
+            dictionary_version_path = self._install / DATA_DIR / "dicts.txt"
             dictionary_version = dictionary_version_path.read_text(encoding="utf-8").strip() if dictionary_version_path.is_file() else None
             self._update(version=native.version(), dictionaryVersion=dictionary_version,
                          installationPath=str(self._install), userDictionaryError=native.diagnostics(),
@@ -325,14 +333,17 @@ class HdTransBackend:
     def _translate(self, native: NativeLibrary, text: str, owner: str, reset: bool) -> str:
         if reset or self._reset_needed or not self.settings.preserve_context or owner != self._owner:
             native.reset()
+            self._context = ""
             self._reset_needed = False
         self._owner = owner
         self._update(state="BUSY")
         try:
-            result = native.translate(text).strip()
+            result = native.translate(text, context=self._context).strip()
             if not result:
                 raise HdTransError("hdTrans returned an empty translation")
             self._update(userDictionaryError=native.diagnostics(), error=None)
+            if self.settings.preserve_context:
+                self._context = (self._context + "\n" + text).lstrip("\n")[-MAX_CONTEXT_CHARS:]
             return result
         finally:
             self._update(state="READY")
@@ -353,11 +364,13 @@ class HdTransBackend:
             return self._translate(native, *arguments)
         if operation == "reset":
             native.reset()
+            self._context = ""
             self._owner = None
             self._reset_needed = False
         elif operation == "reload":
             self._write_config(self.settings)
             native.reload()
+            self._context = ""
             self._owner = None
             self._update(userDictionaryError=native.diagnostics(), error=None)
         elif operation == "settings":
@@ -378,6 +391,7 @@ class HdTransBackend:
                     native.reload()
                 raise
             self.settings = settings
+            self._context = ""
             self._owner = None
             self._update(userDictionaryError=native.diagnostics(), error=None)
         else:

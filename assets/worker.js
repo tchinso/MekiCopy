@@ -248,6 +248,9 @@ function onProgress(progress) {
   if (shouldSendProgress(percent, progress.status)) {
     setStatus(`${displayMessage} (${percent}%)`);
   }
+  if (progress.status === "done" && file.endsWith(".onnx_data")) {
+    setStatus("모델 파일 로드 완료. 추론 엔진을 초기화하는 중...");
+  }
 }
 
 function cleanTranslationOutput(text) {
@@ -528,6 +531,10 @@ function setupTransformersEnv(runtimeConfig) {
   env.allowLocalModels = true;
   env.localModelPath = "/models/";
   env.useWasmCache = true;
+  // Python already owns the durable model cache. Chromium's Cache.put copies
+  // the entire external-data buffer (1.3 GiB) before the pipeline can finish,
+  // causing memory pressure and stalls in our disposable headless profile.
+  env.useBrowserCache = false;
 
   if (runtimeConfig.modelMode === "local") {
     env.allowRemoteModels = false;
