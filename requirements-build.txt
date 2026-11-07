@@ -1,17 +1,26 @@
-# Reproducible Windows build/runtime dependencies (verified 2026-10-23).
+# Reproducible Windows build/runtime dependencies (verified 2026-11-07).
 pyinstaller==6.22.3
 meikiocr==0.3.5
 mss==10.2.0
 pillow==13.0.0
 numpy==2.5.4
 opencv-python-headless==5.0.0.93
-fastapi==0.161.1
+fastapi==0.162.1
 uvicorn[standard]==0.54.0
-pydantic==2.14.1
-typer==0.27.3
-huggingface-hub==2.3.0
-onnxruntime==1.31.0
+pydantic==2.14.3
+typer==0.28.0
+huggingface-hub==2.4.0
+onnxruntime==1.31.1
 # Full bundles CUDA 13/cuDNN; Lite downloads the same verified DLLs on demand.
-onnxruntime-gpu[cuda,cudnn]==1.31.0
-sherpa-onnx==1.13.8
+onnxruntime-gpu[cuda,cudnn]==1.31.1
+# Exact CUDA/cuDNN runtime versions verified in assets/gpu_runtime_manifest.json.
+# Pin them explicitly so the build's eager upgrade cannot drift the bundled DLL hashes.
+nvidia-cublas==13.8.0.4
+nvidia-cuda-nvrtc==13.4.92
+nvidia-cuda-runtime==13.4.92
+nvidia-cudnn-cu13==9.27.0.42
+nvidia-cufft==12.4.0.43
+nvidia-curand==10.4.4.72
+nvidia-nvjitlink==13.4.92
+sherpa-onnx==2.0.1
 soundcard==0.4.6

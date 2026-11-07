@@ -13,9 +13,9 @@ ASSETS = ROOT / "assets"
 class RuntimeAssetManifestTests(unittest.TestCase):
     def test_manifest_versions_and_file_hashes(self) -> None:
         manifest = json.loads((ASSETS / "runtime_manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["transformers"]["version"], "4.3.1")
-        self.assertEqual(manifest["transformers"]["buildOverride"]["onnxRuntimeWeb"], "1.30.0")
-        self.assertEqual(manifest["onnxRuntimeWeb"]["version"], "1.30.0")
+        self.assertEqual(manifest["transformers"]["version"], "4.3.2")
+        self.assertEqual(manifest["transformers"]["buildOverride"]["onnxRuntimeWeb"], "1.31.1")
+        self.assertEqual(manifest["onnxRuntimeWeb"]["version"], "1.31.1")
 
         for entry in manifest["files"]:
             path = ASSETS / entry["path"]
@@ -29,8 +29,9 @@ class RuntimeAssetManifestTests(unittest.TestCase):
 
     def test_custom_bundle_contains_latest_ort(self) -> None:
         bundle = (ASSETS / "transformers.min.js").read_bytes()
-        self.assertIn(b'1.30.0', bundle)
+        self.assertIn(b'1.31.1', bundle)
         self.assertNotIn(b'1.31.0-dev.20260914-8d85527a0', bundle)
+        self.assertNotIn(b'1.30.0', bundle)
 
 
 if __name__ == "__main__":

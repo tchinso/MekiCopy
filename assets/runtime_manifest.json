@@ -1,26 +1,27 @@
 {
   "transformers": {
     "package": "@huggingface/transformers",
-    "version": "4.3.1",
-    "sourceCommit": "511bb61a7c46b73e33f1af3fb308fbd1afe98c02",
-    "upstreamNpmIntegrity": "sha512-5+voSeUCFK6PCKlY15dPhNOKq3/zOTxDN7oC+Wy9dFb1QZ0TSQomZRRy7URRK8YRuUoE9fGMQTTPC5d/pWBJhA==",
+    "version": "4.3.2",
+    "sourceCommit": "028721487d55aac3c7f6bad8d87d1b3511a1027c",
+    "upstreamNpmIntegrity": "sha512-V3+dqf3iWlRYJ9I9GreM3zGQd0lAXnnoPeddmkOQYWAEE4l/+Fi6p7tx/qVUJlKQgLXGim2W76rTOzz+eC0i7g==",
     "buildOverride": {
-      "onnxRuntimeWeb": "1.30.0",
-      "node": "24.22.1",
-      "pnpm": "11.25.0"
+      "onnxRuntimeWeb": "1.31.1",
+      "onnxRuntimeNode": "1.31.1",
+      "node": "24.21.0",
+      "pnpm": "10.28.1"
     }
   },
   "onnxRuntimeWeb": {
     "package": "onnxruntime-web",
-    "version": "1.30.0",
-    "commit": "f2c39fe2f838cf35ce7da92824f5a5e3ee6e88a7",
-    "npmIntegrity": "sha512-q0y+JrrtukXSzsBWEMccVfqX25LRmosXHF+CaRJmg8pZClzcV7svNc4rKY3jL02Vb7QmRMDs1SigqR4CXAfKYQ=="
+    "version": "1.31.1",
+    "commit": "6af1a932e2286d5c58166085d24c68783033edee",
+    "npmIntegrity": "sha512-5GeH+bWQ+HxM10z7erGlsWqryrwMbSvm/1tkIsKTT48g0fI19VXVVC435t4t7VsPdSQeS7NmuZPXrQ73k82URw=="
   },
   "files": [
     {
       "path": "transformers.min.js",
-      "size": 586056,
-      "sha256": "668aef169155c79d7b22a9dfd9dc6dd01792469bcb80e3951005dd28359d7903"
+      "size": 592542,
+      "sha256": "9f96a9e124645da3f7897ae7fd40ea0dc796f86eac2679d2d691eeb4bf0fce59"
     },
     {
       "path": "transformers.LICENSE.txt",
@@ -44,8 +45,8 @@
     },
     {
       "path": "worker.js",
-      "size": 23853,
-      "sha256": "e5ff214075c98f5504b7be014ee1e4b4573e1798e9f8e135119a7a81d52f9e45"
+      "size": 23855,
+      "sha256": "8e5d9c7023b0628ac387d6cc4584c4c3cef87276cb042e34ec260d28a7f6a1b0"
     },
     {
       "path": "translator_api_worker.html",
@@ -59,43 +60,43 @@
     },
     {
       "path": "wasm/ort-wasm-simd-threaded.asyncify.mjs",
-      "size": 53057,
-      "sha256": "3d1c85995364bb643302fc6fd877a0c3ba5ae72401815e0f24828a53d9191e28"
+      "size": 53457,
+      "sha256": "59cf781530e1a16df2a291d78798e3ec1152467edaec402d6f9599d85047c302"
     },
     {
       "path": "wasm/ort-wasm-simd-threaded.asyncify.wasm",
-      "size": 26781914,
-      "sha256": "39f9f0894d478800487ed9f7dbe92618498db320cf55c8e3d89adff8dce658da"
+      "size": 28747738,
+      "sha256": "ca319e9539cd0f1e291cf56074760121eaf39650f5dbf84b6e52c07f4b2944ec"
     },
     {
       "path": "wasm/ort-wasm-simd-threaded.jsep.mjs",
-      "size": 46851,
-      "sha256": "709853412fd1ffc34247af1e73569227b5b79629c5ca3f59cc39cf7e500e4947"
+      "size": 47250,
+      "sha256": "7838b4b2e77d6f1a739cd0de800e7f18a089328b365e6af4d416a88a94fd7fd3"
     },
     {
       "path": "wasm/ort-wasm-simd-threaded.jsep.wasm",
-      "size": 28312028,
-      "sha256": "3ad23231b5bd6d9dda55a7f84606315e0bf35b6750c28ee993c987c54cacab0f"
+      "size": 29520971,
+      "sha256": "5ab8361783822d02a57d1e97cf2514bceb451a628f2b29ae0d7b6e618201ff8f"
     },
     {
       "path": "wasm/ort-wasm-simd-threaded.jspi.mjs",
-      "size": 50918,
-      "sha256": "270e2c6da9f297239d301d329782b6446641cb1e16a77967690adcfca35f3268"
+      "size": 51321,
+      "sha256": "eeb051cdbdb9f6edd8992cb4f81ad3c94ad01e4d8f767ffb415143e8afc41fc5"
     },
     {
       "path": "wasm/ort-wasm-simd-threaded.jspi.wasm",
-      "size": 16758545,
-      "sha256": "a54c76f86b0f0d9572380cf1c6292a7b3903716ffcbcd6b0e5c7050bf430eb93"
+      "size": 17920659,
+      "sha256": "b89a3efceeb6df2ba29a66fef59f48fd7b7c22a62af54c3cfe05e63863a07fd5"
     },
     {
       "path": "wasm/ort-wasm-simd-threaded.mjs",
-      "size": 24381,
-      "sha256": "e13f7f94fc51b4ca72b12faeb1ee95f4ace6dfbc8939bc718aabdc0a27c4299b"
+      "size": 24738,
+      "sha256": "30ed0b5cd1182ede931fea448afb567d4dc705ec957af09f108a2be5f770dac3"
     },
     {
       "path": "wasm/ort-wasm-simd-threaded.wasm",
-      "size": 14239897,
-      "sha256": "3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2"
+      "size": 14848852,
+      "sha256": "4b884c203b0fa48d057be3332c65513ff85aa3c5bddd6946acc0fab7ecda001d"
     }
   ]
 }

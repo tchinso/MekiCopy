@@ -26,9 +26,10 @@ class HdTransInstallTests(unittest.TestCase):
             "hdTransEngine.dll": b"native C API DLL",
             "hdtrans-data/dicts.hdsnap": b"same release snapshot",
             "hdtrans-data/dicts.txt": (download.DICTIONARY_VERSION + "\n").encode(),
-            "LICENSE": b"MPL license",
+            "LICENSE": b"AGPL license",
             "THIRD-PARTY-NOTICES.txt": b"notices",
             "hdtrans-data/user/hdtrans.config.example.yaml": b"# config example",
+            "hdtrans-data/user/names.example.txt": b"# names example",
             "hdtrans-data/user/userdict.example.txt": b"# dictionary example",
             download.SOURCE_NAME: self.source.read_bytes(),
         }

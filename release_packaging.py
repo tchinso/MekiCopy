@@ -188,7 +188,7 @@ def verify_hdtrans_payload(release_root: Path, flavor: str) -> dict | None:
     # Only official examples are packaged. Saved user files/configs belong in
     # the writable runtime store, never in a distributed Full engine generation.
     for user_file in installed.joinpath(DATA_DIR, "user").iterdir():
-        if user_file.name not in {"hdtrans.config.example.yaml", "userdict.example.txt"}:
+        if user_file.name not in {"hdtrans.config.example.yaml", "names.example.txt", "userdict.example.txt"}:
             raise ValueError(f"Saved hdTrans user settings must not be distributed: {user_file.name}")
     return {"version": VERSION, "dictionaryVersion": DICTIONARY_VERSION,
             "archiveSha256": ARCHIVE_SHA256, "sourceCommit": SOURCE_COMMIT,

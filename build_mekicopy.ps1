@@ -16,9 +16,9 @@ $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
-$PipVersion = "26.2.2"
+$PipVersion = "26.3"
 $RequirementsFile = Join-Path $PSScriptRoot "requirements-build.txt"
-$OnnxRuntimeGpuVersion = "1.31.0"
+$OnnxRuntimeGpuVersion = "1.31.1"
 
 function Test-BuildPython {
     param([Parameter(Mandatory = $true)][string]$Candidate)
@@ -594,12 +594,12 @@ function Invoke-HealthSmokeTest {
     }
 }
 
+$script:PythonExe = Resolve-BuildPython -RequestedPython $PythonExe
+Write-Host "Using build Python: $script:PythonExe"
 Assert-RuntimeAssetManifest `
     -AssetsRoot (Join-Path $PSScriptRoot "assets") `
     -Description "Source HYTrans"
 
-$script:PythonExe = Resolve-BuildPython -RequestedPython $PythonExe
-Write-Host "Using build Python: $script:PythonExe"
 $liteBuildRoot = Join-Path $PSScriptRoot "MekiCopy-Lite"
 if ($ReuseLiteBuild) {
     if ($PackageFlavor -ne "Full") {
@@ -856,8 +856,8 @@ if ($PackageFlavor -eq "Full") {
     $hdTransPrepareArgs = @(
         "-m", "hytrans.hdtrans_download", "--prepare-build", (Join-Path $hyTransRoot "hdtrans")
     )
-    $hdTransArchiveCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-0.7.6-windows.zip"
-    $hdTransSourceCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-v0.7.6-source.zip"
+    $hdTransArchiveCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-0.9.3-windows.zip"
+    $hdTransSourceCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-v0.9.3-source.zip"
     if ($FullHdTransRoot) {
         $hdTransPrepareArgs += @("--from-bundle-root", $FullHdTransRoot)
     }

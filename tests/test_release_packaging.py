@@ -102,7 +102,7 @@ class ReleaseFlavorParityTests(unittest.TestCase):
                 (directory / "MekiCopy.exe").write_bytes(b"runtime")
             for relative in (
                 "HYTrans/models/owner/model/model.onnx",
-                "HYTrans/hdtrans/installations/0.7.6-windows-x64/hdTransEngine.dll",
+                "HYTrans/hdtrans/installations/0.9.3-windows-x64/hdTransEngine.dll",
                 "MekiAudioCapture/models/vad/vad.onnx",
                 "MekiCopy/_internal/runtime_models/meikiocr/ocr.onnx",
                 "MekiCopy/_internal/nvidia/cudnn/bin/cudnn64_9.dll",

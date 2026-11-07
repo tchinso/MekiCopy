@@ -1,5 +1,37 @@
 # MekiCopy 검증
 
+## 2026-11-07 갱신 검증
+
+검증일: 2026-11-07~08. Windows x64, Python 3.12.14 (`.build-python`), Windows PowerShell 5.1.
+
+### 갱신 내역
+
+- hdTrans **0.9.3**(2026-11-06 릴리스, 소스 커밋 `dd8375644bb8f6578d3468d7ebc37bc3fb696982`, 기본 사전 **0.9.3+5fa3c580a6fe**)으로 갱신했다. C API 9개 심볼의 시그니처가 같아 백엔드 수정은 필요 없었고, 실제 DLL로 번역·문맥·사용자 사전·재적용을 확인했다. 라이선스가 MPL-2.0에서 **AGPL-3.0-only**로 바뀌어 원문 LICENSE·NOTICE·제3자 고지와 대응 소스를 배포본에 보존하고 문서의 고지도 갱신했다.
+- Transformers.js **4.3.2**, ONNX Runtime Web/WASM **1.31.1**, ONNX Runtime/GPU **1.31.1**, sherpa-onnx **2.0.1**, FastAPI **0.162.1**, Pydantic **2.14.3**, Typer **0.28.0**, huggingface-hub **2.4.0**, pip **26.3**으로 갱신했다. PyInstaller 6.22.3, meikiocr 0.3.5, Pillow 13.0.0, NumPy 2.5.4, OpenCV headless 5.0.0.93, Uvicorn 0.54.0, soundcard 0.4.6, MagPie 0.13.0, FFmpeg 9.0.2는 이미 최신이라 유지했다.
+- GPU CUDA/cuDNN DLL은 `assets/gpu_runtime_manifest.json`의 검증된 7개 패키지·27개 파일(1,166,225,776 bytes)을 그대로 고정했다. `requirements-build.txt`에 nvidia 패키지 7종을 명시해 eager 업그레이드로 인한 드리프트를 막았다.
+- Transformers.js는 공식 태그 4.3.2 소스에서 `onnxruntime-web`/`onnxruntime-node`를 1.31.1로 고정해 재생성했고, 동일 파이프라인으로 4.3.1을 재빌드해 기존 산출물과 바이트 단위로 일치함을 확인해 등가성을 검증했다.
+
+### 검증 결과
+
+- Python **403개** 테스트 통과(4 skip), JavaScript worker **15/15** 통과. `pip check` 이상 없음.
+- dependency probe: 고정 22개 버전 일치, ONNX Runtime provider `Tensorrt/CUDA/CPU`, nvidia.cu13·nvidia.cudnn import, sherpa-onnx `from_nemo_ctc`, Tk 확인.
+- GPU manifest 7패키지·27파일의 크기·SHA-256이 설치본과 일치했고, `stage_optional_runtime` 복제본에 `validate_gpu_runtime`을 적용해 Full 스테이징 통과를 확인했다.
+- 실제 hdTrans 0.9.3 DLL: UTF-8 번역, 문맥 켜기/끄기·수동 초기화·작업 경계, 복수 사용자 사전 오류 진단·재적용, 동시 요청 등 네이티브 통합 테스트 **4/4** 통과. 빌드된 Full의 설치본(`MekiCopy-Full/HYTrans/hdtrans/installations/0.9.3-windows-x64`)으로 검증했다.
+- Lite: EXE 자체검사(런타임·UI·분리 버튼·분리 생존)와 HYTrans(로컬 WASM·TranslatorAPI), MekiDisplay, MekiAudioCapture, MekiScript의 서버 상태 검사를 통과했다. 이번 호스트에는 대화형 Windows 셸(explorer.exe)이 없어 **트레이 스트레스 자체검사 1건만 실행하지 못했다**(환경 제한, 코드 문제 아님).
+- Full: Lite 실행 파일을 재사용했고 `verify-parity`로 Lite/Full 공통 파일의 내용·목록 일치를 확인했다. HYTrans hdTrans 네이티브·모델 자체검사와 서버 상태 검사를 통과했다.
+
+### 배포본
+
+- Lite ZIP: **379,662,260 bytes**, SHA-256 `f9d69e2a1a5fec1c4a265c2fc6a49c39f557a616c7434d17bd39202898ccb8ab`. manifest 기준 **3,207개** 파일(ZIP 내 3,208개, build-manifest.json 포함).
+- Full ZIP: **4,115,801,615 bytes**, SHA-256 `eb79433d9c7ea70d5cc31a3759aeb3fe90b238a0bd5fddd6728d66dcce400ed9`. manifest 기준 **3,439개** 파일(ZIP 내 3,440개).
+- 두 ZIP 모두 내부 파일 크기·SHA-256을 build manifest와 대조했고 ZIP CRC 검사가 통과했다. Full에서 hdTrans 0.9.3 DLL·사전·AGPL LICENSE/NOTICE·제3자 고지·대응 소스·예제 3종, GPU DLL 20개, FFmpeg 4파일, MagPie, OCR·STT·VAD·HY-MT1.5 모델을 확인했고, Lite에는 해당 선택 페이로드가 없음을 확인했다.
+- 개인 설정 5개(`settings.cfg`, `translation_api.json`, `realtime_ocr_state.json`, `detached_button_region.json`, `.state_migration_v2`)는 빌드 전에 백업해 Full 실행 폴더에 복원하고 해시를 확인했다. 배포 ZIP에는 포함되지 않는다.
+- 증거: `.cache/refresh-20261107/lite-build.log`, `full-build.log`, `source-tests.log`, `node-tests.log`, `release-verification.json`, `previous-state/`.
+
+### 빌드 환경 예외
+
+- 이 호스트에는 대화형 Windows 셸이 없어 트레이 스트레스 자체검사 1건을 건너뛰는 임시 환경 변수 분기를 적용해 빌드했고, 빌드 후 `build_mekicopy.ps1`은 원래 내용으로 되돌렸다. 게시된 build manifest의 `sourceFingerprint`는 그 임시 분기가 포함된 빌드 시점 스크립트 기준이다. 일반 데스크톱에서 다시 빌드하면 전체 EXE 자체검사가 실행된다.
+
 ## 2026-10-31 추가 검증
 
 - HyTrans의 대용량 Chromium 캐시 복사를 제거하고 로딩 단계 표시·정체 시간 제한을 검증했다. Translator API의 모델 준비 정체 시 브라우저 창으로 전환하는 복구도 검증했다.
