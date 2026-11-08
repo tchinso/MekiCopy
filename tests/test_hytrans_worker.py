@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from fastapi.testclient import TestClient
+
 import hytrans_main
 from hytrans import app as hytrans_app
 from hytrans import config, model_files, paths
@@ -14,6 +16,19 @@ from hytrans.queue import TranslationQueue, TranslationQueueOverloadedError
 
 
 class HytransDefaultsTests(unittest.TestCase):
+    def test_local_wasm_requires_both_cpu_and_webgpu_runtime_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            assets = Path(temporary)
+            wasm = assets / "wasm"
+            wasm.mkdir()
+            for suffix in (".asyncify.mjs", ".asyncify.wasm"):
+                (wasm / f"ort-wasm-simd-threaded{suffix}").touch()
+            with mock.patch.object(config, "assets_dir", return_value=assets):
+                self.assertFalse(config.has_local_wasm_files())
+                for suffix in (".mjs", ".wasm"):
+                    (wasm / f"ort-wasm-simd-threaded{suffix}").touch()
+                self.assertTrue(config.has_local_wasm_files())
+
     def test_mt15_is_the_only_supported_local_model(self) -> None:
         self.assertEqual(model_files.DEFAULT_MODEL_ID, "mt1.5")
         self.assertEqual(config.DTYPE, "q4")
@@ -127,6 +142,16 @@ class HytransLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PrivateWorkerTests(unittest.TestCase):
+    def test_local_worker_is_isolated_for_wasm_threads(self) -> None:
+        client = TestClient(hytrans_app.app)
+        local_worker = client.get("/worker.html")
+        self.assertEqual(local_worker.status_code, 200)
+        self.assertEqual(local_worker.headers["cross-origin-opener-policy"], "same-origin")
+        self.assertEqual(local_worker.headers["cross-origin-embedder-policy"], "require-corp")
+        translator_worker = client.get("/translator_api_worker.html")
+        self.assertEqual(translator_worker.status_code, 200)
+        self.assertNotIn("cross-origin-embedder-policy", translator_worker.headers)
+
     def test_worker_command_is_headless_and_has_no_closeable_app_window(self) -> None:
         command = BrowserManager._worker_command(
             "edge.exe",

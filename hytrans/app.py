@@ -698,7 +698,15 @@ async def model_status() -> dict[str, object]:
 
 @app.get("/worker.html")
 async def worker_html() -> FileResponse:
-    return FileResponse(assets_dir() / "worker.html")
+    # SharedArrayBuffer allows ONNX Runtime to use its WASM thread pool. Without
+    # isolation Chromium silently limits CPU translation to a single thread.
+    return FileResponse(
+        assets_dir() / "worker.html",
+        headers={
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Embedder-Policy": "require-corp",
+        },
+    )
 
 
 @app.get("/hdtrans/status")

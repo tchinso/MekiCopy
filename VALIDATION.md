@@ -1,5 +1,47 @@
 # MekiCopy 검증
 
+## 2026-11-08 호환성 재점검
+
+대상은 `aa0090a`(2.1.4)의 의존성 갱신과 그 호출부다. Windows x64, Python 3.12.14, `requirements-build.txt`의 고정 22개 패키지를 사용했다. 패키지를 추가 업그레이드하거나 버전을 되돌리지 않았다.
+
+### 발견 및 수정
+
+- MT1.5 q4의 WASM 대체 실행이 `GatherBlockQuantized` 커널을 찾지 못해 초기화에 실패했다. [ONNX Runtime 공식 이슈 #33961](https://github.com/microsoft/onnxruntime/issues/33961)와 같은 현상이다. CPU에는 이미 동봉된 plain WASM 파일 쌍을 사용하고, 같은 Transformers.js를 별도 ESM URL로 불러와 먼저 초기화된 WebGPU 런타임과 분리했다. 추가 번들은 필요하지 않다. 모델 캐시도 새 환경에 다시 연결하며 worker 해시를 갱신했다.
+- 로컬 worker 문서에 COOP/COEP 헤더가 없어 WASM이 단일 스레드로 실행됐다. `/worker.html` 응답에만 격리 헤더를 추가했다. 실제 브라우저에서 `crossOriginIsolated=true`, SharedArrayBuffer 사용 가능, CPU 3스레드를 확인했다. TranslatorAPI 문서는 영향을 받지 않는다.
+- 트레이의 `NOTIFYICONDATAW`가 중간 필드에서 끝나 잘못된 크기(Windows x64 296 bytes)를 전달하고 있었다. [Windows SDK의 전체 구조체](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw)에 맞게 976 bytes로 교정하고 Shell 호출 시그니처와 실제 WinError 기록을 보강했다.
+- 제한된 환경에서도 빌드 스크립트를 임시 수정하지 않도록 `-SkipTrayStressTest`를 추가했다. 제외한 검사 이름을 manifest의 `skippedSmokeTests`에 남기고, Full이 Lite를 재사용할 때도 보존한다.
+- EXE 검사 실행이 Windows 셸 경유 시작에서 멈추는 현상을 확인해 직접 프로세스를 시작하도록 수정했다. Windows PowerShell 5.1에서 빈 값·공백·따옴표·역슬래시·Unicode 등 13개 인자의 정확한 전달, 종료 코드, 실제 staged EXE 자체검사·HYTrans 상태 확인과 정상 종료를 검증했다.
+- ZIP 체크섬은 `Get-FileHash` cmdlet의 로드 여부에 의존하지 않도록 .NET의 스트리밍 SHA-256으로 계산한다. Lite는 모든 EXE 검사 완료 후 패키징 단계만 이 수정으로 마무리했으며, 실행 파일을 다시 컴파일하지 않고 최종 manifest와 ZIP을 갱신했다.
+
+### 실제 실행 및 회귀 검증
+
+- Python 고유 **409개**를 검증했다. 일반 검사 405개 통과, opt-in 네이티브 검사 4개는 전체 실행에서 skip 후 실제 hdTrans DLL로 별도 실행해 모두 통과했다. 최종 변경의 영향 범위 79개도 통과했다. Tk 경로 검사 3개는 ASCII 임시 경로로 분리 실행했고, 전체 테스트 ID의 누락·중복이 없음을 확인했다. JavaScript worker는 **20/20** 통과했다. `pip check`에서 충돌이 없었다.
+- 실제 WebGPU(AMD gcn-5), Transformers.js 4.3.2 / ONNX Runtime Web 1.31.1로 두 문장을 한국어로 번역했다. TranslatorAPI도 새 프로필에서 모델 설치·두 문장 번역·정상 종료까지 통과했다.
+- 실제 WebGPU pipeline을 생성·해제한 뒤 실패를 주입하고 CPU로 전환했다. 새 WASM 런타임으로 q4 모델을 불러와 `こんにちは。`를 `안녕하세요.`로 번역했다. CPU 3스레드에서 66.77초로 기본 120초 제한 안에 완료했고 EOS와 정상 종료를 확인했다. 단일 스레드 검사는 120초 제한에 실패했으며, 제품의 번역 제한 시간은 늘리지 않았다.
+- FastAPI 0.162.1 / Pydantic 2.14.3 / Uvicorn 0.54.0의 실제 HTTP·WebSocket 통신에서 UTF-8 번역 왕복, 잘못된 입력 422·빈 입력 400, WASM HEAD·Range 206, worker 연결 해제를 확인했다. 이 통신 검사에서는 worker의 번역 응답만 가상으로 제공했으며 위 모델 실추론과 구분한다.
+- hdTrans 0.9.3 실제 DLL의 반복 UTF-8 번역·문맥·작업 경계·사용자 사전 오류/재적용·동시 요청 4개 검사를 통과했다. sherpa-onnx 2.0.1의 실제 Parakeet·ReazonSpeech 샘플 디코딩과 Silero VAD도 통과했다. 동일한 고정 의존성에서 얻은 기존 CPU OCR의 일본어 실추론·세 ONNX 세션 검증 결과는 재사용했다.
+- 13초 일본어 샘플 음성으로 MP4를 만들고 실제 FFmpeg/FFprobe → Silero VAD → Parakeet INT8 → hdTrans → 한국어 SRT 생성까지 실행했다. 4구간 인식·4개 번역·실패 0건이며 자막 순서·시간 범위·UTF-8 BOM 저장을 확인했다. 이는 기능 검사이며 인식·번역 품질 벤치마크는 아니다.
+
+### 환경과 검증 범위
+
+- 이 호스트의 RAM은 약 5.9 GiB로 README의 최소 8GB보다 작다. 모델 초기화와 CPU 추론 속도는 일반 PC의 성능 기준으로 해석하지 않는다.
+- 현재 Explorer는 존재한다. 테스트 프로세스가 Low 무결성(RID 4096), Explorer가 Medium(RID 8192)이어서 실제 `Shell_NotifyIconW` 호출이 `ERROR_ACCESS_DENIED(5)`로 거부된다. 따라서 트레이 반복 검사는 실행 환경 제약으로 제외하며, ABI·오류 처리 회귀 검사는 통과했다.
+- 브라우저 검증 harness에만 쓰기 가능한 TEMP와 `--no-sandbox`를 적용했다. 제품의 브라우저 실행 옵션은 바꾸지 않았다. 일반 데스크톱 권한에서의 트레이 스트레스, NVIDIA CUDA 실추론, 실제 시스템 소리 녹음과 장시간 연속 사용은 이번 검사에 포함하지 않았다.
+- 증거: `.cache/compat-audit-20261108/source-tests-final-summary.json`, `source-tests-final-affected.json`, `worker-tests.log`, `process-launch-verification.json`, `tray-*-probe.json`, `subtitle-e2e/`; `.cache/browser-review-20261108/*-result.json`; `.cache/review-20261108/native-compatibility.json`, `python-compat/transport.json`, `ocr.log`.
+
+### 최종 Lite / Full 배포본
+
+| 배포본 | ZIP 크기 | SHA-256 |
+|---|---:|---|
+| Lite | 383,968,244 bytes | `1e6982e642d18cded31991d64e0b52adb8a74c2f7a6534778c945400aa1a6685` |
+| Full | 4,120,107,013 bytes | `b4d843815cfca847421095d2213bf882bb686d26c0051b617381c8eb67f8cff2` |
+
+- Lite의 EXE 런타임·UI·분리 버튼·생존 검사, HYTrans 로컬/TranslatorAPI 및 표시기·녹음 엔진 서버 검사를 통과했다. Full은 Lite 실행 파일을 재사용했고 hdTrans 및 Parakeet/ReazonSpeech INT8·FP32 모델 자체 검사도 통과했다. 두 manifest 모두 `skippedSmokeTests: ["tray-stress"]`를 기록한다.
+- 최종 Full EXE의 실제 HTTP `/translate` 요청으로 `今日はいい天気ですね。` → `오늘은 좋은 날씨군요.`를 확인했다. 같은 EXE에서 worker 격리 헤더와 CPU용 쿼리 URL의 원본 번들 일치도 확인하고 정상 종료했다.
+- Lite 3,382개·Full 3,614개 파일과 manifest 자체를 두 ZIP에서 모두 읽어 크기·SHA-256·CRC를 대조했다. 중복·누락·예상하지 않은 파일이 없었다. ZIP의 디렉터리 항목은 파일 개수와 구분했다. Lite/Full 공통 파일 일치, 선택 페이로드의 포함/제외, 최종 소스와 설치 의존성 일치도 확인했다.
+- 두 배포본의 `sourceFingerprint`는 `e3b011c716aa5d040f645b6f4d365facdaf6309035d4d85c959cebaad69ff366`이다. ZIP 검증 후 개인 설정 5개를 로컬 Full 실행 폴더에 복원하고 원래 해시와 일치함을 확인했다. 개인 설정은 배포 ZIP에 포함되지 않는다.
+- 증거: `.cache/compat-audit-20261108/lite-build.log`, `lite-package-complete.log`, `full-build.log`, `release-verification.json`, `frozen-transport.json`, `state-restoration.json`.
+
 ## 2026-11-07 갱신 검증
 
 검증일: 2026-11-07~08. Windows x64, Python 3.12.14 (`.build-python`), Windows PowerShell 5.1.

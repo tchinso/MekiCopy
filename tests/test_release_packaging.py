@@ -10,6 +10,24 @@ import release_packaging as packaging
 
 
 class ReleaseReuseTests(unittest.TestCase):
+    def test_reused_full_retains_lite_smoke_test_exclusions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lite, full = root / "Lite", root / "Full"
+            lite.mkdir()
+            full.mkdir()
+            for directory in (lite, full):
+                (directory / "MekiCopy.exe").write_bytes(b"runtime")
+            with mock.patch.object(packaging, "source_fingerprint", return_value="source"):
+                packaging.write_build_manifest(lite, root, "Lite", skipped_smoke_tests=("tray-stress",))
+                packaging.verify_lite_build(lite, root)
+                with mock.patch.object(packaging, "verify_hdtrans_payload", return_value=None):
+                    packaging.write_build_manifest(full, root, "Full", lite_root=lite)
+            for directory in (lite, full):
+                manifest = json.loads((directory / packaging.MANIFEST_NAME).read_text(encoding="utf-8"))
+                self.assertTrue(manifest["smokeTested"])
+                self.assertEqual(manifest["skippedSmokeTests"], ["tray-stress"])
+
     def test_unchanged_metadata_reuses_completed_content_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

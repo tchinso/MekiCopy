@@ -37,6 +37,9 @@ class _WndClassW(ctypes.Structure):
 
 
 class _NotifyIconDataW(ctypes.Structure):
+    # Windows 10+ requires the complete NOTIFYICONDATAW layout. Ending this
+    # structure at szTip gives cbSize=296 on x64, which is not any supported
+    # Shell structure version (the current layout is 976 bytes).
     _fields_ = [
         ("cbSize", wintypes.DWORD),
         ("hWnd", wintypes.HWND),
@@ -45,6 +48,14 @@ class _NotifyIconDataW(ctypes.Structure):
         ("uCallbackMessage", wintypes.UINT),
         ("hIcon", _HICON),
         ("szTip", wintypes.WCHAR * 128),
+        ("dwState", wintypes.DWORD),
+        ("dwStateMask", wintypes.DWORD),
+        ("szInfo", wintypes.WCHAR * 256),
+        ("uVersion", wintypes.UINT),
+        ("szInfoTitle", wintypes.WCHAR * 64),
+        ("dwInfoFlags", wintypes.DWORD),
+        ("guidItem", ctypes.c_byte * 16),
+        ("hBalloonIcon", _HICON),
     ]
 
 
@@ -95,10 +106,7 @@ class WindowsTrayIcon:
                 self._create_message_window()
             if not self._hicon:
                 self._hicon = self._load_icon()
-            data = self._build_notify_data(self.NIF_MESSAGE | self.NIF_ICON | self.NIF_TIP)
-            shell32 = ctypes.windll.shell32
-            if not shell32.Shell_NotifyIconW(self.NIM_ADD, ctypes.byref(data)):
-                return False
+            self._notify_icon(self.NIM_ADD, self.NIF_MESSAGE | self.NIF_ICON | self.NIF_TIP)
             self._active = True
             self._schedule_restore_poll()
             return True
@@ -112,8 +120,7 @@ class WindowsTrayIcon:
             return
         if self._active and self._hwnd:
             try:
-                data = self._build_notify_data(0)
-                ctypes.windll.shell32.Shell_NotifyIconW(self.NIM_DELETE, ctypes.byref(data))
+                self._notify_icon(self.NIM_DELETE, 0)
             except Exception:
                 pass
         self._active = False
@@ -198,6 +205,18 @@ class WindowsTrayIcon:
         data.hIcon = self._hicon or 0
         data.szTip = self.tooltip
         return data
+
+    def _notify_icon(self, message: int, flags: int) -> None:
+        data = self._build_notify_data(flags)
+        notify = ctypes.WinDLL("shell32", use_last_error=True).Shell_NotifyIconW
+        notify.argtypes = [wintypes.DWORD, ctypes.POINTER(_NotifyIconDataW)]
+        notify.restype = wintypes.BOOL
+        ctypes.set_last_error(0)
+        if not notify(message, ctypes.byref(data)):
+            error = ctypes.get_last_error()
+            if error:
+                raise ctypes.WinError(error)
+            raise RuntimeError("Shell_NotifyIconW failed to update the notification area")
 
     def _load_icon(self) -> int:
         user32 = ctypes.windll.user32

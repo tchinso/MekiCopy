@@ -162,6 +162,8 @@ def has_local_wasm_files() -> bool:
     return all(
         (wasm_dir / filename).is_file()
         for filename in (
+            "ort-wasm-simd-threaded.mjs",
+            "ort-wasm-simd-threaded.wasm",
             "ort-wasm-simd-threaded.asyncify.mjs",
             "ort-wasm-simd-threaded.asyncify.wasm",
         )

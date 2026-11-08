@@ -198,10 +198,14 @@ def verify_hdtrans_payload(release_root: Path, flavor: str) -> dict | None:
 def write_build_manifest(
     release_root: Path, source_root: Path, flavor: str, lite_root: Path | None = None,
     smoke_tested: bool = True,
+    skipped_smoke_tests: tuple[str, ...] = (),
 ) -> None:
     reusable = {}
+    skipped = set(skipped_smoke_tests)
     if lite_root is not None:
-        reusable = json.loads((lite_root / MANIFEST_NAME).read_text(encoding="utf-8"))["files"]
+        lite_manifest = json.loads((lite_root / MANIFEST_NAME).read_text(encoding="utf-8"))
+        reusable = lite_manifest["files"]
+        skipped.update(lite_manifest.get("skippedSmokeTests", ()))
     payload_files = release_files(release_root)
     verify_no_saved_api_settings(payload_files)
     if flavor == "Lite":
@@ -224,6 +228,7 @@ def write_build_manifest(
         "version": MANIFEST_VERSION,
         "flavor": flavor,
         "smokeTested": smoke_tested,
+        "skippedSmokeTests": sorted(skipped),
         "sourceFingerprint": source_fingerprint(source_root),
         "pythonVersion": list(sys.version_info[:3]),
         "dependencies": installed_dependencies(),
@@ -293,10 +298,12 @@ def main() -> None:
     parser.add_argument("--lite", type=Path)
     parser.add_argument("--flavor", choices=("Lite", "Full"), default="Lite")
     parser.add_argument("--smoke-tested", action="store_true")
+    parser.add_argument("--skipped-smoke-test", action="append", choices=("tray-stress",), default=[])
     parser.add_argument("--ffmpeg", type=Path)
     args = parser.parse_args()
     if args.action == "manifest":
-        write_build_manifest(args.release, args.source, args.flavor, args.lite, args.smoke_tested)
+        write_build_manifest(args.release, args.source, args.flavor, args.lite, args.smoke_tested,
+                             tuple(args.skipped_smoke_test))
     elif args.action == "verify-lite":
         verify_lite_build(args.release, args.source)
     elif args.action == "verify-runtime":

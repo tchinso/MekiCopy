@@ -16,6 +16,8 @@ Lite에는 NVIDIA CUDA/cuDNN DLL과 FFmpeg를 넣지 않습니다. 공통 실행
 
 GPU 패키지의 URL·버전·파일별 해시는 `assets/gpu_runtime_manifest.json`, 미디어 도구는 `media_tools_download.py`에 정의합니다. 다운로드는 임시 폴더에서 검증을 마친 뒤 게시하며 캐시를 재사용합니다. Full의 `-FfmpegRoot`에는 `ffmpeg.exe`, `ffprobe.exe`, `LICENSE`, `README.txt`가 필요합니다.
 
+Windows 셸에 접근할 수 없는 제한된 빌드 환경에서는 `-SkipTrayStressTest`로 트레이 반복 검사 한 건만 제외할 수 있습니다. 나머지 EXE 자체검사와 서버 검사는 실행하며, `build-manifest.json`의 `skippedSmokeTests`에 `tray-stress`를 기록합니다. Full이 Lite 실행 파일을 재사용하면 이 제외 내역도 이어받습니다. 일반 Windows 데스크톱에서는 이 옵션 없이 빌드하세요.
+
 ## 의존성 기준
 
 2026-11-07 공식 PyPI, npm 및 GitHub 릴리스 기준입니다. Python 패키지는 `requirements-build.txt`의 고정 버전을 사용하며, 빌드 검증도 이 파일을 직접 읽습니다.
@@ -32,6 +34,10 @@ GPU 패키지의 URL·버전·파일별 해시는 `assets/gpu_runtime_manifest.j
 | 미디어 도구 | [FFmpeg / FFprobe 9.0.2 essentials](https://www.gyan.dev/ffmpeg/builds/) |
 
 Transformers.js는 공식 태그 `4.3.2`의 `packages/transformers/scripts/build.mjs`로 생성합니다. `packages/transformers/package.json`의 `onnxruntime-web`과 `onnxruntime-node`를 안정판 `1.31.1`로 고정하고 설치한 뒤 해당 스크립트를 실행합니다. 번들과 WASM은 동일한 ONNX Runtime 버전을 사용해야 하며, 출처·도구 버전·개별 SHA-256은 `assets/runtime_manifest.json`에 기록합니다. 파일 변경 후 해시도 갱신해야 빌드가 통과합니다.
+
+WebGPU는 `ort-wasm-simd-threaded.asyncify.*`, CPU는 `ort-wasm-simd-threaded.*` 쌍을 사용합니다. ONNX Runtime 1.31.1의 WebGPU 빌드에는 MT1.5 q4의 CPU 양자화 커널이 빠지는 [상위 프로젝트 문제](https://github.com/microsoft/onnxruntime/issues/33961)가 있어 CPU에 같은 바이너리를 재사용하면 안 됩니다. WASM 전환 시 같은 검증된 Transformers 번들을 별도 ESM URL(`?backend=wasm`)로 불러와 ONNX Runtime 인스턴스를 분리하므로, WebGPU 초기화 후 실패한 경우에도 CPU 런타임을 새로 초기화할 수 있습니다.
+
+로컬 모델 worker 문서는 COOP/COEP 헤더로 격리하여 WASM의 `SharedArrayBuffer`와 스레드 풀을 사용할 수 있게 합니다. TranslatorAPI worker 문서는 별도 응답을 유지합니다.
 
 OCR 모델 세 파일은 meikiocr가 지정한 Hugging Face 저장소의 최신 main LFS SHA-256과 대조합니다. 일본어 Parakeet `ja-35000`, 일본어 ReazonSpeech `2024-08-01`, Silero VAD는 [sherpa-onnx의 공식 asr-models 자산](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models)을 사용합니다. 언어 및 인식 구조가 다른 모델은 별도 모델로 취급합니다.
 

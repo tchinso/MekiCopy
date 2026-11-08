@@ -2,6 +2,7 @@ param(
     [switch]$SkipDependencyInstall,
     [switch]$SkipSourceTests,
     [switch]$SkipSmokeTests,
+    [switch]$SkipTrayStressTest,
     [string]$PythonExe = "",
     [ValidateSet("Lite", "Full")]
     [string]$PackageFlavor = "Lite",
@@ -439,6 +440,34 @@ function Resolve-ReleaseAssetDirectory {
     throw "Package source for $Description was not found. Checked: $($Candidates -join ', ')"
 }
 
+function Start-HiddenProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Arguments
+    )
+
+    # Windows PowerShell 5.1 has no ProcessStartInfo.ArgumentList. Quote every
+    # argument using the Windows CRT rules: double backslashes before a quote
+    # or the closing delimiter, preserving empty arguments and literal quotes.
+    $quotedArguments = @($Arguments | ForEach-Object {
+        $escaped = [regex]::Replace($_, '(\\*)"', '$1$1\"')
+        $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+        '"' + $escaped + '"'
+    })
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $ExePath
+    $startInfo.Arguments = $quotedArguments -join ' '
+    $startInfo.WorkingDirectory = (Get-Location).ProviderPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $process) {
+        throw "Could not start smoke-test process: $ExePath"
+    }
+    return $process
+}
+
 function Invoke-ExeSmokeTest {
     param(
         [Parameter(Mandatory = $true)][string]$ExePath,
@@ -446,11 +475,7 @@ function Invoke-ExeSmokeTest {
         [int]$TimeoutSeconds = 300
     )
 
-    $process = Start-Process `
-        -FilePath $ExePath `
-        -ArgumentList $Arguments `
-        -PassThru `
-        -WindowStyle Hidden
+    $process = Start-HiddenProcess -ExePath $ExePath -Arguments $Arguments
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         throw "Smoke test timed out: $ExePath $($Arguments -join ' ')"
@@ -485,11 +510,7 @@ function Invoke-HealthSmokeTest {
         [int]$TimeoutSeconds = 30
     )
 
-    $process = Start-Process `
-        -FilePath $ExePath `
-        -ArgumentList $Arguments `
-        -PassThru `
-        -WindowStyle Hidden
+    $process = Start-HiddenProcess -ExePath $ExePath -Arguments $Arguments
     $controlToken = ""
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -1146,7 +1167,12 @@ if (-not $SkipSmokeTests) {
     Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-runtime")
     if (-not $ReuseLiteBuild) {
         Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-ui")
-        Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-tray-stress")
+        if ($SkipTrayStressTest) {
+            Write-Warning "Tray stress test explicitly skipped; this exclusion is recorded in build-manifest.json."
+        }
+        else {
+            Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-tray-stress")
+        }
         Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-detached-button")
         Invoke-ExeSmokeTest $mekiCopyExe @("--self-test-detached-survival")
         Invoke-ExeSmokeTest $hyTransExe @("--self-test-api")
@@ -1278,6 +1304,9 @@ if ($ReuseLiteBuild) {
 }
 if (-not $SkipSmokeTests) {
     $manifestArguments += "--smoke-tested"
+    if ($SkipTrayStressTest -and -not $ReuseLiteBuild) {
+        $manifestArguments += @("--skipped-smoke-test", "tray-stress")
+    }
 }
 Invoke-CheckedPython $manifestArguments
 
@@ -1287,7 +1316,15 @@ $releaseChecksumPath = "$releaseArchivePath.sha256"
 $stagedArchivePath = Join-Path $stagingRoot "$releaseName-one-dir.zip"
 $stagedChecksumPath = "$stagedArchivePath.sha256"
 New-ReleaseZip -SourceRoot $distRoot -ArchivePath $stagedArchivePath
-$releaseHash = (Get-FileHash -LiteralPath $stagedArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$archiveStream = [System.IO.File]::OpenRead($stagedArchivePath)
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $releaseHash = ([System.BitConverter]::ToString($sha256.ComputeHash($archiveStream))).Replace("-", "").ToLowerInvariant()
+}
+finally {
+    $archiveStream.Dispose()
+    $sha256.Dispose()
+}
 $releaseChecksum = "$releaseHash *$(Split-Path -Leaf $releaseArchivePath)"
 Set-Content -LiteralPath $stagedChecksumPath -Value $releaseChecksum -Encoding ASCII
 

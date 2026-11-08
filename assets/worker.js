@@ -1,4 +1,8 @@
-import { env, pipeline } from "/assets/transformers.min.js";
+import { env as initialEnv, pipeline as initialPipeline } from "/assets/transformers.min.js";
+
+let env = initialEnv;
+let pipeline = initialPipeline;
+let wasmRuntimeLoaded = false;
 
 let generator = null;
 let socket = null;
@@ -527,7 +531,7 @@ function installModelBackupCache() {
   modelBackupCacheInstalled = true;
 }
 
-function setupTransformersEnv(runtimeConfig) {
+function setupTransformersEnv(runtimeConfig, device = "webgpu") {
   env.allowLocalModels = true;
   env.localModelPath = "/models/";
   env.useWasmCache = true;
@@ -544,12 +548,13 @@ function setupTransformersEnv(runtimeConfig) {
   }
 
   if (runtimeConfig.hasLocalWasm && env.backends?.onnx?.wasm) {
-    // Transformers.js 4.3.2 with ONNX Runtime Web 1.31.1 selects the asyncify
-    // runtime for Chromium. Keep the pair explicit so its preloader/cache
-    // never falls back to the CDN.
+    // The WebGPU WASM build omits the CPU GatherBlockQuantized kernel used by
+    // MT1.5 q4. CPU inference needs the full, plain WASM build instead.
+    // https://github.com/microsoft/onnxruntime/issues/33961
+    const suffix = device === "wasm" ? "" : ".asyncify";
     env.backends.onnx.wasm.wasmPaths = {
-      mjs: "/assets/wasm/ort-wasm-simd-threaded.asyncify.mjs",
-      wasm: "/assets/wasm/ort-wasm-simd-threaded.asyncify.wasm",
+      mjs: `/assets/wasm/ort-wasm-simd-threaded${suffix}.mjs`,
+      wasm: `/assets/wasm/ort-wasm-simd-threaded${suffix}.wasm`,
     };
   }
 
@@ -564,7 +569,23 @@ function setupTransformersEnv(runtimeConfig) {
   }
 }
 
+async function loadWasmTransformers() {
+  // A distinct ESM URL gives WASM its own inlined ONNX Runtime instance. Merely
+  // changing wasmPaths cannot replace a WebGPU factory that already initialized
+  // before its model/session failed. Both imports use the same verified asset.
+  return await import("/assets/transformers.min.js?backend=wasm");
+}
+
 async function createPipeline(device) {
+  if (device === "wasm" && !wasmRuntimeLoaded) {
+    const runtime = await loadWasmTransformers();
+    env = runtime.env;
+    pipeline = runtime.pipeline;
+    // Custom model-cache callbacks belong to the previous module's env too.
+    modelBackupCacheInstalled = false;
+    setupTransformersEnv(config, "wasm");
+    wasmRuntimeLoaded = true;
+  }
   return await pipeline("text-generation", config.modelId, {
     dtype: config.dtype,
     device,
