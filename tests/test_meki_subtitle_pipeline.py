@@ -75,6 +75,23 @@ class MekiSubtitlePathTests(unittest.TestCase):
 
 
 class MekiSubtitlePipelineTests(unittest.TestCase):
+    def test_padded_segments_keep_repeated_dialogue_and_nonoverlapping_cues(self) -> None:
+        recognizer = SimpleNamespace(
+            create_stream=lambda: SimpleNamespace(
+                result=SimpleNamespace(text="はい"), accept_waveform=lambda *_args: None
+            ),
+            decode_stream=lambda _stream: None,
+        )
+        segments = [
+            SimpleNamespace(start_time=start, end_time=end, previous_overlap=0.0,
+                            audio=np.zeros(512, dtype=np.float32))
+            for start, end in ((0.0, 1.5), (1.3, 2.0))
+        ]
+        results = pipeline._recognize_segments(
+            recognizer, segments, model_name="Parakeet", status=None, cancel_event=None
+        )
+        self.assertEqual(results, [(0.0, 1.5, "はい"), (1.5, 2.0, "はい")])
+
     def test_positional_only_translator_options_are_not_passed_as_keywords(self):
         def translate(text, timeout=7, /):
             return f"{text}:{timeout}"
@@ -167,8 +184,7 @@ class MekiSubtitlePipelineTests(unittest.TestCase):
                 mock.patch.object(pipeline, "extract_original_audio"),
                 mock.patch.object(pipeline, "writable_app_subdir", return_value=root),
                 mock.patch.object(audio_capture_core, "wav_to_mono_16k", return_value=np.zeros(16_000, dtype=np.float32)),
-                mock.patch.object(audio_capture_core, "collect_vad_intervals", return_value=[(0, 16_000)]),
-                mock.patch.object(audio_capture_core, "build_segments", return_value=[segment]),
+                mock.patch.object(pipeline, "collect_subtitle_segments", return_value=(1, [segment])) as collect,
                 mock.patch.object(audio_capture_core, "create_recognizer", return_value=FakeRecognizer()),
             ):
                 summary = pipeline.process_video(
@@ -183,6 +199,9 @@ class MekiSubtitlePipelineTests(unittest.TestCase):
         self.assertEqual(translated, ["日本語"])
         self.assertEqual(summary.recognized, 1)
         self.assertEqual(summary.translated, 1)
+        self.assertNotIn("vad_preset", collect.call_args.kwargs)
+        self.assertEqual(collect.call_args.kwargs["preset_name"], "FAST")
+        self.assertIn("check_cancel", collect.call_args.kwargs)
         self.assertIn("00:00:01,250 --> 00:00:02,500", text)
         self.assertIn("한국어", text)
 
@@ -255,7 +274,7 @@ class MekiSubtitleIntegrationTests(unittest.TestCase):
                 "parakeet",
                 "int8",
             )
-        self.assertEqual(process.call_args.kwargs["vad_preset"], "FAST")
+        self.assertNotIn("vad_preset", process.call_args.kwargs)
         translate_cue = process.call_args.kwargs["translate"]
         self.assertEqual(translate_cue("最初"), "번역")
         self.assertEqual(translate_cue("次"), "번역")

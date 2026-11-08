@@ -1,5 +1,21 @@
 # MekiCopy 검증
 
+## 2026-11-09 VAD 프리셋 조정
+
+- FAST에 NyanKat-Tab `5af4ce39`의 VAD 값 14개와 확률 기반 구간 분할을 적용했다. BALANCED/LONG은 사용자가 확정한 음성 임계값 0.2/0.4, 최소 발화 0.1/0.2초, 종료 무음 0.4/0.6초, 약한 발화 종료 무음 1.5/1.2초, 앞·뒤 패딩 각 0.3/0.5초를 적용했다. LONG의 휴지점 탐색 범위는 0이다.
+- 영상은 FAST를 사용한다. 녹음 후 처리와 실시간 녹음도 같은 경계 추적기를 사용하며, 가까운 구간과 겹치는 패딩을 추가로 합치던 경로를 제거했다. `short_segment_max_duration`과 `is_short`는 동작에 사용되지 않아 설정·데이터 구조·전달 코드에서 제거했다. VAD/STT 모델 캐시는 기존 공용 캐시를 유지한다.
+- 영향 범위 Python 테스트 **82개**가 통과했다. 원본 NyanKat JavaScript와 **88개 사례·134,725프레임·확정 구간 880개**의 경계·강제 분할·겹침 및 FAST 상수 14개를 대조했다. 영상/녹음 종료 시 추가하는 EOF 처리는 원본 실시간 JavaScript와 구분해 검증했다.
+- 실제 일본어 음성에서 FAST/BALANCED/LONG 각각 **3/4/4개** 구간을 얻었다. 48 kHz 입력을 잘게 나눈 실시간 처리와 16 kHz 일괄 처리의 경계·메타데이터·오디오가 모두 일치했다. 13초 MP4의 FFmpeg → Silero 확률 추론 → Parakeet INT8 → hdTrans → 한국어 SRT 생성도 **4개 인식·4개 번역·실패 0건**으로 통과했다.
+- 변경하지 않은 OCR·브라우저 번역·의존성의 고비용 검증은 2026-11-08 결과를 재사용했다. 증거: `.cache/subtitle-vad-20261109/source-tests.json`, `nyankat-parity-result.json`, `real-vad-stream-result.json`, `subtitle-e2e/result.json`.
+- 최종 Lite/Full 빌드와 실행 파일·서버·Full 모델 자체 검사를 통과했다. 기존 권한 제약으로 트레이 반복 검사만 제외해 두 manifest에 기록했다. 공통 실행 파일과 소스 fingerprint가 일치하며, Lite 3,388개·Full 3,620개 파일을 ZIP에서 모두 읽어 크기·SHA-256·CRC를 확인했다. 개인 설정 5개는 ZIP 검증 후 Full 실행 폴더에 복원하고 백업 해시와 대조했다.
+
+| 배포본 | ZIP 크기 | SHA-256 |
+|---|---:|---|
+| Lite | 398,193,392 bytes | `0965daf8316dbb0b8ca7bcc173f6603131a83184c378203e56d8eedefd429c91` |
+| Full | 4,134,332,177 bytes | `0c1f187c6d98f09643cf7ce63247274762e0e74152959d273869c746fb651902` |
+
+- 빌드·배포 증거: `.cache/subtitle-vad-20261109/lite-build.log`, `full-build.log`, `release-verification.json`, `state-restoration.json`.
+
 ## 2026-11-08 호환성 재점검
 
 대상은 `aa0090a`(2.1.4)의 의존성 갱신과 그 호출부다. Windows x64, Python 3.12.14, `requirements-build.txt`의 고정 22개 패키지를 사용했다. 패키지를 추가 업그레이드하거나 버전을 되돌리지 않았다.

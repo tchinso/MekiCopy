@@ -32,13 +32,9 @@ from audio_capture_core import (
     STTResult,
     STT_MODELS,
     SpeechSegment,
-    VAD_PRESETS,
     append_script_text,
-    build_segments,
     cleanup_work_files,
-    collect_vad_intervals,
     create_recognizer,
-    create_voice_activity_detector,
     effective_stt_precision,
     ensure_models,
     get_stt_model,
@@ -55,6 +51,13 @@ from audio_capture_core import (
     wav_to_mono_16k,
 )
 from runtime_paths import prepare_tk_environment, writable_app_subdir
+from meki_subtitle_vad import (
+    SileroProbabilityModel,
+    VadBoundary,
+    VadBoundaryTracker,
+    collect_subtitle_segments,
+    settings_for_preset,
+)
 from mekicopy_theme import (
     BG,
     BORDER,
@@ -164,25 +167,10 @@ class RealtimeTranslationSummary:
     max_translation_backlog: int = 0
 
 
-@dataclass(frozen=True)
-class _LiveVadInterval:
-    """One finalized native-VAD interval retained until its live boundary is safe.
-
-    ``samples`` is a bounded fallback for the unusual case where a native VAD
-    interval reaches farther back than the rolling PCM history.  Normal live
-    segments are reconstructed from that history so padding and forced-cut
-    overlap use the original contiguous audio.
-    """
-
-    start: int
-    end: int
-    samples: np.ndarray
-
-
 class RealtimeTranslationSession:
     """Process finalized Silero VAD chunks while WASAPI recording continues.
 
-    The recorder thread exclusively owns the native VAD instance.  Offline
+    The recorder thread exclusively owns the VAD model and boundary tracker. Offline
     recognition and the HTTP translation calls each have a dedicated worker so
     slow HYTrans responses do not hold up the next recognized utterance.
     """
@@ -209,61 +197,17 @@ class RealtimeTranslationSession:
         self.session_id = session_id
         self._report_status = report_status
         self._vad = None
+        self._vad_settings = settings_for_preset(self.preset)
+        self._vad_tracker: VadBoundaryTracker | None = None
         self._capture_remainder = np.empty(0, dtype=np.float32)
         self._vad_remainder = np.empty(0, dtype=np.float32)
-        # sherpa-onnx exposes only its native speech-boundary controls.  Keep
-        # a bounded source PCM history so the same padding, padded-boundary
-        # merge, and forced-cut semantics as ``build_segments`` can also be
-        # applied to finalized live VAD intervals.  This is deliberately a
-        # little larger than one maximum VAD chunk, never a whole recording.
-        live_preset = VAD_PRESETS[self.preset]
-        self._live_pre_padding_samples = int(
-            round(live_preset["pre_padding"] * INTERNAL_SAMPLE_RATE)
-        )
-        self._live_post_padding_samples = int(
-            round(live_preset["post_padding"] * INTERNAL_SAMPLE_RATE)
-        )
-        self._live_max_segment_samples = max(
-            1,
-            int(round(live_preset["max_segment_duration"] * INTERNAL_SAMPLE_RATE)),
-        )
-        self._live_forced_cut_overlap_samples = min(
-            max(
-                0,
-                int(round(live_preset["forced_cut_overlap"] * INTERNAL_SAMPLE_RATE)),
-            ),
-            self._live_max_segment_samples - 1,
-        )
-        self._live_short_segment_max_duration = live_preset[
-            "short_segment_max_duration"
-        ]
-        # Batch processing joins raw intervals within ``merge_gap`` and also
-        # joins padded intervals whose boundaries overlap.  The native VAD
-        # reports an interval only after its minimum speech and silence tails,
-        # so the live lookahead includes those tails as well. Otherwise an
-        # earlier interval can be emitted before a nearby later interval is
-        # finalized, causing needless separate STT/translation requests.
-        self._live_join_gap_samples = max(
-            int(round(live_preset["merge_gap"] * INTERNAL_SAMPLE_RATE)),
-            self._live_pre_padding_samples + self._live_post_padding_samples,
-        )
-        native_finalize_tail = int(
-            round(live_preset["min_silence_duration"] * INTERNAL_SAMPLE_RATE)
-        )
-        native_minimum_speech = int(
-            round(live_preset["min_speech_duration"] * INTERNAL_SAMPLE_RATE)
-        )
-        self._live_merge_lookahead_samples = (
-            self._live_join_gap_samples
-            + native_minimum_speech
-            + native_finalize_tail
-        )
+        # Retain only the PCM needed by the longest active chunk and isolated
+        # weak-onset padding. Final boundaries do not receive another merge
+        # or padding pass, and the ring never grows with recording duration.
         self._live_history_capacity = max(
             512,
-            self._live_max_segment_samples
-            + self._live_pre_padding_samples
-            + self._live_post_padding_samples
-            + self._live_merge_lookahead_samples
+            self._vad_settings.max_chunk_samples
+            + self._vad_settings.weak_pre_padding_samples
             + 2 * 512,
         )
         self._live_history = np.empty(
@@ -271,7 +215,6 @@ class RealtimeTranslationSession:
             dtype=np.float32,
         )
         self._live_source_end = 0
-        self._live_pending_intervals: list[_LiveVadInterval] = []
         self._next_segment_id = 1
         self._previous_text = ""
         self._stt_queue: queue.Queue[SpeechSegment | object] = queue.Queue(
@@ -309,11 +252,10 @@ class RealtimeTranslationSession:
         """Initialize VAD before opening loopback, then begin worker threads."""
         if self._started:
             return
-        self._vad = create_voice_activity_detector(
-            self.models["vad"],
-            self.preset,
-            num_threads=REALTIME_VAD_NUM_THREADS,
+        self._vad = SileroProbabilityModel(
+            self.models["vad"], num_threads=REALTIME_VAD_NUM_THREADS
         )
+        self._vad_tracker = VadBoundaryTracker(self._vad_settings)
         self._started = True
         try:
             self._translation_thread.start()
@@ -367,16 +309,15 @@ class RealtimeTranslationSession:
                     remainder = self._vad_remainder
                     padded = np.pad(remainder, (0, 512 - len(remainder)))
                     self._vad_remainder = np.empty(0, dtype=np.float32)
-                    # The final VAD window is zero-padded only for the native
+                    # The final VAD window is zero-padded only for the
                     # model.  Keep its real sample count separate so emitted
                     # timestamps and post-padding never extend past recording
                     # input just because a detector window needed padding.
                     self._accept_vad_window(padded, source_samples=len(remainder))
-                self._vad.flush()
-                self._drain_vad()
-                # At end of input there is no future PCM to wait for.  Flush
-                # the held interval with the real trailing audio available.
-                self._flush_live_pending_segments(force=True)
+                assert self._vad_tracker is not None
+                self._emit_vad_boundaries(
+                    self._vad_tracker.finish(self._live_source_end)
+                )
             finally:
                 # The translation worker polls this event and drains every
                 # successfully queued live utterance in order.
@@ -424,17 +365,40 @@ class RealtimeTranslationSession:
         *,
         source_samples: int | None = None,
     ) -> None:
-        """Feed one native VAD window while retaining only needed source PCM."""
+        """Feed one VAD window while retaining only needed source PCM."""
 
-        assert self._vad is not None
+        assert self._vad is not None and self._vad_tracker is not None
         window = np.asarray(samples, dtype=np.float32)
         real_count = len(window) if source_samples is None else int(source_samples)
         real_count = max(0, min(len(window), real_count))
         if real_count:
             self._append_live_history(window[:real_count])
-        self._vad.accept_waveform(window)
-        self._drain_vad()
-        self._flush_live_pending_segments()
+        self._emit_vad_boundaries(
+            self._vad_tracker.push(self._vad.probability(window))
+        )
+
+    def _emit_vad_boundaries(self, boundaries: list[VadBoundary]) -> None:
+        """Queue owned PCM for final boundaries without another padding pass."""
+        for boundary in boundaries:
+            start = max(0, int(boundary.start))
+            end = min(self._live_source_end, int(boundary.end))
+            previous_overlap = max(0, int(boundary.previous_overlap))
+            # A final model frame can include synthetic samples. It may also
+            # leave a tail containing only the last forced cut's ASR context.
+            if end <= start + previous_overlap:
+                continue
+            duration = (end - start) / INTERNAL_SAMPLE_RATE
+            segment = SpeechSegment(
+                id=self._next_segment_id,
+                start_time=start / INTERNAL_SAMPLE_RATE,
+                end_time=end / INTERNAL_SAMPLE_RATE,
+                duration=duration,
+                audio=self._live_pcm_slice(start, end),
+                is_forced_cut=boundary.forced or previous_overlap > 0,
+                previous_overlap=previous_overlap / INTERNAL_SAMPLE_RATE,
+            )
+            self._next_segment_id += 1
+            self._enqueue_segment(segment)
 
     def _append_live_history(self, samples: np.ndarray) -> None:
         """Append real 16 kHz PCM into a fixed-size, absolute-position ring."""
@@ -453,117 +417,14 @@ class RealtimeTranslationSession:
             self._live_history[: len(retained) - first_count] = retained[first_count:]
         self._live_source_end = new_end
 
-    def _drain_vad(self) -> None:
-        assert self._vad is not None
-        while not self._vad.empty():
-            item = self._vad.front
-            # ``front`` points into the native VAD queue and becomes invalid
-            # after ``pop`` or the next detector call.
-            samples = np.array(item.samples, dtype=np.float32, copy=True)
-            start = max(0, int(item.start))
-            self._vad.pop()
-            if not samples.size:
-                continue
-            interval = _LiveVadInterval(
-                start=start,
-                end=start + len(samples),
-                samples=samples,
-            )
-            self._queue_live_vad_interval(interval)
-
-    def _queue_live_vad_interval(self, interval: _LiveVadInterval) -> None:
-        """Hold finalized native intervals for a bounded live merge lookahead."""
-
-        if self._live_pending_intervals:
-            pending_end = max(item.end for item in self._live_pending_intervals)
-            if interval.start - pending_end > self._live_join_gap_samples:
-                # A later finalized interval beyond the padded-boundary union
-                # proves the old group cannot merge with it.  Real-time mode
-                # cannot wait indefinitely for an unrelated future utterance
-                # to finish, so this only coalesces intervals VAD has already
-                # finalized within the bounded lookahead.
-                self._flush_live_pending_segments(force=True)
-        self._live_pending_intervals.append(interval)
-
-    def _flush_live_pending_segments(self, *, force: bool = False) -> None:
-        """Emit a held group once its bounded pad/merge lookahead has elapsed."""
-
-        if not self._live_pending_intervals:
-            return
-        pending_end = max(item.end for item in self._live_pending_intervals)
-        if (
-            not force
-            and self._live_source_end
-            < pending_end + self._live_merge_lookahead_samples
-        ):
-            return
-        self._emit_live_pending_segments()
-        self._live_pending_intervals.clear()
-
-    def _emit_live_pending_segments(self) -> None:
-        """Apply batch-equivalent bounds to one held live VAD interval group."""
-
-        if not self._live_pending_intervals:
-            return
-        speech_start = max(0, min(item.start for item in self._live_pending_intervals))
-        speech_end = min(
-            self._live_source_end,
-            max(item.end for item in self._live_pending_intervals),
-        )
-        if speech_end <= speech_start:
-            return
-
-        start = max(0, speech_start - self._live_pre_padding_samples)
-        end = min(self._live_source_end, speech_end + self._live_post_padding_samples)
-        cursor = start
-        previous_overlap = 0
-        while cursor < end:
-            cut_end = min(cursor + self._live_max_segment_samples, end)
-            forced = cut_end < end
-            duration = (cut_end - cursor) / INTERNAL_SAMPLE_RATE
-            segment = SpeechSegment(
-                id=self._next_segment_id,
-                start_time=cursor / INTERNAL_SAMPLE_RATE,
-                end_time=cut_end / INTERNAL_SAMPLE_RATE,
-                duration=duration,
-                audio=self._live_pcm_slice(cursor, cut_end),
-                is_forced_cut=forced or previous_overlap > 0,
-                is_short=duration <= self._live_short_segment_max_duration,
-                previous_overlap=previous_overlap / INTERNAL_SAMPLE_RATE,
-            )
-            self._next_segment_id += 1
-            self._enqueue_segment(segment)
-            if not forced:
-                break
-            cursor = max(
-                cursor + 1,
-                cut_end - self._live_forced_cut_overlap_samples,
-            )
-            previous_overlap = self._live_forced_cut_overlap_samples
-
     def _live_pcm_slice(self, start: int, end: int) -> np.ndarray:
-        """Copy one bounded PCM range, falling back to native VAD audio if needed."""
+        """Copy one finalized PCM range out of the bounded source ring."""
 
         start = max(0, int(start))
         end = min(self._live_source_end, int(end))
         if end <= start:
             return np.empty(0, dtype=np.float32)
         output = np.zeros(end - start, dtype=np.float32)
-
-        # A native result can occasionally be delivered after its oldest PCM
-        # samples have left the ring (for example, a backend-specific delayed
-        # flush).  Keep that result as a best-effort fallback, then overwrite
-        # it with the exact source PCM wherever the ring still has coverage.
-        for interval in self._live_pending_intervals:
-            overlap_start = max(start, interval.start)
-            overlap_end = min(end, interval.end)
-            if overlap_end <= overlap_start:
-                continue
-            source_offset = overlap_start - interval.start
-            target_offset = overlap_start - start
-            output[target_offset : target_offset + overlap_end - overlap_start] = interval.samples[
-                source_offset : source_offset + overlap_end - overlap_start
-            ]
 
         history_start = max(0, self._live_source_end - self._live_history_capacity)
         available_start = max(start, history_start)
@@ -669,7 +530,6 @@ class RealtimeTranslationSession:
                     duration=item.duration,
                     text_ja=text,
                     is_forced_cut=item.is_forced_cut,
-                    is_short=item.is_short,
                     stt_latency=time.perf_counter() - started,
                 )
                 self._previous_text = text
@@ -1379,7 +1239,7 @@ class CaptureController:
                             stop_event.set()
                             break
             if realtime_session is not None:
-                # Keep native VAD ownership on this recorder thread through
+                # Keep VAD model/tracker ownership on this recorder thread through
                 # the final padded window and flush.
                 realtime_session.finish_input()
             if stop_reason and self._set_state_for_session(
@@ -1500,8 +1360,9 @@ class CaptureController:
                 ),
             )
             self._set_state_for_session(generation, "PROCESSING", f"VAD로 음성 구간을 찾고 있습니다 ({preset})…")
-            intervals = collect_vad_intervals(audio, models["vad"], preset)
-            segments = build_segments(audio, intervals, preset)
+            _, segments = collect_subtitle_segments(
+                audio, models["vad"], preset_name=preset
+            )
             if not segments:
                 final_status = "완료: 인식할 음성이 없습니다."
                 return
@@ -1995,7 +1856,9 @@ def main() -> int:
             args.precision,
         )
         source_test_wav = models["tokens"].parent / "test.wav"
-        collect_vad_intervals(np.zeros(16_000, dtype=np.float32), models["vad"], args.preset)
+        collect_subtitle_segments(
+            np.zeros(16_000, dtype=np.float32), models["vad"], preset_name=args.preset
+        )
         recognizer = create_recognizer(models, model_key=args.stt_model, num_threads=1)
         if source_test_wav.is_file():
             samples = _load_model_test_wav(source_test_wav)

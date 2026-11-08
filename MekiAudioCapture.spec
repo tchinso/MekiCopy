@@ -14,6 +14,7 @@ hiddenimports = [
     "tkinter.constants",
     "numpy",
     "soundcard",
+    "onnxruntime.capi.onnxruntime_pybind11_state",
 ]
 hiddenimports += collect_submodules("sherpa_onnx")
 
@@ -30,6 +31,16 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Shared Silero probability inference is CPU-only. Do not duplicate the GPU
+# provider plugins or optional NVIDIA payload already owned by MekiCopy.
+a.binaries = [
+    entry for entry in a.binaries
+    if Path(entry[0]).name.lower() not in {
+        "onnxruntime_providers_cuda.dll", "onnxruntime_providers_tensorrt.dll"
+    }
+    and not entry[0].replace('\\', '/').lower().startswith('nvidia/')
+    and '/nvidia/' not in entry[1].replace('\\', '/').lower()
+]
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, [], exclude_binaries=True, name="MekiAudioCapture",

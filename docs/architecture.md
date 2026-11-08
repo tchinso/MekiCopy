@@ -38,7 +38,7 @@ MekiCopy는 Tk 본체와 별도 프로세스로 실행하는 번역·표시·음
 
 - 화면: 확정 영역 캡처 → OCR → 클립보드, 또는 HYTrans → MekiOverlayer.
 - 음성: WASAPI loopback → VAD → 일본어 STT → MekiScript 원문 → HYTrans → MekiScript 번역.
-- 영상: FFmpeg 오디오 추출 → FAST VAD → 일본어 STT → HYTrans → SRT.
+- 영상: FFmpeg 오디오 추출 → FAST VAD → 일본어 STT → HYTrans → SRT. 녹음과 영상은 `meki_subtitle_vad.py`의 NyanKat 방식 경계 추적기와 공용 VAD 모델을 사용합니다.
 
 OCR 작업은 겹쳐 실행하지 않습니다. MSS 캡처는 작업 스레드에 맞는 캡처 인스턴스를 사용합니다. Tk 위젯과 Tcl 변수는 UI 스레드에서 다루며 백그라운드 결과는 `TkTaskRunner`로 전달합니다. Windows 이벤트 콜백은 상태만 기록하고 Tk 타이머가 UI 변경을 수행합니다.
 

@@ -305,8 +305,8 @@ class MekiSubtitleWindow(tk.Toplevel):
         tk.Label(
             options,
             text=(
-                "VAD는 MekiCopy 음성 CHUNK 설정과 무관하게 FAST 고정: "
-                "무음 0.10초 · 최대 10초 · 앞/뒤 여백 0.05/0.10초\n"
+                "영상 자막은 NyanKat-Tab의 VAD 값을 적용한 FAST를 사용합니다.\n"
+                "무음 0.224초 (약한 발화 1.856초) · 최대 6초 · 앞/뒤 여백 0.224초\n"
                 "번역 모델은 MekiCopy 설정의 HYTrans 선택을 공유합니다."
             ),
             bg=SURFACE,
@@ -642,7 +642,6 @@ class MekiSubtitleWindow(tk.Toplevel):
                 output_path,
                 stt_model=stt_model,
                 precision=precision,
-                vad_preset="FAST",
                 translate=translate_cue,
                 stt_model_root=shared_stt_model_root(),
                 status=self._emit_status,

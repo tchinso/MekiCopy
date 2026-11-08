@@ -28,13 +28,13 @@ from typing import Any, Callable, Iterable
 import numpy as np
 
 from meki_subtitle_paths import MediaTools, resolve_media_tools, shared_audio_capture_app_root, shared_stt_model_root
+from meki_subtitle_vad import collect_subtitle_segments
 from runtime_paths import writable_app_subdir
 from process_output import iter_process_lines
 
 
 SAMPLE_RATE = 16_000
 DEFAULT_STT_MODEL = "parakeet"
-DEFAULT_VAD_PRESET = "FAST"
 DEFAULT_TRANSLATION_TIMEOUT_SECONDS = 600.0
 
 StatusCallback = Callable[[float, str], None]
@@ -304,11 +304,14 @@ def _recognize_segments(
         if getattr(segment, "previous_overlap", 0):
             text = _remove_overlap(previous_text, text)
         if text:
-            # A forced overlap exists only for ASR context.  Its duplicate
-            # time must not become a second overlapping SRT cue.
+            # Padding and forced overlap provide ASR context. Keep that audio
+            # while preventing the resulting SRT cues from sharing time.
             start = min(
                 float(segment.end_time),
-                float(segment.start_time) + float(getattr(segment, "previous_overlap", 0)),
+                max(
+                    float(segment.start_time) + float(getattr(segment, "previous_overlap", 0)),
+                    results[-1][1] if results else 0.0,
+                ),
             )
             results.append((start, float(segment.end_time), text))
             previous_text = text
@@ -488,7 +491,6 @@ def process_video(
     *,
     stt_model: str | None = None,
     precision: str = "int8",
-    vad_preset: str = DEFAULT_VAD_PRESET,
     translate: TranslationCallable | None = None,
     translation_url: str | None = None,
     translation_timeout: float = DEFAULT_TRANSLATION_TIMEOUT_SECONDS,
@@ -508,8 +510,6 @@ def process_video(
     """
 
     from audio_capture_core import (
-        build_segments,
-        collect_vad_intervals,
         create_recognizer,
         normalize_stt_model,
         wav_to_mono_16k,
@@ -576,23 +576,26 @@ def process_video(
             audio = wav_to_mono_16k(wav_path, raw_path)
             _check_cancel(cancel_event)
             _status(status, 0.20, "FAST VAD로 음성과 타임스탬프를 추적하고 있습니다.")
-            intervals = collect_vad_intervals(
+            interval_count, segments = collect_subtitle_segments(
                 audio,
                 models["vad"],
-                vad_preset,
                 num_threads=_thread_count(),
+                preset_name="FAST",
+                check_cancel=lambda: _check_cancel(cancel_event),
+                progress=lambda ratio: _status(
+                    status, 0.20 + ratio * 0.15, "FAST VAD로 음성을 분석하고 있습니다."
+                ),
             )
             _check_cancel(cancel_event)
-            segments = build_segments(audio, intervals, vad_preset)
             if log:
-                log(f"{vad_preset.upper()} VAD: 원시 구간 {len(intervals)}개, 인식 구간 {len(segments)}개")
+                log(f"FAST VAD (NyanKat-Tab): 감지 구간 {interval_count}개, 인식 구간 {len(segments)}개")
             if not segments:
                 count = write_srt_atomic([], destination)
                 _status(status, 1.0, "음성이 없어 빈 SRT를 저장했습니다.")
                 return SubtitleProcessSummary(
                     output_path=destination,
                     media_duration=media.duration,
-                    vad_intervals=len(intervals),
+                    vad_intervals=interval_count,
                     recognized=0,
                     translated=count,
                     translation_failures=0,
@@ -625,7 +628,7 @@ def process_video(
                 return SubtitleProcessSummary(
                     output_path=destination,
                     media_duration=media.duration,
-                    vad_intervals=len(intervals),
+                    vad_intervals=interval_count,
                     recognized=0,
                     translated=count,
                     translation_failures=0,
@@ -688,7 +691,7 @@ def process_video(
             return SubtitleProcessSummary(
                 output_path=destination,
                 media_duration=media.duration,
-                vad_intervals=len(intervals),
+                vad_intervals=interval_count,
                 recognized=len(results),
                 translated=count - failures,
                 translation_failures=failures,

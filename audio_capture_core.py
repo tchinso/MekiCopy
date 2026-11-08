@@ -117,45 +117,59 @@ MODEL_FILE_HASHES = {
 }
 
 VAD_PRESETS: dict[str, dict[str, float]] = {
-    # All values are seconds. ``merge_gap`` is the only setting that joins
-    # nearby VAD intervals. ``short_segment_max_duration`` only marks emitted
-    # segment/result metadata as ``is_short``; it never changes boundaries.
+    # Durations are seconds. All presets use NyanKat's probability-driven
+    # boundaries without merging nearby or overlapping padded intervals.
     "FAST": {
-        # Prioritize quick turn boundaries for rapid dialogue.
-        "threshold": 0.60,
-        "min_speech_duration": 0.20,
-        "min_silence_duration": 0.10,
-        "max_segment_duration": 10.0,
-        "pre_padding": 0.05,
-        "post_padding": 0.10,
-        "merge_gap": 0.05,
-        "short_segment_max_duration": 0.60,
-        "forced_cut_overlap": 0.25,
+        # NyanKat-Tab speech-core.mjs (5af4ce39): adaptive weak speech and
+        # pause-aware cuts use these same values in video, batch and live FAST.
+        "threshold": 0.04,
+        "min_speech_duration": 0.032,
+        "min_silence_duration": 0.224,
+        "max_segment_duration": 6.0,
+        "pre_padding": 0.224,
+        "post_padding": 0.224,
+        "forced_cut_overlap": 0.50,
+        "release_threshold": 0.045,
+        "weak_speech_threshold": 0.08,
+        "clear_speech_threshold": 0.15,
+        "weak_min_silence_duration": 1.856,
+        "weak_pre_padding": 1.216,
+        "cut_lookback": 1.152,
+        "cut_pause": 0.096,
     },
     "BALANCED": {
-        # Keep moderate pauses and context without combining long stretches
-        # of dialogue into one recognition request.
-        "threshold": 0.55,
-        "min_speech_duration": 0.20,
-        "min_silence_duration": 0.30,
-        "max_segment_duration": 15.0,
-        "pre_padding": 0.10,
-        "post_padding": 0.20,
-        "merge_gap": 0.15,
-        "short_segment_max_duration": 1.00,
-        "forced_cut_overlap": 0.75,
+        # User-selected values; the adaptive boundary method is shared.
+        "threshold": 0.20,
+        "min_speech_duration": 0.10,
+        "min_silence_duration": 0.40,
+        "max_segment_duration": 13.0,
+        "pre_padding": 0.30,
+        "post_padding": 0.30,
+        "forced_cut_overlap": 1.00,
+        "release_threshold": 0.2975,
+        "weak_speech_threshold": 0.315,
+        "clear_speech_threshold": 0.35,
+        "weak_min_silence_duration": 1.50,
+        "weak_pre_padding": 0.30,
+        "cut_lookback": 0.576,
+        "cut_pause": 0.048,
     },
     "LONG": {
-        # Preserve more context around deliberate or slowly paced speech.
-        "threshold": 0.55,
+        # User-selected values; a zero lookback retains 20-second hard cuts.
+        "threshold": 0.40,
         "min_speech_duration": 0.20,
         "min_silence_duration": 0.60,
         "max_segment_duration": 20.0,
-        "pre_padding": 0.15,
-        "post_padding": 0.30,
-        "merge_gap": 0.30,
-        "short_segment_max_duration": 1.50,
+        "pre_padding": 0.50,
+        "post_padding": 0.50,
         "forced_cut_overlap": 1.50,
+        "release_threshold": 0.55,
+        "weak_speech_threshold": 0.55,
+        "clear_speech_threshold": 0.55,
+        "weak_min_silence_duration": 1.20,
+        "weak_pre_padding": 0.50,
+        "cut_lookback": 0.0,
+        "cut_pause": 0.0,
     },
 }
 
@@ -168,7 +182,6 @@ class SpeechSegment:
     duration: float
     audio: np.ndarray
     is_forced_cut: bool
-    is_short: bool
     previous_overlap: float
 
 
@@ -180,7 +193,6 @@ class STTResult:
     duration: float
     text_ja: str
     is_forced_cut: bool
-    is_short: bool
     stt_latency: float
 
 
@@ -701,127 +713,6 @@ def wav_to_mono_16k(wav_path: Path, raw_path: Path) -> np.ndarray:
     return np.memmap(raw_path, dtype=np.float32, mode="r", shape=(write_at,))
 
 
-def collect_vad_intervals(
-    audio: np.ndarray,
-    vad_model: Path,
-    preset_name: str,
-    num_threads: int = 4,
-) -> list[tuple[int, int]]:
-    vad = create_voice_activity_detector(vad_model, preset_name, num_threads=num_threads)
-    intervals: list[tuple[int, int]] = []
-
-    def drain() -> None:
-        while not vad.empty():
-            item = vad.front
-            start = int(item.start)
-            end = start + len(item.samples)
-            intervals.append((start, end))
-            vad.pop()
-
-    for start in range(0, len(audio), 512):
-        window = np.asarray(audio[start : start + 512], dtype=np.float32)
-        if len(window) < 512:
-            window = np.pad(window, (0, 512 - len(window)))
-        vad.accept_waveform(window)
-        drain()
-    vad.flush()
-    drain()
-    return intervals
-
-
-def create_voice_activity_detector(
-    vad_model: Path,
-    preset_name: str,
-    num_threads: int = 4,
-):
-    """Create one CPU Silero VAD instance for batch or live capture.
-
-    Callers that feed a live stream must keep the returned native object on a
-    single thread.  ``VoiceActivityDetector.front`` is only valid until the
-    next detector operation, so live callers also need to copy its samples
-    before calling ``pop``.
-    """
-    import sherpa_onnx
-
-    preset = VAD_PRESETS[normalize_preset(preset_name)]
-    config = sherpa_onnx.VadModelConfig()
-    config.silero_vad.model = str(vad_model)
-    config.silero_vad.threshold = preset["threshold"]
-    config.silero_vad.min_silence_duration = preset["min_silence_duration"]
-    config.silero_vad.min_speech_duration = preset["min_speech_duration"]
-    config.silero_vad.window_size = 512
-    config.silero_vad.max_speech_duration = preset["max_segment_duration"]
-    config.sample_rate = INTERNAL_SAMPLE_RATE
-    config.num_threads = num_threads
-    config.provider = "cpu"
-    return sherpa_onnx.VoiceActivityDetector(config, 60.0)
-
-
-def build_segments(
-    audio: np.ndarray,
-    intervals: Iterable[tuple[int, int]],
-    preset_name: str,
-) -> list[SpeechSegment]:
-    preset = VAD_PRESETS[normalize_preset(preset_name)]
-    rate = INTERNAL_SAMPLE_RATE
-    minimum = int(preset["min_speech_duration"] * rate)
-    merge_gap = int(preset["merge_gap"] * rate)
-    pre = int(preset["pre_padding"] * rate)
-    post = int(preset["post_padding"] * rate)
-    maximum = int(preset["max_segment_duration"] * rate)
-    overlap = int(preset["forced_cut_overlap"] * rate)
-    short_segment_max_duration = preset["short_segment_max_duration"]
-
-    speech = [(max(0, int(a)), min(len(audio), int(b))) for a, b in intervals if b - a >= minimum]
-    merged: list[list[int]] = []
-    for start, end in speech:
-        if merged and start - merged[-1][1] <= merge_gap:
-            merged[-1][1] = max(merged[-1][1], end)
-        else:
-            merged.append([start, end])
-
-    padded: list[list[int]] = []
-    for start, end in merged:
-        candidate = [max(0, start - pre), min(len(audio), end + post)]
-        if padded and candidate[0] <= padded[-1][1]:
-            padded[-1][1] = max(padded[-1][1], candidate[1])
-        else:
-            padded.append(candidate)
-
-    output: list[SpeechSegment] = []
-    segment_id = 1
-    for start, end in padded:
-        cursor = start
-        previous_overlap = 0
-        while cursor < end:
-            cut_end = min(cursor + maximum, end)
-            forced = cut_end < end
-            duration = (cut_end - cursor) / rate
-            output.append(
-                SpeechSegment(
-                    id=segment_id,
-                    start_time=cursor / rate,
-                    end_time=cut_end / rate,
-                    duration=duration,
-                    # The source memmap remains open for the whole recognition
-                    # pass, so a contiguous view avoids duplicating long
-                    # recordings in RAM for every segment.
-                    audio=np.asarray(audio[cursor:cut_end], dtype=np.float32),
-                    is_forced_cut=forced or previous_overlap > 0,
-                    # This is metadata for downstream consumers, not an
-                    # instruction to merge or split adjacent speech.
-                    is_short=duration <= short_segment_max_duration,
-                    previous_overlap=previous_overlap / rate,
-                )
-            )
-            segment_id += 1
-            if not forced:
-                break
-            cursor = max(cursor + 1, cut_end - overlap)
-            previous_overlap = overlap
-    return output
-
-
 def validate_tokens_file(tokens_path: Path) -> int:
     """Validate the token IDs before handing the table to the native runtime."""
     seen: set[int] = set()
@@ -937,7 +828,6 @@ def recognize_segments(
             duration=segment.duration,
             text_ja=text,
             is_forced_cut=segment.is_forced_cut,
-            is_short=segment.is_short,
             stt_latency=latency,
         )
         results.append(result)
