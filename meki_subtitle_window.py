@@ -1,4 +1,4 @@
-"""MekiCopy-styled UI for creating Korean SRT files from video.
+"""MekiCopy-styled UI for creating Japanese or Korean SRT files from video.
 
 The window is opened from MekiCopy's ``자막 생성`` tab.  It deliberately
 does not own any model assets: the job pipeline resolves the MekiAudioCapture
@@ -27,6 +27,7 @@ from meki_subtitle_paths import shared_stt_model_root
 from meki_subtitle_pipeline import (
     SubtitleCancelledError,
     SubtitleProcessSummary,
+    japanese_subtitle_path,
     process_video,
     translate_via_hytrans,
 )
@@ -106,6 +107,7 @@ class MekiSubtitleWindow(tk.Toplevel):
         self.status_var = tk.StringVar(value="영상을 선택해 주세요.")
         self.progress_var = tk.DoubleVar(value=0.0)
         self.translation_model_var = tk.StringVar()
+        self.skip_translation_var = tk.BooleanVar(value=False)
 
         self.title("MekiSubtitle")
         self.geometry("860x700")
@@ -144,6 +146,9 @@ class MekiSubtitleWindow(tk.Toplevel):
         )
 
     def _refresh_translation_model_label(self) -> None:
+        if self.skip_translation_var.get():
+            self.translation_model_var.set("사용하지 않음 · 일본어 SRT만 생성")
+            return
         backend = normalize_backend(getattr(self._settings, "hytrans_backend", "local"))
         if backend in {"translator_api", "hdtrans"}:
             self.translation_model_var.set(f"{BACKEND_LABELS[backend]} · 일본어 → 한국어")
@@ -302,6 +307,21 @@ class MekiSubtitleWindow(tk.Toplevel):
             anchor=tk.W,
         ).grid(row=1, column=1, columnspan=3, sticky=tk.EW, padx=(10, 0), pady=(10, 0))
 
+        self.skip_translation_check = tk.Checkbutton(
+            options,
+            text="한국어로 번역하지 않음",
+            variable=self.skip_translation_var,
+            command=self._on_translation_changed,
+            bg=SURFACE,
+            fg=INK,
+            activebackground=SURFACE,
+            selectcolor=SURFACE,
+            font=DEFAULT_FONT,
+        )
+        self.skip_translation_check.grid(
+            row=2, column=0, columnspan=4, sticky=tk.W, pady=(8, 0)
+        )
+
         tk.Label(
             options,
             text=(
@@ -314,7 +334,7 @@ class MekiSubtitleWindow(tk.Toplevel):
             justify=tk.LEFT,
             anchor=tk.W,
             font=DEFAULT_FONT,
-        ).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+        ).grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
         self._on_stt_model_changed()
 
         progress_frame = tk.Frame(outer, bg=BG)
@@ -395,6 +415,21 @@ class MekiSubtitleWindow(tk.Toplevel):
     def _mark_output_edited(self) -> None:
         self._output_was_edited = True
 
+    def _on_translation_changed(self) -> None:
+        skip_translation = self.skip_translation_var.get()
+        self._refresh_translation_model_label()
+        self.start_button.configure(
+            text="일본어 SRT 만들기" if skip_translation else "한국어 SRT 만들기"
+        )
+        current = self.output_var.get().strip()
+        if current:
+            output = Path(current)
+            if skip_translation:
+                output = japanese_subtitle_path(output)
+            elif output.name.lower().endswith(".ja.srt"):
+                output = output.with_name(output.name[:-7] + ".ko.srt")
+            self.output_var.set(str(output))
+
     def _choose_input(self) -> None:
         selected = filedialog.askopenfilename(
             title="영상 파일 선택",
@@ -406,7 +441,8 @@ class MekiSubtitleWindow(tk.Toplevel):
         self.input_var.set(selected)
         if not self._output_was_edited or not self.output_var.get().strip():
             source = Path(selected)
-            self.output_var.set(str(source.with_suffix(".ko.srt")))
+            suffix = ".ja.srt" if self.skip_translation_var.get() else ".ko.srt"
+            self.output_var.set(str(source.with_suffix(suffix)))
         self.status_var.set("준비되었습니다.")
 
     def _choose_output(self) -> None:
@@ -414,7 +450,9 @@ class MekiSubtitleWindow(tk.Toplevel):
         selected = filedialog.asksaveasfilename(
             title="SRT 저장 위치",
             initialdir=str(Path(current).parent) if current else None,
-            initialfile=Path(current).name if current else "subtitle.ko.srt",
+            initialfile=Path(current).name if current else (
+                "subtitle.ja.srt" if self.skip_translation_var.get() else "subtitle.ko.srt"
+            ),
             defaultextension=".srt",
             filetypes=[("SubRip 자막", "*.srt")],
             parent=self,
@@ -422,6 +460,7 @@ class MekiSubtitleWindow(tk.Toplevel):
         if selected:
             self.output_var.set(selected)
             self._output_was_edited = True
+            self._on_translation_changed()
 
     def _selected_stt_key(self) -> str:
         from audio_capture_core import DEFAULT_STT_MODEL
@@ -444,6 +483,7 @@ class MekiSubtitleWindow(tk.Toplevel):
             self.output_entry,
             self.browse_input,
             self.browse_output,
+            self.skip_translation_check,
         ):
             widget.configure(state=field_state)
         self.stt_model_combo.configure(state=combo_state)
@@ -484,27 +524,42 @@ class MekiSubtitleWindow(tk.Toplevel):
         if not output_text:
             messagebox.showerror("MekiSubtitle", "SRT 저장 경로를 지정해 주세요.", parent=self)
             return
+        translate_to_korean = not self.skip_translation_var.get()
         output_path = Path(output_text)
-        if output_path.exists() and not messagebox.askyesno(
-            "MekiSubtitle",
-            f"이미 존재하는 파일을 덮어쓸까요?\n\n{output_path}",
-            parent=self,
-        ):
+        if not translate_to_korean:
+            output_path = japanese_subtitle_path(output_path)
+        elif output_path.name.lower().endswith(".ja.srt"):
+            output_path = output_path.with_name(output_path.name[:-7] + ".ko.srt")
+        self.output_var.set(str(output_path))
+        japanese_path = japanese_subtitle_path(output_path)
+        if input_path.resolve() in {output_path.resolve(), japanese_path.resolve()}:
+            messagebox.showerror("MekiSubtitle", "입력 영상과 출력 SRT 경로가 같습니다.", parent=self)
             return
+        existing = [path for path in dict.fromkeys((output_path, japanese_path)) if path.exists()]
+        if existing:
+            paths = "\n".join(str(path) for path in existing)
+            if not messagebox.askyesno(
+                "MekiSubtitle",
+                f"이미 존재하는 파일을 덮어쓸까요?\n\n{paths}",
+                parent=self,
+            ):
+                return
 
-        # Start the shared worker before expensive STT preparation.  HYTrans
-        # itself keeps local files first and starts its verified downloader only
-        # when this selected model is absent.
-        try:
-            started = self._start_hytrans()
-        except Exception as exc:
-            messagebox.showerror("MekiSubtitle", f"HYTrans 실행 실패:\n{exc}", parent=self)
-            return
-        if started is False:
-            # MainWindow has already shown the concrete launch/port error.
-            # Do not begin STT only to leave this job waiting for a server that
-            # could not be created.
-            return
+        wait_for_hytrans_before_stt = False
+        if translate_to_korean:
+            try:
+                started = self._start_hytrans()
+            except Exception as exc:
+                messagebox.showerror("MekiSubtitle", f"HYTrans 실행 실패:\n{exc}", parent=self)
+                return
+            if started is False:
+                # MainWindow has already shown the concrete launch/port error.
+                return
+            backend = normalize_backend(getattr(self._settings, "hytrans_backend", "local"))
+            wait_for_hytrans_before_stt = (
+                backend == "local"
+                and get_model_profile(getattr(self._settings, "hytrans_model_id", "mt1.5")).key == "mt1.5"
+            )
 
         self._cancel_event.clear()
         self._set_running(True)
@@ -522,7 +577,8 @@ class MekiSubtitleWindow(tk.Toplevel):
         precision = self.precision_var.get()
         self._worker = threading.Thread(
             target=self._run_job,
-            args=(input_path, output_path, stt_model, precision),
+            args=(input_path, output_path, stt_model, precision,
+                  translate_to_korean, wait_for_hytrans_before_stt),
             name="MekiSubtitle-Job",
             daemon=False,
         )
@@ -562,7 +618,7 @@ class MekiSubtitleWindow(tk.Toplevel):
             logs.insert(0, f"… 이전 처리 기록 {dropped_log_count}개는 생략했습니다.")
         return status, logs
 
-    def _wait_for_hytrans_ready(self) -> str:
+    def _wait_for_hytrans_ready(self, *, progress_ratio: float = 0.66) -> str:
         """Wait for the active local or API translator without blocking Tk."""
 
         import urllib.error
@@ -590,7 +646,7 @@ class MekiSubtitleWindow(tk.Toplevel):
                     label = "hdTrans 설치·사전" if backend == "hdtrans" else "API 번역"
                     raise RuntimeError(f"HYTrans {label} 설정을 확인해 주세요: {error}")
                 if message != last_message:
-                    self._emit_status(0.66, f"HYTrans 번역 모델을 기다리고 있습니다: {message}")
+                    self._emit_status(progress_ratio, f"HYTrans 번역 모델을 기다리고 있습니다: {message}")
                     last_message = message
                 if backend in {"local", "translator_api"} and state.upper() == "ERROR" and not requested_reopen:
                     reopen = urllib.request.Request(
@@ -605,7 +661,7 @@ class MekiSubtitleWindow(tk.Toplevel):
             except (OSError, urllib.error.URLError, urllib.error.HTTPError, ValueError) as exc:
                 message = f"HYTrans 서버 연결 대기 중: {exc}"
                 if message != last_message:
-                    self._emit_status(0.66, message)
+                    self._emit_status(progress_ratio, message)
                     last_message = message
             if time.monotonic() >= deadline:
                 raise TimeoutError("HYTrans 번역 모델 준비 시간이 10분을 초과했습니다.")
@@ -629,8 +685,13 @@ class MekiSubtitleWindow(tk.Toplevel):
         output_path: Path,
         stt_model: str,
         precision: str,
+        translate_to_korean: bool = True,
+        wait_for_hytrans_before_stt: bool = False,
     ) -> None:
         try:
+            if translate_to_korean and wait_for_hytrans_before_stt:
+                self._emit_status(0.0, "HY-MT1.5 로드가 완료된 후 일본어 인식을 시작합니다.")
+                self._wait_for_hytrans_ready(progress_ratio=0.0)
             context_owner = f"subtitle:{uuid.uuid4().hex}"
 
             def translate_cue(text, *, timeout=600.0, cancel_event=None):
@@ -642,7 +703,8 @@ class MekiSubtitleWindow(tk.Toplevel):
                 output_path,
                 stt_model=stt_model,
                 precision=precision,
-                translate=translate_cue,
+                translate=translate_cue if translate_to_korean else None,
+                translate_to_korean=translate_to_korean,
                 stt_model_root=shared_stt_model_root(),
                 status=self._emit_status,
                 log=self._emit_log,
@@ -697,6 +759,7 @@ class MekiSubtitleWindow(tk.Toplevel):
         self.open_folder_button.configure(state=tk.NORMAL)
         warning = (
             f"\n번역 실패 {summary.translation_failures}개는 일본어 원문으로 표시했습니다."
+            f"\n일본어 SRT도 보존했습니다: {japanese_subtitle_path(summary.output_path)}"
             if summary.translation_failures
             else ""
         )
@@ -706,7 +769,8 @@ class MekiSubtitleWindow(tk.Toplevel):
             return
         messagebox.showinfo(
             "MekiSubtitle",
-            f"한국어 SRT를 저장했습니다.\n\n{summary.output_path}{warning}",
+            f"{'일본어' if self.skip_translation_var.get() else '한국어'} SRT를 저장했습니다."
+            f"\n\n{summary.output_path}{warning}",
             parent=self,
         )
 
@@ -734,7 +798,7 @@ class MekiSubtitleWindow(tk.Toplevel):
         if self._worker and self._worker.is_alive():
             self._cancel_event.set()
             self.cancel_button.configure(state=tk.DISABLED)
-            self.status_var.set("취소하고 임시 파일을 정리하고 있습니다…")
+            self.status_var.set("취소하고 있습니다. 저장된 일본어 SRT는 보존됩니다…")
 
     @property
     def is_running(self) -> bool:

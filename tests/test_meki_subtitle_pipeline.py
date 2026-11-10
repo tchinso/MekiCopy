@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
 import os
 import tempfile
 import threading
@@ -75,6 +76,156 @@ class MekiSubtitlePathTests(unittest.TestCase):
 
 
 class MekiSubtitlePipelineTests(unittest.TestCase):
+    @contextmanager
+    def _recognized_video(self, root: Path, results=None):
+        source = root / "video.mp4"
+        source.touch()
+        if results is None:
+            results = [(0.0, 1.0, "最初"), (1.0, 2.0, "次")]
+        with (
+            mock.patch.object(pipeline, "prepare_stt_models", return_value={"vad": root / "vad.onnx"}),
+            mock.patch.object(pipeline, "probe_media", return_value=pipeline.MediaInfo(2.0, 0, "aac")),
+            mock.patch.object(pipeline, "extract_original_audio"),
+            mock.patch.object(pipeline, "writable_app_subdir", return_value=root),
+            mock.patch.object(audio_capture_core, "wav_to_mono_16k", return_value=np.zeros(16_000, dtype=np.float32)),
+            mock.patch.object(pipeline, "collect_subtitle_segments", return_value=(1, [object()])),
+            mock.patch.object(audio_capture_core, "create_recognizer"),
+            mock.patch.object(pipeline, "_recognize_segments", return_value=results),
+        ):
+            yield source, pipeline.MediaTools(root / "ffmpeg.exe", root / "ffprobe.exe")
+
+    def test_japanese_subtitle_paths_and_conflicting_korean_destination(self) -> None:
+        for output, expected in (
+            ("video.ko.srt", "video.ja.srt"),
+            ("video.KO.SRT", "video.ja.srt"),
+            ("video.ja.srt", "video.ja.srt"),
+            ("custom.srt", "custom.ja.srt"),
+        ):
+            with self.subTest(output=output):
+                self.assertEqual(pipeline.japanese_subtitle_path(output), Path(expected))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self._recognized_video(root) as (source, tools):
+                with self.assertRaises(ValueError):
+                    pipeline.process_video(source, root / "video.ja.srt", media_tools=tools)
+
+    def test_complete_japanese_srt_precedes_translation_and_is_removed_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "video.ko.srt"
+            japanese_path = root / "video.ja.srt"
+
+            def translate(text, **_kwargs):
+                japanese = japanese_path.read_text(encoding="utf-8-sig")
+                self.assertIn("最初", japanese)
+                self.assertIn("次", japanese)
+                self.assertFalse(destination.exists())
+                return "한국어"
+
+            with self._recognized_video(root) as (source, tools):
+                summary = pipeline.process_video(source, destination, media_tools=tools, translate=translate)
+            self.assertEqual(summary.translated, 2)
+            self.assertTrue(destination.is_file())
+            self.assertFalse(japanese_path.exists())
+
+    def test_translation_cancellation_preserves_japanese_and_existing_korean(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "custom.srt"
+            destination.write_text("previous Korean", encoding="utf-8")
+            translate = mock.Mock(side_effect=pipeline.SubtitleCancelledError())
+            with self._recognized_video(root) as (source, tools):
+                with self.assertRaises(pipeline.SubtitleCancelledError):
+                    pipeline.process_video(source, destination, media_tools=tools, translate=translate)
+            japanese = (root / "custom.ja.srt").read_text(encoding="utf-8-sig")
+            self.assertIn("最初", japanese)
+            self.assertIn("次", japanese)
+            self.assertEqual(destination.read_text(encoding="utf-8"), "previous Korean")
+            translate.assert_called_once()
+
+    def test_failed_translation_keeps_complete_japanese_srt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "video.ko.srt"
+            translate = mock.Mock(side_effect=RuntimeError("translation failed"))
+            with self._recognized_video(root) as (source, tools), mock.patch.object(pipeline.time, "sleep"):
+                summary = pipeline.process_video(source, destination, media_tools=tools, translate=translate)
+            self.assertEqual(summary.translation_failures, 2)
+            self.assertEqual(summary.translated, 0)
+            self.assertTrue((root / "video.ja.srt").is_file())
+            self.assertIn("[번역 실패]", destination.read_text(encoding="utf-8-sig"))
+
+    def test_failed_korean_publication_preserves_japanese_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "video.ko.srt"
+            destination.write_text("previous Korean", encoding="utf-8")
+            original_write = pipeline.write_srt_atomic
+
+            def write(entries, path):
+                if path == destination:
+                    raise PermissionError("output is open")
+                return original_write(entries, path)
+
+            with self._recognized_video(root) as (source, tools), mock.patch.object(pipeline, "write_srt_atomic", side_effect=write):
+                with self.assertRaises(PermissionError):
+                    pipeline.process_video(source, destination, media_tools=tools, translate=lambda _: "한국어")
+            self.assertTrue((root / "video.ja.srt").is_file())
+            self.assertEqual(destination.read_text(encoding="utf-8"), "previous Korean")
+
+    def test_japanese_only_never_creates_or_calls_a_translator(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "video.ko.srt"
+            translator = mock.Mock(side_effect=AssertionError("must not translate"))
+            with self._recognized_video(root) as (source, tools), mock.patch.object(pipeline, "_translation_callable") as create_translator:
+                summary = pipeline.process_video(
+                    source, destination, media_tools=tools, translate=translator,
+                    translation_url="http://127.0.0.1:6996", translate_to_korean=False,
+                )
+            self.assertEqual(summary.output_path, root / "video.ja.srt")
+            self.assertEqual(summary.recognized, 2)
+            self.assertEqual(summary.translated, 0)
+            self.assertFalse(destination.exists())
+            self.assertIn("次", summary.output_path.read_text(encoding="utf-8-sig"))
+            create_translator.assert_not_called()
+            translator.assert_not_called()
+
+    def test_japanese_only_empty_recognition_still_publishes_japanese_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self._recognized_video(root, []) as (source, tools):
+                summary = pipeline.process_video(
+                    source, root / "video.ko.srt", media_tools=tools, translate_to_korean=False,
+                )
+            self.assertEqual(summary.output_path, root / "video.ja.srt")
+            self.assertEqual(summary.output_path.read_text(encoding="utf-8-sig"), "")
+            self.assertFalse((root / "video.ko.srt").exists())
+
+    def test_silent_video_replaces_stale_japanese_checkpoint_and_finishes_without_translation(self) -> None:
+        for translate_to_korean in (True, False):
+            with self.subTest(translate_to_korean=translate_to_korean), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                korean = root / "video.ko.srt"
+                japanese = root / "video.ja.srt"
+                japanese.write_text("stale Japanese", encoding="utf-8")
+                translator = mock.Mock(side_effect=AssertionError("must not translate"))
+                with self._recognized_video(root) as (source, tools), mock.patch.object(
+                    pipeline, "collect_subtitle_segments", return_value=(0, [])
+                ):
+                    summary = pipeline.process_video(
+                        source, korean, media_tools=tools, translate=translator,
+                        translate_to_korean=translate_to_korean,
+                    )
+                expected = korean if translate_to_korean else japanese
+                self.assertEqual(summary.output_path, expected)
+                self.assertEqual(expected.read_text(encoding="utf-8-sig"), "")
+                self.assertEqual(summary.translated, 0)
+                self.assertEqual(summary.recognized, 0)
+                self.assertEqual(japanese.exists(), not translate_to_korean)
+                self.assertEqual(korean.exists(), translate_to_korean)
+                translator.assert_not_called()
+
     def test_padded_segments_keep_repeated_dialogue_and_nonoverlapping_cues(self) -> None:
         recognizer = SimpleNamespace(
             create_stream=lambda: SimpleNamespace(
@@ -293,6 +444,9 @@ class MekiSubtitleIntegrationTests(unittest.TestCase):
             def get(self) -> str:
                 return self.value
 
+            def set(self, value: str) -> None:
+                self.value = value
+
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "video.mp4"
@@ -301,6 +455,7 @@ class MekiSubtitleIntegrationTests(unittest.TestCase):
             window = SimpleNamespace(
                 input_var=Value(str(source)),
                 output_var=Value(str(root / "output.srt")),
+                skip_translation_var=SimpleNamespace(get=lambda: False),
                 _start_hytrans=start_hytrans,
             )
             MekiSubtitleWindow._start(window)

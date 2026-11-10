@@ -448,7 +448,7 @@ def _clean_subtitle_text(text: str) -> str:
 
 
 def write_srt_atomic(entries: Iterable[SubtitleEntry], destination: Path) -> int:
-    """Publish UTF-8-BOM SRT only after the complete job succeeds."""
+    """Publish a complete UTF-8-BOM SRT without exposing a partial file."""
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     blocks: list[str] = []
@@ -478,6 +478,18 @@ def write_srt_atomic(entries: Iterable[SubtitleEntry], destination: Path) -> int
     return len(blocks)
 
 
+def japanese_subtitle_path(output_path: str | Path) -> Path:
+    """Return the Japanese checkpoint beside a selected Korean output."""
+
+    destination = Path(output_path)
+    name = destination.name
+    if name.lower().endswith(".ja.srt"):
+        return destination
+    if name.lower().endswith(".ko.srt"):
+        return destination.with_name(name[:-7] + ".ja.srt")
+    return destination.with_name(f"{destination.stem}.ja.srt")
+
+
 def _model_label(model_key: str) -> str:
     from audio_capture_core import STT_MODELS
 
@@ -493,6 +505,7 @@ def process_video(
     precision: str = "int8",
     translate: TranslationCallable | None = None,
     translation_url: str | None = None,
+    translate_to_korean: bool = True,
     translation_timeout: float = DEFAULT_TRANSLATION_TIMEOUT_SECONDS,
     media_tools: MediaTools | None = None,
     stt_model_root: Path | None = None,
@@ -500,11 +513,14 @@ def process_video(
     log: LogCallback | None = None,
     cancel_event: Any = None,
 ) -> SubtitleProcessSummary:
-    """Create Korean SRT from the first audio stream of a video.
+    """Recognize Japanese, save its SRT, then optionally translate to Korean.
 
     ``translate`` takes precedence over ``translation_url``.  Supplying the
     URL is the normal embedded-MekiCopy route and therefore reuses the already
     selected HYTrans model/service rather than creating a subtitle-only copy.
+    The Japanese SRT remains available until every cue has been translated and
+    the Korean SRT has been published. With ``translate_to_korean=False``, only
+    Japanese is published and no translation callable is created or invoked.
     Silent videos do not require either translation input and yield an empty
     SRT normally.
     """
@@ -518,9 +534,14 @@ def process_video(
     started = time.perf_counter()
     source = Path(input_path).expanduser().resolve()
     destination = Path(output_path).expanduser().resolve()
+    japanese_destination = japanese_subtitle_path(destination)
+    if translate_to_korean and japanese_destination == destination:
+        raise ValueError("한국어 자막의 저장 경로는 .ja.srt와 다르게 지정해 주세요.")
+    if not translate_to_korean:
+        destination = japanese_destination
     if not source.is_file():
         raise FileNotFoundError(f"영상 파일이 없습니다: {source}")
-    if source == destination:
+    if source in {destination, japanese_destination}:
         raise ValueError("입력 영상과 출력 SRT 경로가 같습니다.")
 
     selected_model = normalize_stt_model(stt_model or _default_model_key())
@@ -590,14 +611,17 @@ def process_video(
             if log:
                 log(f"FAST VAD (NyanKat-Tab): 감지 구간 {interval_count}개, 인식 구간 {len(segments)}개")
             if not segments:
-                count = write_srt_atomic([], destination)
+                write_srt_atomic([], japanese_destination)
+                if translate_to_korean:
+                    write_srt_atomic([], destination)
+                    japanese_destination.unlink(missing_ok=True)
                 _status(status, 1.0, "음성이 없어 빈 SRT를 저장했습니다.")
                 return SubtitleProcessSummary(
                     output_path=destination,
                     media_duration=media.duration,
                     vad_intervals=interval_count,
                     recognized=0,
-                    translated=count,
+                    translated=0,
                     translation_failures=0,
                     elapsed=time.perf_counter() - started,
                 )
@@ -619,11 +643,30 @@ def process_video(
                 )
             finally:
                 del recognizer
+            # Persist the complete recognition result before cancellation or
+            # any translation request can discard the only reusable transcript.
+            japanese_count = write_srt_atomic(
+                (SubtitleEntry(start, end, japanese, japanese) for start, end, japanese in results),
+                japanese_destination,
+            )
             if log:
                 for start_time, end_time, japanese in results:
                     log(f"[{start_time:.3f}–{end_time:.3f}] JA  {japanese}")
+                log(f"일본어 자막 저장: {japanese_destination}")
+            if not translate_to_korean:
+                _status(status, 1.0, f"완료: 일본어 자막 {japanese_count}개를 저장했습니다.")
+                return SubtitleProcessSummary(
+                    output_path=japanese_destination,
+                    media_duration=media.duration,
+                    vad_intervals=interval_count,
+                    recognized=len(results),
+                    translated=0,
+                    translation_failures=0,
+                    elapsed=time.perf_counter() - started,
+                )
             if not results:
                 count = write_srt_atomic([], destination)
+                japanese_destination.unlink(missing_ok=True)
                 _status(status, 1.0, "인식된 일본어가 없어 빈 SRT를 저장했습니다.")
                 return SubtitleProcessSummary(
                     output_path=destination,
@@ -687,6 +730,8 @@ def process_video(
 
             _check_cancel(cancel_event)
             count = write_srt_atomic(entries, destination)
+            if not failures:
+                japanese_destination.unlink(missing_ok=True)
             _status(status, 1.0, f"완료: 한국어 자막 {count}개를 저장했습니다.")
             return SubtitleProcessSummary(
                 output_path=destination,
