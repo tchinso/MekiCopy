@@ -29,14 +29,18 @@ class HytransDefaultsTests(unittest.TestCase):
                     (wasm / f"ort-wasm-simd-threaded{suffix}").touch()
                 self.assertTrue(config.has_local_wasm_files())
 
-    def test_mt15_is_the_only_supported_local_model(self) -> None:
+    def test_mt15_remains_the_default_among_supported_local_models(self) -> None:
         self.assertEqual(model_files.DEFAULT_MODEL_ID, "mt1.5")
         self.assertEqual(config.DTYPE, "q4")
         self.assertEqual(
             model_files.get_model_profile().model_id,
             "onnx-community/HY-MT1.5-1.8B-ONNX",
         )
-        self.assertEqual(model_files.SUPPORTED_MODEL_IDS, ("mt1.5",))
+        self.assertEqual(model_files.SUPPORTED_MODEL_IDS, ("mt1.5", "plamo3"))
+        self.assertEqual(
+            model_files.normalize_model_id("TeamFlaxia/pLaMo-3-translate-0.8b-onnx"),
+            "plamo3",
+        )
         self.assertEqual(model_files.normalize_model_id("mt2"), "mt1.5")
         self.assertEqual(
             model_files.normalize_model_id("tchinso/Hy-MT2-1.8B-onnx-q4f16"),
@@ -50,6 +54,20 @@ class HytransDefaultsTests(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["HYTrans.exe", "--no-worker"]):
             alias = hytrans_main.parse_args()
         self.assertTrue(alias.no_browser)
+        with mock.patch.object(sys, "argv", ["HYTrans.exe", "--model", "plamo3"]):
+            self.assertEqual(hytrans_main.parse_args().model_id, "plamo3")
+
+    def test_plamo_runtime_config_selects_pfml3_and_q4f16(self) -> None:
+        with (
+            mock.patch.object(config, "selected_model_profile", return_value=model_files.PLAMO3_PROFILE),
+            mock.patch.object(config, "is_complete_model", return_value=True),
+        ):
+            runtime = config.runtime_config()
+        self.assertEqual(runtime.modelKey, "plamo3")
+        self.assertEqual(runtime.dtype, "q4f16")
+        self.assertEqual(runtime.targetLang, "ko")
+        self.assertFalse(runtime.promptTemplate)
+        self.assertIn("onnx/model_q4f16.onnx", runtime.modelFiles)
 
 
 class RealtimeTranslationTuningTests(unittest.IsolatedAsyncioTestCase):

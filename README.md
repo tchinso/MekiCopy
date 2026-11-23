@@ -11,7 +11,7 @@
 | 배포판 | 포함 내용 | 처음 사용할 때 |
 |---|---|---|
 | **Lite** | 모든 앱과 번역 기능 | 필요한 엔진·사전·모델을 다운로드합니다. GPU OCR에는 CUDA/cuDNN, 영상 자막에는 FFmpeg를 처음 사용할 때 설치합니다. MagPie도 필요할 때 설치합니다. |
-| **Full** | Lite + CUDA/cuDNN·FFmpeg, hdTrans 엔진·기본 사전, OCR·MT1.5·음성/VAD 모델, MagPie | 포함된 구성요소를 바로 사용하며 hdTrans는 오프라인 번역이 가능합니다. |
+| **Full** | Lite + CUDA/cuDNN·FFmpeg, hdTrans 엔진·기본 사전, OCR·pLaMo-3·HY-MT1.5·음성/VAD 모델, MagPie | 포함된 구성요소를 바로 사용하며 hdTrans는 오프라인 번역이 가능합니다. |
 
 두 배포판의 기능과 실행 파일은 같습니다. TranslatorAPI 언어 모델은 브라우저에서 관리하므로 Full에도 포함되지 않습니다.
 
@@ -19,7 +19,7 @@ Lite의 GPU 구성요소는 사용 가능한 NVIDIA GPU가 있을 때만 내려�
 
 - Windows 10 2004 이상, RAM 8GB 이상이 필요하며 16GB 이상을 권장합니다.
 - OCR은 CPU로 실행할 수 있으며, 사용 가능한 NVIDIA CUDA 환경에서는 GPU를 사용합니다.
-- MT1.5와 TranslatorAPI 번역은 Chrome 또는 Edge가 필요합니다. hdTrans와 클라우드 API 번역에는 브라우저가 필요하지 않습니다.
+- pLaMo-3, HY-MT1.5, TranslatorAPI 번역은 Chrome 또는 Edge가 필요합니다.
 
 ## 빠른 시작
 
@@ -39,7 +39,7 @@ Lite의 GPU 구성요소는 사용 가능한 NVIDIA GPU가 있을 때만 내려�
 4. 위치와 크기를 조절한 뒤 `Enter`로 선택하고 **임시 영역을 확정**을 누릅니다. `Esc`는 취소입니다.
 5. `행동`에서 **실시간 OCR 시작** 또는 **번역 후 표시**를 누릅니다.
 
-번역 엔진은 HYTrans, 화면 번역결과 표시기는 MekiOverlayer입니다. **모든 도구 연결 상태 확인**으로 두 도구의 준비 상태를 확인합니다. 자주 쓰는 영역은 북마크로 저장할 수 있습니다.
+번역 엔진은 HYTrans, 화면 번역결과 표시기는 MekiOverlayer입니다. `도구`에서 선택한 번역 엔진의 상태를 자동으로 확인할 수 있습니다. **모든 도구 연결 상태 확인**으로 두 도구를 한 번에 확인합니다. 자주 쓰는 영역은 북마크로 저장할 수 있습니다.
 
 ## 수동 번역과 실시간 번역
 
@@ -61,12 +61,12 @@ Lite의 GPU 구성요소는 사용 가능한 NVIDIA GPU가 있을 때만 내려�
 | 영상에서 한국어 SRT 생성 | 영상 자막 생성 화면에서 **자막 제작 도구 열기**(MekiSubtitle)를 누르고 영상과 출력 경로를 선택합니다. |
 | 영상에서 일본어 SRT만 생성 | MekiSubtitle에서 **한국어로 번역하지 않음**을 체크합니다. HYTrans를 실행하지 않고 일본어 자막만 저장합니다. |
 
-HY-MT1.5를 사용하면 모델 로드가 완료된 뒤 음성 인식을 시작합니다. 인식이 끝나면 `.ja.srt`를 먼저 저장하고, 한국어 번역과 `.ko.srt` 저장이 모두 성공하면 일본어 파일을 삭제합니다. 번역 중 취소하거나 번역에 실패하면 일본어 파일을 보존합니다.
+pLaMo-3와 HY-MT1.5는 모델 로드가 완료된 뒤 음성 인식을 시작합니다. 인식이 끝나면 `.ja.srt`를 먼저 저장하고, 한국어 번역과 `.ko.srt` 저장이 모두 성공하면 일본어 파일을 삭제합니다. 번역 중 취소하거나 번역에 실패하면 일본어 파일을 보존합니다.
 
 ## 문서
 
 - [사용 안내](docs/usage.md): 영역·북마크·분리 버튼·음성·자막·명령줄
-- [번역 안내](docs/translation.md): hdTrans·MT1.5·TranslatorAPI·클라우드 API와 실시간 OCR
+- [번역 안내](docs/translation.md)에서 hdTrans, TranslatorAPI, pLaMo-3, HY-MT1.5, 클라우드 API와 실시간 OCR을 다룹니다.
 - [설정과 문제 해결](docs/settings.md): 설정 항목·저장 위치·연결 확인·로그
 - [개발 구조](docs/architecture.md): 모듈별 역할·작업 흐름·변경과 검증 기준
 - [빌드 안내](BUILDING.md): Lite/Full 빌드·고정 자산·소스와 라이선스

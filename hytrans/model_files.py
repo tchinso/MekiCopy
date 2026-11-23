@@ -30,6 +30,7 @@ class ModelProfile:
     dtype: str
     prompt: str
     files: Mapping[str, ModelFileSpec]
+    target_lang: str | None = None
 
 
 def _immutable_files(
@@ -79,15 +80,54 @@ MT15_PROFILE = ModelProfile(
 )
 
 
+PLAMO3_PROFILE = ModelProfile(
+    key="plamo3",
+    display_label="pLaMo-3 0.8B (q4f16)",
+    model_id="TeamFlaxia/plamo-3-translate-0.8b-onnx",
+    revision="1c8417ee1a72442440ad515b02f99186c81fd08a",
+    dtype="q4f16",
+    prompt="",
+    files=_immutable_files(
+        {
+            "config.json": ModelFileSpec(
+                832,
+                "5fcec1862e75c3c741307b5ce6bbe40fcb78240329f9a8bed10add78e612ba77",
+            ),
+            "generation_config.json": ModelFileSpec(
+                63,
+                "7ee58443e8b33807c7ae91e112d037c6002579a02d5f7b2bede2fbaf6cb17dfe",
+            ),
+            "tokenizer.json": ModelFileSpec(
+                2_568_421,
+                "e41abbc78a12fd33420b099145a95e54afc8d2485af3528bed5f622fe3b36b1b",
+            ),
+            "tokenizer_config.json": ModelFileSpec(
+                5_442,
+                "8f6889fbc4bfb15f9bc03e885968c17d2e86b50059f7c8d030347c9bb444ea5c",
+            ),
+            "chat_template.jinja": ModelFileSpec(
+                4_950,
+                "914a1fadeffb049130b6198ed458c47c1407e3e7b7183afa9437d9d04df7d087",
+            ),
+            "onnx/model_q4f16.onnx": ModelFileSpec(
+                705_701_446,
+                "db40eff78ae6d0f1ea0a189b64c106e9f1b6d0b3a8565a00f36ee9a2be531cf8",
+            ),
+        }
+    ),
+    target_lang="ko",
+)
+
+
 # These are stable user-setting/CLI keys, not Hugging Face repository IDs.
-# MT1.5 is the only supported local translation model.
 DEFAULT_MODEL_ID = MT15_PROFILE.key
-SUPPORTED_MODEL_IDS = (MT15_PROFILE.key,)
 MODEL_PROFILES: Mapping[str, ModelProfile] = MappingProxyType(
     {
         MT15_PROFILE.key: MT15_PROFILE,
+        PLAMO3_PROFILE.key: PLAMO3_PROFILE,
     }
 )
+SUPPORTED_MODEL_IDS = tuple(MODEL_PROFILES)
 MODEL_DISPLAY_LABELS: Mapping[str, str] = MappingProxyType(
     {key: profile.display_label for key, profile in MODEL_PROFILES.items()}
 )
@@ -100,6 +140,9 @@ _MODEL_ALIASES: Mapping[str, str] = MappingProxyType(
         "hy-mt1.5": MT15_PROFILE.key,
         "hy-mt1.5-1.8b": MT15_PROFILE.key,
         MT15_PROFILE.model_id.casefold(): MT15_PROFILE.key,
+        "plamo3": PLAMO3_PROFILE.key,
+        "plamo-3": PLAMO3_PROFILE.key,
+        PLAMO3_PROFILE.model_id.casefold(): PLAMO3_PROFILE.key,
     }
 )
 

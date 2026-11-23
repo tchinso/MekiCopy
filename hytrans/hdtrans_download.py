@@ -20,38 +20,38 @@ from typing import Callable, Iterator
 from runtime_paths import exclusive_file_lock, writable_app_subdir
 from .paths import app_root
 
-VERSION = "0.9.3"
-TAG = "v0.9.3"
-SOURCE_COMMIT = "dd8375644bb8f6578d3468d7ebc37bc3fb696982"
-DICTIONARY_VERSION = "0.9.3+5fa3c580a6fe"
+VERSION = "0.9.8"
+TAG = f"v{VERSION}"
+SOURCE_COMMIT = "a5e3762d6995bd2819428fae1dc7a8026bbe90f8"
+DICTIONARY_VERSION = "0.9.8+bf1ff56af857"
 DATA_DIR = "hdtrans-data"
 LICENSE_ID = "AGPL-3.0-only"
-RELEASE_URL = "https://github.com/sokcuri/hdTrans/releases/tag/v0.9.3"
-ARCHIVE_URL = "https://github.com/sokcuri/hdTrans/releases/download/v0.9.3/hdTrans-0.9.3-windows.zip"
-ARCHIVE_SHA256 = "07034dc25c4be3cc35aa26ddd61ae6b6b20547c0837129e50a079a8af362af0a"
-ARCHIVE_SIZE = 35724603
-SOURCE_URL = "https://codeload.github.com/sokcuri/hdTrans/zip/refs/tags/v0.9.3"
-SOURCE_SHA256 = "4f98538d9bc47cc43afb110f2712e25af13297a54ea9032efe0a517223b940dc"
-SOURCE_SIZE = 29561772
+RELEASE_URL = f"https://github.com/sokcuri/hdTrans/releases/tag/{TAG}"
+ARCHIVE_URL = f"https://github.com/sokcuri/hdTrans/releases/download/{TAG}/hdTrans-{VERSION}-windows.zip"
+ARCHIVE_SHA256 = "68b0d6cb31c9bcc63ccc00c6b68917291a54b1b1ec25691334678d23b0b1c35d"
+ARCHIVE_SIZE = 38836405
+SOURCE_URL = f"https://codeload.github.com/sokcuri/hdTrans/zip/refs/tags/{TAG}"
+SOURCE_SHA256 = "71dd1a9a102ec4afbd36d7841ee1a8103381cafc08763de7026bbe228b5f6c1d"
+SOURCE_SIZE = 30757495
 MANIFEST_NAME = "install-manifest.json"
-SOURCE_NAME = "hdTrans-v0.9.3-source.zip"
+SOURCE_NAME = f"hdTrans-{TAG}-source.zip"
 Progress = Callable[[dict], None]
 
 # Verified against the official release asset digest and SHA256SUMS.txt.
 COMMON_FILES = {
-    'hdtrans-data/dicts.hdsnap': (36837717, 'a58c0e5418b850341738578f09a5436df35713ed49aed56a1bf92192c3a5efb9'),
-    'hdtrans-data/dicts.txt': (19, '5d3031e5f07a224100b9fbd91fb3058fb66f6375a3e507f3f2d69e3c074350ab'),
+    'hdtrans-data/dicts.hdsnap': (37075387, 'e4948175721270e01859aeac04f5043f778bb8beb88dce3cb2a0a658fdd9594f'),
+    'hdtrans-data/dicts.txt': (19, '67f1955d2c65d20cf4916d095c19e7f3119374fea176d2b41aa141b15a4e0902'),
     'LICENSE': (34523, '0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0'),
     'NOTICE': (375, '4825433c16f86e366900d62ea4463cd63478accbced52310086fcf318751566a'),
     'THIRD-PARTY-NOTICES.txt': (15823, '89b623e11a33711d0ccc65e9a368e6bdd286629ae9140b988937a74f773dbcf4'),
     'hdtrans-data/user/hdtrans.config.example.yaml': (1154, '3298dc536969018a5c4c2993c6cac1ab626f1c2eb4af6112bec0d0157aae2286'),
     'hdtrans-data/user/names.example.txt': (1484, '0dac00d59d9ed95c18570d36258b26a66d133c18cfe456372fd0ad760eea41e8'),
     'hdtrans-data/user/userdict.example.txt': (653, 'eafb14d2d554e6f2199dc9e7567543058c14b32043096a189e5202103c6a393c'),
-    'hdTrans-v0.9.3-source.zip': (29561772, '4f98538d9bc47cc43afb110f2712e25af13297a54ea9032efe0a517223b940dc'),
+    SOURCE_NAME: (SOURCE_SIZE, SOURCE_SHA256),
 }
 DLL_FILES = {
-    'x64': ('hdTransEngine.dll', 8084480, '7a7f5fe1a8f252b7995f2b1351b9ce15f41c74e8aa5f790482e51620c6970dfc'),
-    'x86': ('hdTransEngine_x86.dll', 6718464, 'ab87b78f14fcc8cf4d653366c0ab2fd8d33db5469b54aff568a1e8ddd0944c53'),
+    'x64': ('hdTransEngine.dll', 9474048, 'b0b627e626199c7058e8cd05f455575fb6a1abf3a55d19ad28d3f28e92b6fc3a'),
+    'x86': ('hdTransEngine_x86.dll', 7856128, '0d1f9040b0ff4925fccc74a45f5ffdb4add9317a05a473ee8f31687b1b0267c2'),
 }
 _verified: dict[tuple[str, tuple], bool] = {}
 _verify_lock = threading.RLock()

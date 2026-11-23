@@ -252,7 +252,10 @@ function onProgress(progress) {
   if (shouldSendProgress(percent, progress.status)) {
     setStatus(`${displayMessage} (${percent}%)`);
   }
-  if (progress.status === "done" && file.endsWith(".onnx_data")) {
+  const lastWeightsFile = Object.keys(config.modelFiles).findLast(
+    (path) => path.endsWith(".onnx") || path.endsWith(".onnx_data"),
+  );
+  if (progress.status === "done" && fileLabel === shortFileName(lastWeightsFile)) {
     setStatus("모델 파일 로드 완료. 추론 엔진을 초기화하는 중...");
   }
 }
@@ -270,6 +273,39 @@ function buildPrompt(inputText) {
     "Translate the following segment into {target}, without additional explanation.\n\n{text}";
   const values = { source: config?.source || "Japanese", target, text: inputText };
   return String(template).replace(/\{(source|target|text)\}/g, (_, key) => values[key]);
+}
+
+function expandPlamoByteFallback(tokenizer, inputText) {
+  // Transformers.js Unigram currently emits UNK for missing characters.
+  // Substitute PLaMo's byte tokens so Korean and other OOV text survives.
+  const hasUnknown = (text) => tokenizer.encode(text, { add_special_tokens: false })
+    .includes(tokenizer.unk_token_id);
+  if (!hasUnknown(inputText)) {
+    return inputText;
+  }
+  const encoder = new TextEncoder();
+  const encodedCharacters = new Map();
+  return Array.from(inputText, (character) => {
+    if (!encodedCharacters.has(character)) {
+      const encoded = hasUnknown(character)
+        ? Array.from(encoder.encode(character), (byte) =>
+          `<0x${byte.toString(16).toUpperCase().padStart(2, "0")}>`).join("")
+        : character;
+      encodedCharacters.set(character, encoded);
+    }
+    return encodedCharacters.get(character);
+  }).join("");
+}
+
+function buildPlamoPrompt(tokenizer, inputText, targetLang) {
+  // TeamFlaxia's model card specifies the PFML3 chat template with target_lang.
+  // The text-generation pipeline already inserts the tokenizer's BOS token.
+  const prompt = tokenizer.apply_chat_template(
+    [{ role: "user", content: expandPlamoByteFallback(tokenizer, inputText) }],
+    { target_lang: targetLang, add_generation_prompt: true, tokenize: false },
+  );
+  const bos = tokenizer.bos_token;
+  return bos && prompt.startsWith(bos) ? prompt.slice(bos.length) : prompt;
 }
 
 function extractGeneratedText(result) {
@@ -693,10 +729,17 @@ async function handleTranslateRequest(req) {
   }
 
   try {
-    const result = await generator([{ role: "user", content: buildPrompt(req.text) }], {
+    const generationOptions = {
       max_new_tokens: req.max_new_tokens ?? config.maxNewTokens ?? 2048,
       do_sample: false,
-    });
+    };
+    const prompt = config.targetLang
+      ? buildPlamoPrompt(generator.tokenizer, req.text, config.targetLang)
+      : [{ role: "user", content: buildPrompt(req.text) }];
+    if (config.targetLang) {
+      generationOptions.return_full_text = false;
+    }
+    const result = await generator(prompt, generationOptions);
     const rawText = extractGeneratedText(result);
     const translated = cleanTranslationOutput(rawText).trim();
     if (!translated) {

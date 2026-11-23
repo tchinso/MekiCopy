@@ -13,6 +13,7 @@ from .queue import TranslationQueueOverloadedError
 
 
 API_TIMEOUT_SECONDS = 90
+API_PROBE_TIMEOUT_SECONDS = 5
 MAX_RESPONSE_BYTES = 1024 * 1024
 _THINK_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
 
@@ -87,9 +88,9 @@ def parse_api_response(payload: object) -> str:
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         raise ApiTranslationError("Translation API returned no translation")
     choice = choices[0]
-    if choice.get("finish_reason") in {"length", "max_tokens"}:
+    if choice.get("finish_reason") in ("length", "max_tokens"):
         raise ApiTranslationError("Translation API output was truncated; try a shorter input or another model")
-    if choice.get("finish_reason") in {"content_filter", "tool_calls", "function_call"}:
+    if choice.get("finish_reason") in ("content_filter", "tool_calls", "function_call"):
         raise ApiTranslationError("Translation API did not return a complete text translation")
     message = choice.get("message")
     content = message.get("content") if isinstance(message, dict) else None
@@ -134,13 +135,39 @@ class ApiTranslator:
                   max_new_tokens: int = 2048) -> str:
         request = build_api_request(self.provider, self.profile, text, source=source,
                                     target=target, max_new_tokens=max_new_tokens)
+        return parse_api_response(self._request_json(request, timeout=API_TIMEOUT_SECONDS))
+
+    def probe_connection(self) -> None:
+        issue = validate_provider_settings(self.profile, self.provider)
+        if issue:
+            raise ApiTranslationError(issue, status_code=503)
+        endpoint = api_endpoint(self.provider, self.profile).removesuffix("/chat/completions")
+        if self.provider == "cloudflare":
+            url = f"{endpoint.removesuffix('/v1')}/models/search?per_page=1"
+        else:
+            url = f"{endpoint}/models"
+        request = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {self.profile.api_key.strip()}",
+            "Accept": "application/json",
+            "User-Agent": "HYTrans/1.0",
+        })
+        payload = self._request_json(request, timeout=API_PROBE_TIMEOUT_SECONDS)
+        if not isinstance(payload, dict):
+            raise ApiTranslationError("Translation API returned an invalid model catalog")
+        if self.provider == "cloudflare":
+            valid = payload.get("success") is True and isinstance(payload.get("result"), list)
+        else:
+            valid = isinstance(payload.get("data"), list) and not payload.get("error")
+        if not valid:
+            raise ApiTranslationError("Translation API returned an invalid model catalog")
+
+    def _request_json(self, request: urllib.request.Request, *, timeout: float) -> object:
         try:
-            with self._opener.open(request, timeout=API_TIMEOUT_SECONDS) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
                 if len(raw) > MAX_RESPONSE_BYTES:
                     raise ApiTranslationError("Translation API response is too large")
-                payload = json.loads(raw.decode("utf-8"))
-            return parse_api_response(payload)
+                return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as exc:
             # Never expose provider response bodies: services can echo request
             # parameters, prompts, or credentials in error messages.

@@ -22,7 +22,7 @@ from mekicopy_settings import (
     _normalize_port,
     load_detached_geometry,
 )
-from hytrans.model_files import DEFAULT_MODEL_ID
+from hytrans.model_files import MT15_PROFILE, PLAMO3_PROFILE, get_model_profile
 from hytrans.api_settings import (
     BACKEND_LABELS,
     PROVIDERS,
@@ -46,10 +46,14 @@ from mekicopy_theme import (
     style_tree,
 )
 
-HYTRANS_MODEL_LABELS = {
-    "mt1.5": "MT1.5 (기본) · Hy-MT1.5 1.8B q4",
-}
 BACKEND_IDS_BY_LABEL = {label: backend for backend, label in BACKEND_LABELS.items()}
+TRANSLATION_ENGINES = {
+    BACKEND_LABELS["hdtrans"]: ("hdtrans", MT15_PROFILE),
+    BACKEND_LABELS["translator_api"]: ("translator_api", MT15_PROFILE),
+    "pLaMo-3 (로컬)": ("local", PLAMO3_PROFILE),
+    BACKEND_LABELS["local"]: ("local", MT15_PROFILE),
+    **{BACKEND_LABELS[provider]: (provider, MT15_PROFILE) for provider in PROVIDERS},
+}
 STT_MODEL_LABELS = {
     "parakeet": "Parakeet TDT-CTC 0.6B 일본어 (기본, INT8)",
     "reazonspeech": "ReazonSpeech 일본어 (INT8 / FP32)",
@@ -311,9 +315,10 @@ class SettingsWindow(tk.Toplevel):
         )
         self.api_settings: ApiSettings = load_api_settings()
         self.api_settings_dialog: ApiSettingsDialog | None = None
-        self.hytrans_backend_var = tk.StringVar(
-            value=BACKEND_LABELS[normalize_backend(settings.hytrans_backend)]
-        )
+        backend = normalize_backend(settings.hytrans_backend)
+        model = get_model_profile(settings.hytrans_model_id) if backend == "local" else MT15_PROFILE
+        engine_label = next(label for label, engine in TRANSLATION_ENGINES.items() if engine == (backend, model))
+        self.hytrans_backend_var = tk.StringVar(value=engine_label)
         self.hytrans_port_var = tk.IntVar(value=settings.hytrans_port)
         self.overlayer_port_var = tk.IntVar(value=settings.overlayer_port)
         self.audio_capture_port_var = tk.IntVar(value=settings.audio_capture_port)
@@ -565,7 +570,7 @@ class SettingsWindow(tk.Toplevel):
         provider_row.pack(fill=tk.X, pady=3)
         tk.Label(provider_row, text="번역 서비스").pack(side=tk.LEFT)
         provider_menu = tk.OptionMenu(
-            provider_row, self.hytrans_backend_var, *BACKEND_LABELS.values()
+            provider_row, self.hytrans_backend_var, *TRANSLATION_ENGINES
         )
         provider_menu.configure(width=28, anchor="e")
         provider_menu.pack(side=tk.RIGHT)
@@ -879,9 +884,11 @@ class SettingsWindow(tk.Toplevel):
         self.hdtrans_settings_dialog = HdTransSettingsWindow(self, main_window=self.owner)
 
     def _update_translation_controls(self) -> None:
-        backend = BACKEND_IDS_BY_LABEL.get(self.hytrans_backend_var.get(), "local")
+        backend, model = TRANSLATION_ENGINES[self.hytrans_backend_var.get()]
         if backend == "local":
-            text = "로컬 모델: " + HYTRANS_MODEL_LABELS[DEFAULT_MODEL_ID]
+            text = model.display_label
+            if model == PLAMO3_PROFILE:
+                text += " · Built with PLaMo"
         elif backend == "translator_api":
             text = "브라우저 내장 Translator API · 일본어 → 한국어 (첫 사용 시 모델 다운로드)"
         elif backend == "hdtrans":
@@ -973,7 +980,7 @@ class SettingsWindow(tk.Toplevel):
 
     def _collect_settings(self) -> AppSettings:
         current = self.owner.settings
-        backend = BACKEND_IDS_BY_LABEL.get(self.hytrans_backend_var.get(), "local")
+        backend, model = TRANSLATION_ENGINES[self.hytrans_backend_var.get()]
         if backend in PROVIDERS:
             error = validate_provider_settings(self.api_settings.profiles[backend], backend)
             if error:
@@ -1018,7 +1025,7 @@ class SettingsWindow(tk.Toplevel):
             realtime_ocr_enabled=self.realtime_ocr_enabled_var.get(),
             realtime_ocr_interval=normalize_interval(self.realtime_ocr_interval_var.get()),
             hytrans_backend=backend,
-            hytrans_model_id=DEFAULT_MODEL_ID,
+            hytrans_model_id=model.key,
             hytrans_port=hytrans_port,
             overlayer_port=overlayer_port,
             audio_capture_port=audio_capture_port,

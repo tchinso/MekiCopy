@@ -13,6 +13,7 @@ from unittest import mock
 import mekicopy_settings
 import mekicopy_settings_window as settings_ui
 from hytrans.api_settings import ApiSettings, BACKEND_LABELS
+from hytrans.model_files import PLAMO3_PROFILE
 from mekicopy_settings import AppSettings, load_settings, save_settings
 
 
@@ -300,8 +301,12 @@ class TranslationSettingsUiTests(unittest.TestCase):
         self.root.apply_settings.assert_not_called()
 
     def test_local_allows_blank_credentials_but_selected_api_requires_them(self) -> None:
-        self.window.hytrans_backend_var.set(BACKEND_LABELS["local"])
-        self.assertEqual(self.window._collect_settings().hytrans_backend, "local")
+        for label, model in (("pLaMo-3 (로컬)", PLAMO3_PROFILE.key), (BACKEND_LABELS["local"], "mt1.5")):
+            with self.subTest(engine=label):
+                self.window.hytrans_backend_var.set(label)
+                collected = self.window._collect_settings()
+                self.assertEqual(collected.hytrans_backend, "local")
+                self.assertEqual(collected.hytrans_model_id, model)
         self.window.hytrans_backend_var.set(BACKEND_LABELS["cloudflare"])
         with self.assertRaisesRegex(ValueError, "API"):
             self.window._collect_settings()
@@ -310,6 +315,24 @@ class TranslationSettingsUiTests(unittest.TestCase):
         profile.account_id = "a" * 32
         self.assertEqual(self.window._collect_settings().hytrans_backend, "cloudflare")
         self.assertEqual(self.window.api_settings.profiles["groq"].api_key, "")
+
+    def test_translation_engine_menu_order_and_plamo_selection_restore(self) -> None:
+        menu = next(
+            widget for widget in self.descendants(self.window)
+            if isinstance(widget, tk.OptionMenu)
+            and str(widget.cget("textvariable")) == str(self.window.hytrans_backend_var)
+        )["menu"]
+        self.assertEqual([menu.entrycget(i, "label") for i in range(menu.index("end") + 1)], [
+            BACKEND_LABELS["hdtrans"], BACKEND_LABELS["translator_api"], "pLaMo-3 (로컬)",
+            BACKEND_LABELS["local"], BACKEND_LABELS["cloudflare"], BACKEND_LABELS["deepinfra"], BACKEND_LABELS["groq"],
+        ])
+        self.window.hytrans_backend_var.set("pLaMo-3 (로컬)")
+        self.root.settings = self.window._collect_settings()
+        reopened = settings_ui.SettingsWindow(self.root)
+        try:
+            self.assertEqual(reopened.hytrans_backend_var.get(), "pLaMo-3 (로컬)")
+        finally:
+            reopened.destroy()
 
     def test_hdtrans_selection_needs_no_api_profile_and_enables_native_settings(self) -> None:
         profiles = deepcopy(self.window.api_settings)

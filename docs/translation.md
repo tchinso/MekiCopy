@@ -9,8 +9,9 @@
 | 서비스 | 준비 사항 | 모델·데이터 위치 |
 |---|---|---|
 | hdTrans (기본) | 네이티브 엔진과 기본 사전 | `HYTrans/hdtrans` |
-| HY-MT1.5 | Chrome 또는 Edge, q4 번역 모델 | `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX` |
 | TranslatorAPI | 해당 언어 쌍을 지원하는 Chrome 또는 Edge | 브라우저에서 언어 모델 관리 |
+| pLaMo-3 | Chrome 또는 Edge, q4f16 번역 모델 | `HYTrans/models/TeamFlaxia/plamo-3-translate-0.8b-onnx` |
+| HY-MT1.5 | Chrome 또는 Edge, q4 번역 모델 | `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX` |
 | Cloudflare Workers AI | API 토큰, Account ID, 모델 ID | 원문을 해당 서비스로 전송 |
 | DeepInfra / Groq | API 키, 모델 ID | 원문을 해당 서비스로 전송 |
 
@@ -25,7 +26,9 @@
 
 MekiCopy가 OCR을 수행하고, HYTrans가 번역한 결과를 MekiOverlayer가 표시합니다. 창의 위치·크기는 직접 조절하고 외형은 [번역 오버레이 설정](settings.md#번역-오버레이)에서 변경합니다.
 
-준비 상태는 `도구`의 **모든 도구 연결 상태 확인**으로 확인합니다. 화면 번역에서는 HYTrans와 MekiOverlayer 두 도구를 확인합니다. 소리 번역 화면의 **연결 상태 확인**은 MekiAudioCapture·HYTrans·MekiScript 세 도구를 확인합니다. API 인증과 실제 서비스 가용성은 번역 요청 결과로 확인합니다. MekiCopy가 시작한 도구는 본체 종료 시 함께 종료됩니다.
+TranslatorAPI, pLaMo-3, HY-MT1.5, Cloudflare, DeepInfra, Groq를 선택하면 **화면 번역 → 도구**와 **소리 번역**에 번역 엔진 상태가 자동으로 표시됩니다. 모델 준비 진행, 번역 중, 준비 완료, 최근 오류를 표시합니다. 클라우드 서비스의 연결 확인은 모델 목록을 조회하며 번역 요청이나 원문 전송은 발생하지 않습니다.
+
+**모든 도구 연결 상태 확인**은 HYTrans와 MekiOverlayer를, 소리 번역의 **연결 상태 확인**은 MekiAudioCapture·HYTrans·MekiScript를 확인합니다. MekiCopy가 시작한 도구는 본체 종료 시 함께 종료됩니다.
 
 ## 실시간 OCR
 
@@ -47,7 +50,7 @@ OCR → 번역 → MekiOverlayer의 실제 화면 표시가 성공한 뒤 다음
 
 ## hdTrans
 
-Lite는 처음 준비할 때 공식 **v0.9.3** 엔진과 기본 사전 **0.9.3+5fa3c580a6fe**를 내려받아 체크섬을 검증합니다. Full에는 같은 엔진·사전과 대응 소스·라이선스를 포함합니다. 브라우저·ONNX 번역 모델·API 키는 필요하지 않습니다.
+Lite는 처음 준비할 때 공식 **v0.9.8** 엔진과 기본 사전 **0.9.8+bf1ff56af857**를 내려받아 체크섬을 검증합니다. Full에는 같은 엔진·사전과 대응 소스·라이선스를 포함합니다. 브라우저·ONNX 번역 모델·API 키는 필요하지 않습니다.
 
 `설정 → 일반`의 hdTrans 전용 버튼에서 설치 진행·취소·재시도·업데이트 확인·지원 버전 재설치를 수행합니다. 새 공식 릴리스는 알림으로 제공하며, 설치에는 검증된 버전 조합을 사용합니다. 설치 실패 시 정상 설치와 사용자 사전을 유지합니다. 고정 파일과 무결성 정보는 [빌드 안내](../BUILDING.md)에 있습니다.
 
@@ -62,6 +65,10 @@ UTF-8의 `일본어<TAB>한국어` 형식과 공식 선택 필드를 사용합�
 **이전 대화 문맥 보존**은 기본 ON이며 OFF에서는 번역 직전에 문맥을 초기화합니다. **문맥 초기화** 버튼, 옵션 변경, 새 자막 파일과 OCR·음성·자막 작업 간 전환도 문맥을 초기화합니다. 다른 게임으로 바꿀 때는 직접 초기화하세요.
 
 문맥은 디스크에 저장하지 않습니다. 최근 원문을 최대 8,000자까지 메모리에 보관해 명시적으로 전달합니다. 하나의 작업 문맥을 사용하므로 여러 작품을 번갈아 처리하면 작업이 바뀔 때마다 초기화하며 이전 작품의 문맥을 복원하지 않습니다.
+
+## pLaMo-3
+
+**Built with PLaMo.** TeamFlaxia의 0.8B ONNX 변환본을 사용합니다. 모델 카드의 `target_lang=ko` 채팅 템플릿으로 일본어에서 한국어로 번역합니다. Lite는 첫 실행 시 모델을 다운로드하고 Full에는 모델이 포함됩니다. 모델에는 PLaMo Community License가 적용됩니다. [모델 카드](https://huggingface.co/TeamFlaxia/plamo-3-translate-0.8b-onnx) · [라이선스](https://huggingface.co/pfnet/plamo-3-translate-0.8b/blob/c5a33c561bc6a4fbac38c3460bbb384e15c0b231/LICENSE/en)
 
 ## HY-MT1.5
 

@@ -877,8 +877,8 @@ if ($PackageFlavor -eq "Full") {
     $hdTransPrepareArgs = @(
         "-m", "hytrans.hdtrans_download", "--prepare-build", (Join-Path $hyTransRoot "hdtrans")
     )
-    $hdTransArchiveCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-0.9.3-windows.zip"
-    $hdTransSourceCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-v0.9.3-source.zip"
+    $hdTransArchiveCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-0.9.8-windows.zip"
+    $hdTransSourceCache = Join-Path $PSScriptRoot ".cache\hdtrans\hdTrans-v0.9.8-source.zip"
     if ($FullHdTransRoot) {
         $hdTransPrepareArgs += @("--from-bundle-root", $FullHdTransRoot)
     }
@@ -1080,6 +1080,11 @@ if ($PackageFlavor -eq "Full") {
             SourceRelative = "onnx-community\HY-MT1.5-1.8B-ONNX"
             TargetRelative = "HYTrans\models\onnx-community\HY-MT1.5-1.8B-ONNX"
             Description = "HY-MT1.5 translation model"
+        },
+        @{
+            SourceRelative = "TeamFlaxia\plamo-3-translate-0.8b-onnx"
+            TargetRelative = "HYTrans\models\TeamFlaxia\plamo-3-translate-0.8b-onnx"
+            Description = "PLaMo-3 translation model"
         }
     )
     foreach ($asset in $fullAssetCopies) {
@@ -1187,6 +1192,20 @@ if (-not $SkipSmokeTests) {
         -ExpectedConfig @{
             modelId = "onnx-community/HY-MT1.5-1.8B-ONNX"
             dtype = "q4"
+            hasLocalWasm = $true
+            modelMode = $expectedHyTransModelMode
+        } `
+        -GracefulShutdown
+
+    $plamoPort = Get-FreeTcpPort
+    Invoke-HealthSmokeTest `
+        -ExePath $hyTransExe `
+        -Arguments @("--port", "$plamoPort", "--model", "plamo3", "--no-browser") `
+        -Port $plamoPort `
+        -ExpectedConfig @{
+            modelKey = "plamo3"
+            modelId = "TeamFlaxia/plamo-3-translate-0.8b-onnx"
+            dtype = "q4f16"
             hasLocalWasm = $true
             modelMode = $expectedHyTransModelMode
         } `

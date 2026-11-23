@@ -144,6 +144,7 @@ def source_fingerprint(source_root: Path) -> str:
     inputs.update((source_root / "assets").glob("*.html"))
     inputs.update((source_root / "assets").glob("*.js"))
     inputs.update((source_root / "assets").glob("*.json"))
+    inputs.update((source_root / "assets" / "licenses").rglob("*.txt"))
     digest = hashlib.sha256()
     for path in sorted(inputs, key=lambda item: item.relative_to(source_root).as_posix()):
         relative = path.relative_to(source_root).as_posix()

@@ -109,6 +109,26 @@ class ApiSettingsTests(unittest.TestCase):
 
 
 class ApiTransportTests(unittest.TestCase):
+    def test_connection_probe_uses_authenticated_catalog_get_for_each_provider(self) -> None:
+        settings = configured_settings()
+        expected_urls = {
+            "cloudflare": f"https://api.cloudflare.com/client/v4/accounts/{'a' * 32}/ai/models/search?per_page=1",
+            "deepinfra": "https://api.deepinfra.com/v1/openai/models",
+            "groq": "https://api.groq.com/openai/v1/models",
+        }
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider):
+                translator = ApiTranslator(provider, settings.profiles[provider])
+                payload = (b'{"success":true,"result":[]}' if provider == "cloudflare"
+                           else b'{"data":[]}')
+                with mock.patch.object(translator._opener, "open", return_value=io.BytesIO(payload)) as open_url:
+                    translator.probe_connection()
+                request = open_url.call_args.args[0]
+                self.assertEqual(request.full_url, expected_urls[provider])
+                self.assertEqual(request.get_method(), "GET")
+                self.assertEqual(request.get_header("Authorization"), "Bearer synthetic-test-key")
+                self.assertIsNone(request.data)
+
     def test_three_official_urls_bearer_headers_and_provider_token_parameters(self) -> None:
         settings = configured_settings()
         urls = {
@@ -286,6 +306,39 @@ class ApiRouteTests(unittest.TestCase):
             self.assertEqual(client.post("/translate", json={"text": "入力"}).status_code, 503)
             self.assertIsNone(server.queue_task)
             self.mock_translate.assert_not_called()
+
+    def test_live_status_reports_provider_error_without_disabling_translation(self) -> None:
+        async def wait_for_probe() -> None:
+            await server.api_connection_task
+
+        failure = ApiTranslationError("Groq: API authentication failed")
+        with (
+            mock.patch.object(ApiTranslator, "probe_connection", side_effect=failure) as probe,
+            TestClient(server.app, client=("127.0.0.1", 10001)) as client,
+        ):
+            self.assertTrue(client.get("/health").json()["ready"])
+            self.assertTrue(client.get("/ready").json()["ready"])
+            probe.assert_not_called()
+            self.assertEqual(client.get("/translation/status", headers={"Sec-Fetch-Site": "cross-site"}).status_code, 403)
+            probe.assert_not_called()
+            initial = client.get("/translation/status").json()
+            self.assertEqual(initial["providerConnection"], "CHECKING")
+            client.portal.call(wait_for_probe)
+            failed = client.get("/translation/status").json()
+            self.assertEqual(failed["providerConnection"], "ERROR")
+            self.assertEqual(failed["providerError"], str(failure))
+            self.assertTrue(failed["ready"])
+            probe.assert_called_once()
+            self.assertEqual(client.post("/translate", json={"text": "入力"}).status_code, 200)
+            recovered = client.get("/translation/status").json()
+            self.assertEqual(recovered["providerConnection"], "CONNECTED")
+            self.assertNotIn("providerError", recovered)
+            probe.assert_called_once()
+            self.mock_translate.side_effect = ApiTranslationError("selected model rejected")
+            self.assertEqual(client.post("/translate", json={"text": "入力"}).status_code, 502)
+            failed_translation = client.get("/translation/status").json()
+            self.assertEqual(failed_translation["providerConnection"], "CONNECTED")
+            self.assertEqual(failed_translation["error"], "selected model rejected")
 
     def test_rate_limit_response_reaches_callers_but_service_remains_ready(self) -> None:
         self.mock_translate.side_effect = ApiTranslationError("rate limit", status_code=429, retry_after="3")

@@ -7,6 +7,8 @@ from PyInstaller.utils.hooks import collect_submodules
 
 datas = ssl_runtime_data()
 datas += browser_runtime_data(Path("assets"))
+for language in ("en", "ja"):
+    datas.append((f"assets/licenses/PLaMo/{language}.txt", "licenses/PLaMo"))
 if Path("MekiCopy.ico").exists():
     datas.append(("MekiCopy.ico", "."))
 

@@ -42,6 +42,7 @@ from mekicopy_companions import (
     _WindowsNamedMutex,
     _activate_detached_window,
     _close_detached_window,
+    _describe_translation_status,
     _find_companion_executable,
     _find_magpie_executable,
     _install_latest_magpie,
@@ -104,7 +105,7 @@ from mekicopy_settings import (
 )
 from mekicopy_settings_window import SettingsWindow
 from meki_subtitle_window import MekiSubtitleWindow
-from hytrans.model_files import get_model_profile
+from hytrans.model_files import PLAMO3_PROFILE, get_model_profile
 from hytrans.api_settings import (
     ApiSettings,
     BACKEND_LABELS,
@@ -154,6 +155,7 @@ MAIN_WINDOW_HEIGHT = 440
 MAIN_TAB_BAR_WIDTH = 138
 OCR_BUTTON_HEIGHT_PX = 232
 GLOBAL_HOTKEY_POLL_MS = 50
+TRANSLATION_STATUS_POLL_MS = 1_500
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 DETACHED_MUTEX_NAME = "Local\\MekiCopy.DetachedOcrButton"
 MAGPIE_LAUNCH_NOTICE = (
@@ -653,6 +655,10 @@ class MainWindow(tk.Tk):
         self._hytrans_config_fingerprint = fingerprint(
             load_api_settings(), self.settings.hytrans_backend
         )
+        self._translation_status_api_model: str | None = None
+        self._translation_status_after_id: str | None = None
+        self._translation_status_last_target = None
+        self._translation_status_labels: list[tk.Label] = []
         self.detached_process: subprocess.Popen | None = None
         self.settings_window: SettingsWindow | None = None
         self.hytrans_process: subprocess.Popen | None = None
@@ -733,6 +739,7 @@ class MainWindow(tk.Tk):
         self._companion_watchdog.start()
         self._schedule_companion_watchdog_poll()
         self._schedule_global_hotkey_poll()
+        self._schedule_translation_status_poll()
 
     def _build_ui(self) -> None:
         self._workflow_mode: str | None = None
@@ -888,6 +895,7 @@ class MainWindow(tk.Tk):
         )
 
     def _build_tools_tab(self, frame: tk.Frame) -> None:
+        self._build_translation_status_label(frame)
         self.hytrans_button = self._pack_tab_button(
             frame,
             "번역 엔진 실행",
@@ -903,7 +911,9 @@ class MainWindow(tk.Tk):
             "모든 도구 연결 상태 확인",
             self._on_test_overlay_connection,
         )
+
     def _build_audio_tab(self, frame: tk.Frame) -> None:
+        self._build_translation_status_label(frame, wraplength=420)
         self._pack_tab_button(frame, "녹음 엔진 실행", self._on_start_audio_capture)
         self._pack_tab_button(frame, "번역 엔진 실행", self._on_start_hytrans)
         self._pack_tab_button(frame, "번역결과 표시기 실행", self._on_start_script)
@@ -913,6 +923,85 @@ class MainWindow(tk.Tk):
             self._on_test_audio_connection,
         )
         self._pack_tab_button(frame, "설정", self._on_open_settings)
+
+    def _build_translation_status_label(self, frame: tk.Frame, *, wraplength: int = 300) -> None:
+        self._translation_status_labels.append(tk.Label(
+            frame, bg=SURFACE, fg=ROSE, justify=tk.LEFT, wraplength=wraplength,
+        ))
+
+    def _set_translation_status(self, text: str) -> None:
+        for label in self._translation_status_labels:
+            shown = bool(label.winfo_manager())
+            if text:
+                label.config(text=text, fg=ROSE)
+                if not shown:
+                    label.pack(pady=(4, 12), fill=tk.X, before=label.master.pack_slaves()[0])
+            elif shown:
+                label.pack_forget()
+
+    def _schedule_translation_status_poll(self, *, immediately: bool = False) -> None:
+        if self._translation_status_after_id is not None:
+            self.after_cancel(self._translation_status_after_id)
+        self._translation_status_after_id = self.after(
+            0 if immediately else TRANSLATION_STATUS_POLL_MS, self._poll_translation_status,
+        )
+
+    def _translation_status_target(self) -> tuple[str, str, str, str, subprocess.Popen | None]:
+        return (
+            self._hytrans_base_url(), normalize_backend(self.settings.hytrans_backend),
+            self.settings.hytrans_model_id, self._hytrans_config_fingerprint, self.hytrans_process,
+        )
+
+    def _poll_translation_status(self) -> None:
+        self._translation_status_after_id = None
+        if self._closing:
+            return
+        self._schedule_translation_status_poll()
+        if (self._workflow_mode not in {"screen", "audio"}
+                or self.active_tab_name not in {"도구", "소리 번역"}
+                or self.state() not in {"normal", "zoomed"}):
+            return
+        target = self._translation_status_target()
+        url, backend, model_id, _, process = target
+        if backend == "hdtrans":
+            self._translation_status_last_target = None
+            self._set_translation_status("")
+            return
+        model = self._translation_status_api_model
+        name = BACKEND_LABELS[backend]
+        if backend == "local":
+            profile = get_model_profile(model_id)
+            model = profile.model_id
+            if profile is PLAMO3_PROFILE:
+                name = "pLaMo-3"
+        title = f"번역 엔진 상태 · {name}"
+        if self._hytrans_restart_after_id is not None:
+            self._translation_status_last_target = None
+            self._set_translation_status(f"{title}\n엔진 재시작 중")
+            return
+        if self._translation_status_last_target != target:
+            self._translation_status_last_target = target
+            self._set_translation_status(f"{title}\n상태 확인 중")
+
+        def show(status: str) -> None:
+            if (not self._closing and self._hytrans_restart_after_id is None
+                    and self._translation_status_target() == target):
+                self._set_translation_status(f"{title}\n{status}")
+
+        def unavailable(_error: Exception) -> None:
+            if _is_process_alive(process):
+                status = "번역 서버 응답 대기 중"
+            elif process is not None:
+                status = "번역 서버가 종료됨"
+            else:
+                status = "실행 대기"
+            show(status)
+
+        self._task_runner.submit(
+            "translation_status", lambda: _json_request(f"{url}/translation/status", timeout=0.75),
+            on_success=lambda payload: show(_describe_translation_status(payload, backend, model)),
+            on_error=unavailable,
+        )
 
     def _build_subtitle_tab(self, frame: tk.Frame) -> None:
         tk.Label(
@@ -1005,6 +1094,8 @@ class MainWindow(tk.Tk):
                 button.config(bg=SURFACE, fg=ROSE, activebackground=SOFT)
             else:
                 button.config(bg=SOFT, fg=INK, activebackground=SURFACE)
+        if name in {"도구", "소리 번역"}:
+            self._schedule_translation_status_poll(immediately=True)
 
     def ocr_action_label(self) -> str:
         realtime = getattr(self, "_realtime_ocr", None)
@@ -1133,6 +1224,12 @@ class MainWindow(tk.Tk):
     def _on_root_destroy(self, event: tk.Event) -> None:
         if event.widget == self:
             self._closing = True
+            if self._translation_status_after_id is not None:
+                try:
+                    self.after_cancel(self._translation_status_after_id)
+                except tk.TclError:
+                    pass
+                self._translation_status_after_id = None
             if getattr(self, "_realtime_ocr", None) is not None:
                 self._realtime_ocr.close()
             self._global_hotkey.close()
@@ -2901,6 +2998,8 @@ class MainWindow(tk.Tk):
         if hdtrans_button is not None:
             hdtrans_button.configure(state=tk.NORMAL if backend == "hdtrans" else tk.DISABLED)
         self._hytrans_config_fingerprint = current_fingerprint
+        profile = selected_api_settings.profiles.get(backend)
+        self._translation_status_api_model = profile.model.strip() if profile else None
         set_debug_enabled(self.settings.debug_logging)
         self.attributes("-topmost", self.settings.main_always_on_top)
         if self.subtitle_window is not None and self.subtitle_window.winfo_exists():

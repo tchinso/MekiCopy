@@ -134,6 +134,46 @@ def _probe_service(expected_app: str, base_url: str, timeout: float = 2.0) -> st
     return f"{state} ({'; '.join(details)})" if details else state
 
 
+def _describe_translation_status(payload: object, backend: str, model: str | None) -> str:
+    if not isinstance(payload, dict) or payload.get("ok") is not True or payload.get("app") != "HYTrans":
+        return "번역 서버 응답을 확인할 수 없음"
+    if payload.get("backend") != backend or (model and payload.get("model") != model):
+        return "선택한 엔진으로 다시 실행 필요"
+
+    state = payload.get("state")
+    detail = payload.get("error")
+    if state == "BUSY":
+        text, detail = "번역 중", None
+    elif state == "STOPPING":
+        text, detail = "종료 중", None
+    elif state == "WORKER_TIMEOUT":
+        text = "번역 엔진 응답 시간 초과"
+    elif state == "ERROR":
+        text = "엔진 오류"
+    elif state in ("WORKER_CONNECTED", "WORKER_LOADING"):
+        text = "엔진 준비 중" if backend == "translator_api" else "모델 로드 중"
+        detail = payload.get("loadingMessage")
+    elif payload.get("ready") is not True:
+        text = "엔진 시작 중"
+    elif payload.get("providerConnection") == "ERROR":
+        text, detail = "API 연결 실패", payload.get("providerError")
+    elif detail:
+        text = "최근 번역 실패"
+        if payload.get("providerConnection") == "CONNECTED":
+            text += " · API 연결 확인됨"
+    elif payload.get("providerConnection") == "CHECKING":
+        text = "API 연결 확인 중"
+    elif payload.get("providerConnection") == "CONNECTED":
+        text = "API 연결 확인됨"
+    else:
+        text = "준비 완료"
+
+    if detail:
+        shown = " ".join(str(detail).split())
+        text += f" · {shown[:100]}{'…' if len(shown) > 100 else ''}"
+    return text
+
+
 def _is_loopback_port_open(port: int, timeout: float = 0.25) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):

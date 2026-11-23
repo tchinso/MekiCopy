@@ -11,7 +11,7 @@
 | MekiCopy가 최소화되면 시스템 트레이로 이동 | 최소화 시 트레이로 이동합니다. 트레이 아이콘을 클릭해 복원합니다. |
 | MekiCopy를 항상 위로 | 본체 창을 다른 창 위에 표시합니다. |
 | 분리된 '번역 후 표시' 버튼의 제목표시줄 숨김 | 제목표시줄을 숨깁니다. 버튼을 드래그해 창을 이동할 수 있습니다. |
-| 번역 서비스 | hdTrans, HY-MT1.5, TranslatorAPI, Cloudflare Workers AI, DeepInfra, Groq 중 선택합니다. 기본값은 hdTrans입니다. |
+| 번역 서비스 | hdTrans, TranslatorAPI, pLaMo-3, HY-MT1.5, Cloudflare Workers AI, DeepInfra, Groq 중 선택합니다. 기본값은 hdTrans입니다. |
 | API 키 · 모델 목록 · 번역 프롬프트 설정 | 클라우드 서비스별 설정을 편집합니다. |
 | hdTrans 설정 · 사전 · 문맥 · 설치 | 엔진 설치와 사용자 사전·문맥을 관리합니다. |
 | HYTrans 포트 | 번역 서버 포트입니다. 기본값은 6996입니다. |
@@ -81,11 +81,12 @@
 | 암호화한 API 설정 | `settings.cfg` 옆 `translation_api.json` |
 | 오류 / 디버그 로그 | 각 실행 파일 옆 `error_log/` / `debug_log/` |
 | MT1.5 모델 | `HYTrans/models/onnx-community/HY-MT1.5-1.8B-ONNX` |
+| pLaMo-3 모델 | `HYTrans/models/TeamFlaxia/plamo-3-translate-0.8b-onnx` |
 | hdTrans 엔진·사전 / 사용자 사전 | `HYTrans/hdtrans/installations` / `HYTrans/hdtrans/user` 또는 지정한 외부 파일 |
 | 음성·VAD 공용 모델 | `MekiAudioCapture/models` |
 | 일괄 음성 처리 임시 파일 | `MekiAudioCapture/work` |
 
-MT1.5 모델은 고정 리비전·크기·SHA-256으로 검증합니다. 중단된 `.part` 다운로드는 이어받으며 체크섬이 일치하는 파일만 게시합니다. MekiSubtitle은 번역·음성 공용 모델 캐시를 사용합니다.
+pLaMo-3와 HY-MT1.5 모델은 고정 리비전·크기·SHA-256으로 검증합니다. 중단된 `.part` 다운로드는 이어받으며 체크섬이 일치하는 파일만 게시합니다. MekiSubtitle은 번역·음성 공용 모델 캐시를 사용합니다.
 
 ## 문제 해결
 

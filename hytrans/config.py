@@ -84,6 +84,7 @@ class RuntimeConfig(BaseModel):
     modelFiles: dict[str, int]
     source: str = SOURCE_LANG
     target: str = TARGET_LANG
+    targetLang: str | None = None
     maxNewTokens: int = MAX_NEW_TOKENS
     hasLocalWasm: bool = False
     debugLog: bool = False
@@ -213,6 +214,7 @@ def runtime_config() -> RuntimeConfig:
         revision=profile.revision,
         dtype=profile.dtype,
         promptTemplate=profile.prompt,
+        targetLang=profile.target_lang,
         modelMode=(
             "local"
             if is_complete_model(_model_path(profile), profile)

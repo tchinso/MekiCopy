@@ -52,6 +52,9 @@ translation_queue = TranslationQueue()
 queue_task: asyncio.Task | None = None
 api_translation_queue: ApiTranslationQueue | None = None
 api_active_requests = 0
+api_connection_task: asyncio.Task[None] | None = None
+api_connection_error: str | None = None
+api_connection_refresh_at = 0.0
 hdtrans_backend: HdTransBackend | None = None
 hdtrans_prepare_task: asyncio.Task | None = None
 worker_opener: Callable[[], None] | None = None
@@ -62,6 +65,7 @@ shutdown_handler: Callable[[], None] | None = None
 shutdown_token: str | None = None
 TRANSLATOR_API_STARTUP_TIMEOUT_SECONDS = 10 * 60
 LOCAL_WORKER_LOADING_TIMEOUT_SECONDS = 10 * 60
+API_CONNECTION_REFRESH_SECONDS = 30
 
 
 class ModelFileResponse(FileResponse):
@@ -358,7 +362,7 @@ async def _translate_text(text: str, *, realtime: bool = False,
 
 async def _translate_api_text(text: str, *, source: str | None = None,
                               target: str | None = None) -> str:
-    global api_active_requests
+    global api_active_requests, api_connection_error, api_connection_refresh_at
     if not state.worker_ready or api_translation_queue is None:
         raise HTTPException(status_code=503, detail=state.error or "translation API is not configured")
     for language in (source, target):
@@ -374,6 +378,8 @@ async def _translate_api_text(text: str, *, source: str | None = None,
             target=(target or "Korean").strip(), max_new_tokens=MAX_NEW_TOKENS,
         )
         state.error = None
+        api_connection_error = None
+        api_connection_refresh_at = time.monotonic() + API_CONNECTION_REFRESH_SECONDS
         debug("api_translation_success", f"backend: {options.backend}\ninput_chars: {len(text)}\noutput_chars: {len(result)}")
         return result
     except TranslationQueueOverloadedError:
@@ -469,6 +475,7 @@ def _validate_native_control(request: Request) -> None:
 @app.on_event("startup")
 async def on_startup() -> None:
     global queue_task, translation_queue, worker_open_task, api_translation_queue, api_active_requests
+    global api_connection_task, api_connection_error, api_connection_refresh_at
     global hdtrans_backend, hdtrans_prepare_task
     # A FastAPI app object may be stopped and started again in the same
     # interpreter (embedded hosting and lifespan tests do this). ``stop``
@@ -491,6 +498,9 @@ async def on_startup() -> None:
     state.loading_message = None
     api_active_requests = 0
     api_translation_queue = None
+    api_connection_task = None
+    api_connection_error = None
+    api_connection_refresh_at = 0.0
     hdtrans_backend = None
     hdtrans_prepare_task = None
     if options.backend == "hdtrans":
@@ -530,7 +540,7 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    global queue_task, api_translation_queue
+    global queue_task, api_translation_queue, api_connection_task
     global hdtrans_backend, hdtrans_prepare_task
     state.state = "STOPPING"
     if hdtrans_prepare_task is not None and not hdtrans_prepare_task.done():
@@ -542,6 +552,11 @@ async def on_shutdown() -> None:
         await hdtrans_backend.close()
         hdtrans_backend = None
     translation_queue.stop()
+    if api_connection_task is not None:
+        api_connection_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await api_connection_task
+        api_connection_task = None
     if api_translation_queue is not None:
         await api_translation_queue.stop()
         api_translation_queue = None
@@ -599,6 +614,47 @@ async def ready() -> dict[str, object]:
     if options.backend == "hdtrans":
         _sync_hdtrans_state()
     return state.as_ready_payload()
+
+
+async def _probe_api_connection(translator: ApiTranslator) -> None:
+    global api_connection_error, api_connection_refresh_at
+    previous_refresh = api_connection_refresh_at
+    if time.monotonic() < previous_refresh:
+        return
+    try:
+        await asyncio.to_thread(translator.probe_connection)
+    except ApiTranslationError as exc:
+        connection_error = str(exc)
+    except Exception:
+        connection_error = "Translation API connection check failed"
+    else:
+        connection_error = None
+    if api_connection_refresh_at == previous_refresh:
+        api_connection_error = connection_error
+        api_connection_refresh_at = time.monotonic() + API_CONNECTION_REFRESH_SECONDS
+
+
+@app.get("/translation/status")
+async def translation_status(request: Request, response: Response) -> dict[str, object]:
+    global api_connection_task
+    _validate_api_caller(request)
+    response.headers["Cache-Control"] = "no-store"
+    payload = {"ok": True, "app": "HYTrans", **await ready()}
+    if options.backend == "local":
+        # Identify the selected profile before the browser has loaded it.
+        profile = active_model_profile()
+        payload.update(model=profile.model_id, dtype=profile.dtype)
+    elif options.backend in PROVIDERS and api_translation_queue is not None:
+        # Only the visible status UI requests this check. The general health
+        # and readiness routes remain local and never contact the provider.
+        if (time.monotonic() >= api_connection_refresh_at
+                and (api_connection_task is None or api_connection_task.done())):
+            api_connection_task = asyncio.create_task(_probe_api_connection(api_translation_queue.translator))
+        if api_connection_error:
+            payload.update(providerConnection="ERROR", providerError=api_connection_error)
+        else:
+            payload["providerConnection"] = "CONNECTED" if api_connection_refresh_at else "CHECKING"
+    return payload
 
 
 @app.post("/worker/reopen")

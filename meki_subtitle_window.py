@@ -160,7 +160,7 @@ class MekiSubtitleWindow(tk.Toplevel):
         profile = get_model_profile(
             getattr(self._settings, "hytrans_model_id", "mt1.5")
         )
-        self.translation_model_var.set(f"{profile.display_label} (기본)")
+        self.translation_model_var.set(profile.display_label)
 
     def refresh_settings(self, settings: Any) -> None:
         """Refresh defaults while idle after MekiCopy saves settings."""
@@ -556,10 +556,7 @@ class MekiSubtitleWindow(tk.Toplevel):
                 # MainWindow has already shown the concrete launch/port error.
                 return
             backend = normalize_backend(getattr(self._settings, "hytrans_backend", "local"))
-            wait_for_hytrans_before_stt = (
-                backend == "local"
-                and get_model_profile(getattr(self._settings, "hytrans_model_id", "mt1.5")).key == "mt1.5"
-            )
+            wait_for_hytrans_before_stt = backend == "local"
 
         self._cancel_event.clear()
         self._set_running(True)
@@ -690,7 +687,7 @@ class MekiSubtitleWindow(tk.Toplevel):
     ) -> None:
         try:
             if translate_to_korean and wait_for_hytrans_before_stt:
-                self._emit_status(0.0, "HY-MT1.5 로드가 완료된 후 일본어 인식을 시작합니다.")
+                self._emit_status(0.0, "번역 모델 로드가 완료된 후 일본어 인식을 시작합니다.")
                 self._wait_for_hytrans_ready(progress_ratio=0.0)
             context_owner = f"subtitle:{uuid.uuid4().hex}"
 

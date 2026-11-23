@@ -45,8 +45,8 @@
     },
     {
       "path": "worker.js",
-      "size": 24772,
-      "sha256": "068dbb91f458a5a01b5955a07dede57bd6a3101edba87bbd45a7e76770496699"
+      "size": 26613,
+      "sha256": "d2f1523fa793717979fdccf31bce8a12e2c0244113ee085a4e74e21230ea2e8f"
     },
     {
       "path": "translator_api_worker.html",
