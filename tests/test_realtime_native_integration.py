@@ -2,8 +2,8 @@
 
 OCR strings and HYTrans's socket transport are mocked. The overlay uses the
 production HTTP handler and client. The Windows DLL,
-FastAPI routes, native queue, TkTaskRunner, realtime scheduler, overlay HTTP
-server, Tk label redraw and display acknowledgement all execute for real.
+FastAPI routes, native queue, QtTaskRunner, realtime scheduler, overlay HTTP
+server, Qt label repaint and display acknowledgement all execute for real.
 """
 
 from __future__ import annotations
@@ -23,11 +23,10 @@ from hytrans.hdtrans_download import DATA_DIR, VERSION, resolve_installation
 
 @unittest.skipUnless(os.name == "nt", "requires the actual Windows hdTrans DLL")
 class NativeRealtimeIntegrationTests(unittest.TestCase):
-    def test_real_native_translation_tk_ack_dedup_and_late_result_cancellation(self):
+    def test_real_native_translation_qt_ack_dedup_and_late_result_cancellation(self):
         installed = resolve_installation(Path(__file__).resolve().parents[1] / ".cache" / "hdtrans" / "full")
         if installed is None:
             self.skipTest(f"validated local hdTrans {VERSION} payload is not present; no downloads in tests")
-        import tkinter as tk
         from http.server import ThreadingHTTPServer
         from urllib.parse import urlsplit
         from fastapi.testclient import TestClient
@@ -38,7 +37,8 @@ class NativeRealtimeIntegrationTests(unittest.TestCase):
         from meki_overlayer import OverlayConfig, OverlayerApp, make_handler
         import mekicopy_companions as companions
         from mekicopy_realtime import RealtimeOcrController, perform_cycle
-        from mekicopy_tasks import TkTaskRunner
+        from mekicopy_qt_tasks import QtTaskRunner
+        from mekicopy_theme import ensure_application
 
         first = "今日はとてもいい天気ですね。"
         second = "明日は雨になるかもしれません。"
@@ -74,13 +74,14 @@ class NativeRealtimeIntegrationTests(unittest.TestCase):
             try:
                 asyncio.run(backend.submit("initialize", timeout=30))
                 self.assertTrue(backend.status()["ready"])
-                root = tk.Tk()
-                overlay = OverlayerApp(root, OverlayConfig(topmost=False))
+                app = ensure_application()
+                overlay = OverlayerApp(OverlayConfig(topmost=False))
+                overlay.show()
                 server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(overlay))
                 server.daemon_threads = True
                 server_thread = threading.Thread(target=server.serve_forever, daemon=True)
                 server_thread.start()
-                runner = TkTaskRunner(root)
+                runner = QtTaskRunner(overlay)
                 overlay_url = f"http://127.0.0.1:{server.server_port}"
                 overlay_request = companions._json_request
 
@@ -119,38 +120,38 @@ class NativeRealtimeIntegrationTests(unittest.TestCase):
                             delivered.append(result)
                             return True
 
-                        controller = RealtimeOcrController(root, runner, prepare_operation=prepare,
+                        controller = RealtimeOcrController(overlay, runner, prepare_operation=prepare,
                                                           on_result=success, on_error=errors.append)
                         with mock.patch.object(companions, "_json_request", side_effect=dispatch):
                             self.assertFalse(client.get("/ready").json()["workerConnected"])
                             controller.configure(enabled=True, interval=1, translate=True)
                             deadline = time.monotonic() + 15
                             while len(delivered) < 2 and not errors and time.monotonic() < deadline:
-                                root.update()
+                                app.processEvents()
                                 time.sleep(0.005)
                             controller.configure(enabled=False, interval=1, translate=True)
                             self.assertFalse(errors, (errors, requests, calls))
                             self.assertEqual(calls, [first, second])
                             self.assertEqual(len(delivered), 2)
                             self.assertTrue(all(result.displayed_at for result in delivered))
-                            self.assertEqual(overlay.label.cget("text"), translations[second])
-                            old_label = overlay.label.cget("text")
+                            self.assertEqual(overlay.label.text(), translations[second])
+                            old_label = overlay.label.text()
                             source = iter((obsolete,))
                             controller.configure(enabled=True, interval=1, translate=True,
                                                  fingerprint="cancellation session")
                             deadline = time.monotonic() + 8
                             while not native_started.is_set() and time.monotonic() < deadline:
-                                root.update()
+                                app.processEvents()
                                 time.sleep(0.005)
                             self.assertTrue(native_started.is_set())
                             controller.configure(enabled=False, interval=1, translate=True)
                             native_release.set()
                             deadline = time.monotonic() + 5
                             while runner.is_running("main_ocr") and time.monotonic() < deadline:
-                                root.update()
+                                app.processEvents()
                                 time.sleep(0.005)
                             self.assertTrue(native_completed.is_set())
-                            self.assertEqual(overlay.label.cget("text"), old_label)
+                            self.assertEqual(overlay.label.text(), old_label)
                             self.assertEqual(len(delivered), 2)
                             self.assertIsNone(controller.previous)
                             controller.close()
@@ -162,7 +163,9 @@ class NativeRealtimeIntegrationTests(unittest.TestCase):
                         overlay._topmost_controller.close()
                     server.shutdown()
                     server.server_close()
-                    root.destroy()
+                    overlay.hide()
+                    overlay.deleteLater()
+                    app.processEvents()
             finally:
                 native_release.set()
                 asyncio.run(backend.close())

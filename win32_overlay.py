@@ -1,6 +1,6 @@
-"""Small, event-driven Win32 enhancements for Tk overlay windows.
+"""Small, event-driven Win32 enhancements for overlay windows.
 
-Tk's ``-topmost`` attribute remains the portable source of truth.  This
+The toolkit's topmost setting remains the portable source of truth. This
 module only reinforces it on Windows after a foreground-window transition,
 without activating the overlay or repeatedly competing for Z-order.
 """
@@ -53,16 +53,13 @@ def _user32() -> Any:
 
 
 def get_top_level_hwnd(root: Any) -> int | None:
-    """Find the real top-level HWND for a Tk widget.
-
-    ``winfo_id()`` can identify Tk's child window, so use ``GetAncestor`` to
-    obtain the native root window before applying a window-level API.
-    """
+    """Find the native root window before applying a window-level API."""
 
     if os.name != "nt":
         return None
     try:
-        widget_hwnd = _handle_value(root.winfo_id())
+        native_id = getattr(root, "winId", None)
+        widget_hwnd = _handle_value(native_id() if native_id else root.winfo_id())
         if not widget_hwnd:
             return None
         user32 = _user32()
@@ -82,7 +79,7 @@ class TopmostWindowController:
 
     The controller deliberately does not use activation APIs.  It is a safe
     no-op on non-Windows platforms or whenever an optional Win32 call fails;
-    Tk's existing ``-topmost`` handling continues to work in either case.
+    The toolkit's topmost handling continues to work in either case.
     """
 
     FOREGROUND_RECHECK_DELAYS_MS = (500, 3000)
@@ -111,7 +108,7 @@ class TopmostWindowController:
         self._retry_after_ids: list[str] = []
 
     def start(self) -> None:
-        """Enable native reinforcement after Tk has created its window."""
+        """Enable native reinforcement after the toolkit creates its window."""
 
         if self._closed or self._started:
             return

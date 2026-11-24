@@ -31,6 +31,28 @@ class _BlockingWorker:
 
 
 class TranslationQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replacement_cannot_receive_requests_admitted_by_older_worker(self):
+        queue = TranslationQueue()
+        previous, replacement = _BlockingWorker(), _ImmediateWorker(queue)
+        queue.set_worker(previous)
+        runner = asyncio.create_task(queue.run(2048))
+        try:
+            active = asyncio.create_task(queue.submit("active", timeout=2))
+            await asyncio.wait_for(previous.sent.wait(), timeout=1)
+            queued = asyncio.create_task(queue.submit("queued", timeout=2))
+            await asyncio.sleep(0)
+            queue.set_worker(replacement)
+            previous.release.set()
+            for request in (active, queued):
+                with self.assertRaisesRegex(RuntimeError, "worker replaced"):
+                    await request
+            self.assertEqual(await queue.submit("new", timeout=1), "번역")
+            self.assertEqual([item["text"] for item in replacement.payloads], ["new"])
+        finally:
+            previous.release.set()
+            queue.stop()
+            await asyncio.wait_for(runner, timeout=1)
+
     async def test_disconnected_caller_does_not_remove_worker_deadline(self) -> None:
         queue = TranslationQueue()
         worker = _BlockingWorker()

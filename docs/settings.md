@@ -106,7 +106,6 @@ MekiCopy가 직접 실행한 도구는 HTTP 상태와 GUI 응답을 감시하며
 
 NVIDIA CUDA를 사용할 수 없으면 OCR은 진단 로그를 남기고 CPU로 실행합니다. MT1.5는 WebGPU를 사용할 수 없을 때 CPU/WASM을 사용합니다. 로컬 번역 제한 시간은 입력 길이에 따라 120~600초입니다.
 
-Tcl/Tk가 한글 실행 경로를 읽을 수 없으면 실행 파일 옆 `MekiCopyRuntime`으로 런타임을 준비하고, 그 경로도 사용할 수 없을 때 LocalAppData 또는 임시 폴더를 사용합니다.
 
 ## 실행 환경
 
@@ -117,4 +116,4 @@ Tcl/Tk가 한글 실행 경로를 읽을 수 없으면 실행 파일 옆 `MekiCo
 | RAM | 8GB | 16GB |
 | GPU | 필수 아님 | VRAM 6GB 이상 |
 
-소스 실행에는 Python 3.12~3.14와 Tcl/Tk가 필요합니다. `install_mekiocr.bat`으로 고정 의존성을 설치하고 `run_mekicopy.bat` 또는 `python mekicopy.py`로 실행합니다.
+소스 실행에는 Python 3.12~3.14가 필요합니다. `install_mekiocr.bat`으로 고정 의존성을 설치하고 `run_mekicopy.bat` 또는 `python mekicopy.py`로 실행합니다.

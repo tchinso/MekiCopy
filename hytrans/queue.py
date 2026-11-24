@@ -66,6 +66,7 @@ class TranslationQueue:
             return
         if self.worker_ws is not None:
             self._fail_pending("worker replaced")
+            self._fail_queued("worker replaced")
         self.worker_ws = websocket
         self._worker_usable = True
 
@@ -114,6 +115,7 @@ class TranslationQueue:
         self.worker_ws = None
         self._worker_usable = False
         self._fail_pending(reason)
+        self._fail_queued(reason)
         return True
 
     def invalidate_worker(
@@ -147,6 +149,7 @@ class TranslationQueue:
             if not job.future.done():
                 job.future.cancel()
         self.pending.clear()
+        self._fail_queued(reason)
 
         callback = self._worker_invalidated_callback
         if callback is not None:

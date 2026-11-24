@@ -1,23 +1,25 @@
 import argparse
-import ctypes
 import json
 import os
-import queue
 import subprocess
 import sys
-import threading
 import urllib.error
 import urllib.request
 import time
 
-from runtime_paths import prepare_tk_environment
-
-prepare_tk_environment("MekiCopyRuntime")
-
-import tkinter as tk
 from dataclasses import replace
-from tkinter import messagebox, simpledialog
 from typing import Callable
+
+from PySide6.QtCore import QEvent, QPoint, QRect, QTimer, Qt
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from PIL import Image
 from mekicopy_capture import (
@@ -87,17 +89,19 @@ from mekicopy_region_ui import (
 )
 from mekicopy_runtime import (
     _get_app_dir,
-    _prepare_tk_library_paths,
     _set_app_user_model_id,
     _set_window_icon,
 )
 from mekicopy_settings import (
+    DETACHED_DEFAULT_GEOMETRY,
+    MAX_DETACHED_DIMENSION,
     AppSettings,
     Bookmark,
     load_bookmarks,
     load_detached_geometry,
     load_detached_region,
     load_settings,
+    parse_detached_geometry,
     save_bookmarks,
     save_detached_geometry,
     save_detached_region,
@@ -118,19 +122,15 @@ from hytrans.api_settings import (
     validate_provider_settings,
 )
 from mekicopy_theme import (
-    BG,
-    BORDER,
-    INK,
-    ROSE,
     RoundedButton,
-    SOFT,
-    SUCCESS,
-    SURFACE,
-    TITLE_FONT,
+    TimerHost,
     configure_window_theme,
-    style_tree,
+    ensure_application,
+    make_font,
+    messagebox,
+    simpledialog,
 )
-from mekicopy_tasks import TkTaskRunner
+from mekicopy_qt_tasks import QtTaskRunner
 from mekicopy_realtime import (
     REALTIME_LOCK_LABEL,
     REALTIME_STATE_FILENAME,
@@ -143,20 +143,20 @@ from mekicopy_tray import WindowsTrayIcon
 from system_logging import (
     configure_system_logging,
     install_exception_hooks,
-    install_tk_exception_hook,
     log_directory,
     set_debug_enabled,
 )
 from win32_overlay import TopmostWindowController
 import mekicopy_settings
 
-MAIN_WINDOW_WIDTH = 520
-MAIN_WINDOW_HEIGHT = 440
-MAIN_TAB_BAR_WIDTH = 138
-OCR_BUTTON_HEIGHT_PX = 232
+MAIN_WINDOW_WIDTH = 534
+MAIN_WINDOW_HEIGHT = 338
+MAIN_WINDOW_MIN_WIDTH = 456
+MAIN_WINDOW_MIN_HEIGHT = 330
+MAIN_TAB_BAR_WIDTH = 116
+OCR_BUTTON_HEIGHT_PX = 148
 GLOBAL_HOTKEY_POLL_MS = 50
 TRANSLATION_STATUS_POLL_MS = 1_500
-DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 DETACHED_MUTEX_NAME = "Local\\MekiCopy.DetachedOcrButton"
 MAGPIE_LAUNCH_NOTICE = (
     "데스크톱 캡쳐 모드는 Graphics Capture(1순위 권장) 또는 "
@@ -173,6 +173,45 @@ _MANUALLY_CLOSABLE_COMPANIONS = frozenset(
 ) - {"HYTrans"}
 
 
+class DetachedWindow(TimerHost, QWidget):
+    def __init__(self, owner: "DetachedOcrButtonApp") -> None:
+        super().__init__()
+        self.owner = owner
+
+    def closeEvent(self, event) -> None:
+        self.owner._shutdown()
+        super().closeEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.owner._schedule_geometry_save()
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self.owner._schedule_geometry_save()
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.owner.button and self.owner.settings.detached_hide_titlebar:
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self.owner._on_mouse_down(event)
+            elif event.type() == QEvent.Type.MouseMove and event.buttons() & Qt.MouseButton.LeftButton:
+                self.owner._on_mouse_drag(event)
+            elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                self.owner._on_mouse_release(event)
+                if self.owner._suppress_next_click:
+                    self.owner._suppress_next_click = False
+                    watched.setDown(False)
+                    return True
+        return super().eventFilter(watched, event)
+
+
+def _read_window_geometry(value: str, fallback: str) -> QRect:
+    width, height, x, y = (
+        parse_detached_geometry(value) or parse_detached_geometry(fallback) or (260, 160, 120, 120)
+    )
+    return QRect(x, y, width, height)
+
+
 class DetachedOcrButtonApp:
     MIN_WIDTH = 120
     MIN_HEIGHT = 80
@@ -183,13 +222,12 @@ class DetachedOcrButtonApp:
     def __init__(self) -> None:
         _enable_dpi_awareness()
         _set_app_user_model_id()
-        _prepare_tk_library_paths()
-        self.root = tk.Tk()
+        ensure_application()
+        self.root = DetachedWindow(self)
         configure_window_theme(self.root)
-        install_tk_exception_hook(self.root)
-        self._task_runner = TkTaskRunner(self.root)
+        self._task_runner = QtTaskRunner(self.root)
         self.settings = load_settings()
-        self.root.title(DETACHED_WINDOW_TITLE)
+        self.root.setWindowTitle(DETACHED_WINDOW_TITLE)
         _set_window_icon(self.root)
         self._drag_action: str | None = None
         self._drag_start: tuple[int, int] | None = None
@@ -197,8 +235,8 @@ class DetachedOcrButtonApp:
         self._suppress_next_click = False
         self._settings_signature = self._settings_key(self.settings)
         self._settings_file_state = self._current_settings_file_state()
-        self._settings_after_id: str | None = None
-        self._geometry_after_id: str | None = None
+        self._settings_after_id: QTimer | None = None
+        self._geometry_after_id: QTimer | None = None
         self._realtime_locked = False
         self._closing = False
         self._topmost_controller = TopmostWindowController(
@@ -212,30 +250,30 @@ class DetachedOcrButtonApp:
             self.root,
             text=self.ocr_action_label(),
             command=self._on_button_command,
-            font=("Malgun Gothic", 14, "bold"),
+            font=("Malgun Gothic", 13, "bold"),
             variant="primary",
-            radius=22,
+            radius=16,
             focus_on_click=False,
         )
-        self.button.pack(fill=tk.BOTH, expand=True)
+        layout = QVBoxLayout(self.root)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.addWidget(self.button)
+        self.button.installEventFilter(self.root)
 
-        self.root.geometry(
-            load_detached_geometry(
-                self.settings.detached_geometry or DETACHED_DEFAULT_GEOMETRY
-            )
+        geometry = _read_window_geometry(
+            load_detached_geometry(self.settings.detached_geometry or DETACHED_DEFAULT_GEOMETRY),
+            DETACHED_DEFAULT_GEOMETRY,
         )
-        self.root.protocol("WM_DELETE_WINDOW", self.close)
-        self.root.bind("<Destroy>", self._on_root_destroy, add="+")
-        self.root.bind("<Configure>", self._on_configure)
-        self.button.bind("<ButtonPress-1>", self._on_mouse_down, add="+")
-        self.button.bind("<B1-Motion>", self._on_mouse_drag, add="+")
-        self.button.bind("<ButtonRelease-1>", self._on_mouse_release, add="+")
+        screens = ensure_application().screens()
+        if screens and not any(screen.availableGeometry().intersects(geometry) for screen in screens):
+            geometry.moveCenter(screens[0].availableGeometry().center())
+        self.root.setGeometry(geometry)
         self.apply_settings()
         self._topmost_controller.start()
         self._schedule_settings_poll()
 
     def run(self) -> None:
-        self.root.mainloop()
+        ensure_application().exec()
 
     def ocr_action_label(self) -> str:
         if self.settings.realtime_ocr_enabled:
@@ -251,29 +289,19 @@ class DetachedOcrButtonApp:
         runner = getattr(self, "_task_runner", None)
         busy = runner is not None and runner.is_running("detached_ocr")
         progress = getattr(self, "_ocr_progress_text", "") if busy else ""
-        if self.button.winfo_exists():
-            self.button.config(text=progress or self.ocr_action_label(), state=(
-                tk.DISABLED if busy or self._realtime_locked or self.settings.realtime_ocr_enabled
-                else tk.NORMAL
-            ))
+        if self.button.property("variant") != "success":
+            self.button.setText(progress or self.ocr_action_label())
+        self.button.setEnabled(not (busy or self._realtime_locked or self.settings.realtime_ocr_enabled))
 
     def current_size(self) -> tuple[int, int]:
-        self.root.update_idletasks()
-        return (
-            max(self.MIN_WIDTH, self.root.winfo_width()),
-            max(self.MIN_HEIGHT, self.root.winfo_height()),
-        )
+        return max(self.MIN_WIDTH, self.root.width()), max(self.MIN_HEIGHT, self.root.height())
 
     def capture_geometry(self, persist: bool = True) -> str:
-        if not self.root.winfo_exists():
-            return ""
-        self.root.update_idletasks()
-        geometry = self.root.geometry()
+        rect = self.root.geometry()
+        geometry = f"{rect.width()}x{rect.height()}{rect.x():+}{rect.y():+}"
         self.settings.detached_geometry = geometry
-        width, height = self.current_size()
         if self.settings.detached_fixed_size:
-            self.settings.detached_fixed_width = width
-            self.settings.detached_fixed_height = height
+            self.settings.detached_fixed_width, self.settings.detached_fixed_height = self.current_size()
         if persist:
             save_detached_geometry(geometry)
         return geometry
@@ -281,50 +309,47 @@ class DetachedOcrButtonApp:
     def apply_settings(self) -> None:
         settings = self.settings
         self._refresh_realtime_lock()
-        self.root.withdraw()
-        self.root.overrideredirect(settings.detached_hide_titlebar)
+        previous_geometry = self.root.geometry()
+        flags = Qt.WindowType.Window | Qt.WindowType.WindowCloseButtonHint
+        if settings.detached_hide_titlebar:
+            flags |= Qt.WindowType.FramelessWindowHint
+        elif not settings.detached_fixed_size:
+            flags |= Qt.WindowType.WindowMinMaxButtonsHint
+        if settings.detached_always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        if self.root.windowFlags() != flags:
+            self.root.setWindowFlags(flags)
+            self.root.setGeometry(previous_geometry)
         if settings.detached_fixed_size:
-            width = max(self.MIN_WIDTH, settings.detached_fixed_width)
-            height = max(self.MIN_HEIGHT, settings.detached_fixed_height)
-            x = self.root.winfo_x()
-            y = self.root.winfo_y()
-            self.root.geometry(f"{width}x{height}+{x}+{y}")
-            self.root.resizable(False, False)
-            self.root.minsize(width, height)
-            self.root.maxsize(width, height)
+            self.root.setFixedSize(
+                max(self.MIN_WIDTH, min(MAX_DETACHED_DIMENSION, settings.detached_fixed_width)),
+                max(self.MIN_HEIGHT, min(MAX_DETACHED_DIMENSION, settings.detached_fixed_height)),
+            )
         else:
-            self.root.resizable(True, True)
-            self.root.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
-            self.root.maxsize(10000, 10000)
-        self.root.deiconify()
-        self.root.attributes("-topmost", settings.detached_always_on_top)
-        self._set_maximize_button_enabled(not settings.detached_fixed_size)
+            self.root.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
+            self.root.setMaximumSize(16777215, 16777215)
+        self.root.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.root.show()
         self._topmost_controller.set_debug_log(settings.debug_logging)
         self._topmost_controller.set_enabled(settings.detached_always_on_top)
 
     def close(self) -> None:
+        if not self._closing:
+            self.root.close()
+
+    def _shutdown(self) -> None:
         if self._closing:
             return
         self._closing = True
         self._task_runner.close()
         self._topmost_controller.close()
-        if self._settings_after_id:
-            try:
-                self.root.after_cancel(self._settings_after_id)
-            except tk.TclError:
-                pass
-        if self._geometry_after_id:
-            try:
-                self.root.after_cancel(self._geometry_after_id)
-            except tk.TclError:
-                pass
+        for timer in (self._settings_after_id, self._geometry_after_id):
+            if timer is not None:
+                self.root.after_cancel(timer)
         try:
             self.capture_geometry(persist=True)
         except Exception as exc:
             _log_runtime_error("save_detached_geometry_on_close", exc)
-        finally:
-            if self.root.winfo_exists():
-                self.root.destroy()
 
     def _on_button_command(self) -> None:
         if self._suppress_next_click:
@@ -432,33 +457,18 @@ class DetachedOcrButtonApp:
 
     def _show_feedback(self) -> None:
         button = self.button
-        if not button.winfo_exists():
-            return
-        original = {
-            "text": self.ocr_action_label(),
-            "bg": button.cget("bg"),
-            "fg": button.cget("fg"),
-            "activebackground": button.cget("activebackground"),
-            "activeforeground": button.cget("activeforeground"),
-            "font": button.cget("font"),
-        }
-        button.update_idletasks()
-        font_size = 72 if button.winfo_height() >= 220 else 42
-        button.config(
-            text="완료",
-            bg=SUCCESS,
-            fg="white",
-            activebackground=SUCCESS,
-            activeforeground="white",
-            font=("Malgun Gothic", font_size, "bold"),
-        )
+        original_font = button.font()
+        button.set_variant("success")
+        button.setFont(make_font(("Malgun Gothic", 30, "bold")))
+        button.setText("완료")
 
         def restore() -> None:
-            if button.winfo_exists():
-                original["text"] = self.ocr_action_label()
-                button.config(**original)
+            if not self._closing:
+                button.setFont(original_font)
+                button.set_variant("primary")
+                self._refresh_realtime_lock()
 
-        button.after(1000, restore)
+        self.root.after(1000, restore)
 
     def _settings_key(self, settings: AppSettings) -> tuple:
         return (
@@ -514,51 +524,40 @@ class DetachedOcrButtonApp:
             self._topmost_controller.set_debug_log(latest.debug_logging)
         self._schedule_settings_poll()
 
-    def _on_configure(self, event: tk.Event) -> None:
-        if event.widget == self.root and self.root.winfo_exists():
-            self.settings.detached_geometry = self.root.geometry()
-            if self._geometry_after_id:
-                try:
-                    self.root.after_cancel(self._geometry_after_id)
-                except tk.TclError:
-                    pass
-            self._geometry_after_id = self.root.after(250, self._persist_geometry)
+    def _schedule_geometry_save(self) -> None:
+        if self._closing:
+            return
+        if self._geometry_after_id is not None:
+            self.root.after_cancel(self._geometry_after_id)
+        self._geometry_after_id = self.root.after(250, self._persist_geometry)
 
     def _persist_geometry(self) -> None:
         self._geometry_after_id = None
-        if not self._closing and self.root.winfo_exists():
+        if not self._closing:
             self.capture_geometry(persist=True)
 
-    def _on_root_destroy(self, event: tk.Event) -> None:
-        if event.widget == self.root:
-            self._topmost_controller.close()
-
-    def _on_mouse_down(self, event: tk.Event) -> None:
-        if not self.settings.detached_hide_titlebar:
-            return
-        self.root.update_idletasks()
-        self._drag_action = self._hit_test(event.x_root, event.y_root)
-        self._drag_start = (event.x_root, event.y_root)
-        self._drag_geometry = (
-            self.root.winfo_x(),
-            self.root.winfo_y(),
-            self.root.winfo_width(),
-            self.root.winfo_height(),
-        )
+    def _on_mouse_down(self, event) -> None:
+        position = event.globalPosition().toPoint()
+        self._drag_action = self._hit_test(position.x(), position.y())
+        self._drag_start = (position.x(), position.y())
+        rect = self.root.geometry()
+        self._drag_geometry = rect.getRect()
         self._suppress_next_click = False
 
-    def _on_mouse_drag(self, event: tk.Event) -> None:
+    def _on_mouse_drag(self, event) -> None:
         if not self._drag_action or not self._drag_start or not self._drag_geometry:
             return
         start_x, start_y = self._drag_start
         origin_x, origin_y, origin_width, origin_height = self._drag_geometry
-        dx = event.x_root - start_x
-        dy = event.y_root - start_y
-        if abs(dx) + abs(dy) > 3:
-            self._suppress_next_click = True
+        position = event.globalPosition().toPoint()
+        dx = position.x() - start_x
+        dy = position.y() - start_y
+        if not self._suppress_next_click and abs(dx) + abs(dy) < ensure_application().startDragDistance():
+            return
+        self._suppress_next_click = True
 
         if self.settings.detached_fixed_size or self._drag_action == "move":
-            self.root.geometry(f"{origin_width}x{origin_height}+{origin_x + dx}+{origin_y + dy}")
+            self.root.move(origin_x + dx, origin_y + dy)
             return
 
         x = origin_x
@@ -575,9 +574,9 @@ class DetachedOcrButtonApp:
         if "n" in self._drag_action:
             height = max(self.MIN_HEIGHT, origin_height - dy)
             y = origin_y + origin_height - height
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        self.root.setGeometry(x, y, width, height)
 
-    def _on_mouse_release(self, _event: tk.Event) -> None:
+    def _on_mouse_release(self, _event) -> None:
         self._drag_action = None
         self._drag_start = None
         self._drag_geometry = None
@@ -585,10 +584,9 @@ class DetachedOcrButtonApp:
     def _hit_test(self, x_root: int, y_root: int) -> str:
         if self.settings.detached_fixed_size:
             return "move"
-        x = x_root - self.root.winfo_rootx()
-        y = y_root - self.root.winfo_rooty()
-        width = self.root.winfo_width()
-        height = self.root.winfo_height()
+        position = self.root.mapFromGlobal(QPoint(x_root, y_root))
+        x, y = position.x(), position.y()
+        width, height = self.root.width(), self.root.height()
         left = x <= self.RESIZE_MARGIN
         right = x >= width - self.RESIZE_MARGIN
         top = y <= self.RESIZE_MARGIN
@@ -611,43 +609,17 @@ class DetachedOcrButtonApp:
             return "s"
         return "move"
 
-    def _set_maximize_button_enabled(self, enabled: bool) -> None:
-        if os.name != "nt" or self.settings.detached_hide_titlebar:
-            return
-        try:
-            hwnd = self.root.winfo_id()
-            user32 = ctypes.windll.user32
-            if ctypes.sizeof(ctypes.c_void_p) == 8:
-                get_window_long = user32.GetWindowLongPtrW
-                set_window_long = user32.SetWindowLongPtrW
-            else:
-                get_window_long = user32.GetWindowLongW
-                set_window_long = user32.SetWindowLongW
-            get_window_long.restype = ctypes.c_void_p
-            set_window_long.restype = ctypes.c_void_p
-            style = int(get_window_long(hwnd, -16))
-            maximize_box = 0x00010000
-            if enabled:
-                style |= maximize_box
-            else:
-                style &= ~maximize_box
-            set_window_long(hwnd, -16, style)
-            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)
-        except Exception:
-            pass
 
-
-class MainWindow(tk.Tk):
+class MainWindow(TimerHost, QWidget):
     def __init__(self) -> None:
         _enable_dpi_awareness()
         _set_app_user_model_id()
-        _prepare_tk_library_paths()
+        ensure_application()
         super().__init__()
         configure_window_theme(self)
-        install_tk_exception_hook(self)
-        self._task_runner = TkTaskRunner(self)
+        self._task_runner = QtTaskRunner(self)
         self._global_hotkey = GlobalHotkeyManager()
-        self._global_hotkey_after_id: str | None = None
+        self._global_hotkey_after_id: QTimer | None = None
         self._global_hotkey_settings: tuple[bool, str] | None = None
         self._global_hotkey_paused = False
         self._global_hotkey_action_active = False
@@ -656,13 +628,13 @@ class MainWindow(tk.Tk):
             load_api_settings(), self.settings.hytrans_backend
         )
         self._translation_status_api_model: str | None = None
-        self._translation_status_after_id: str | None = None
+        self._translation_status_after_id: QTimer | None = None
         self._translation_status_last_target = None
-        self._translation_status_labels: list[tk.Label] = []
+        self._translation_status_labels: list[QLabel] = []
         self.detached_process: subprocess.Popen | None = None
         self.settings_window: SettingsWindow | None = None
         self.hytrans_process: subprocess.Popen | None = None
-        self._hytrans_restart_after_id: str | None = None
+        self._hytrans_restart_after_id: QTimer | None = None
         self._hytrans_restart_process: subprocess.Popen | None = None
         self._hytrans_restart_old_port: int | None = None
         self._hytrans_restart_attempts = 0
@@ -674,14 +646,12 @@ class MainWindow(tk.Tk):
         self._companion_manual_close_signals: dict[str, ManualCloseSignal] = {}
         self.magpie_process: subprocess.Popen | None = None
         self.subtitle_window: MekiSubtitleWindow | None = None
-        self._magpie_install_results: queue.Queue[tuple[bool, str]] = queue.Queue()
-        self._magpie_installing = False
+        self.hdtrans_settings_window = None
         self.tray_icon = WindowsTrayIcon(self, "MekiCopy", self._restore_from_tray)
-        self.title("MekiCopy")
+        self.setWindowTitle("MekiCopy")
         _set_window_icon(self)
-        self.geometry(f"{MAIN_WINDOW_WIDTH}x{MAIN_WINDOW_HEIGHT}")
-        self.minsize(500, 420)
-        self.resizable(True, True)
+        self.resize(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
+        self.setMinimumSize(MAIN_WINDOW_MIN_WIDTH, MAIN_WINDOW_MIN_HEIGHT)
         self.draft_region: Region | None = None
         self.active_region: Region | None = None
         self.active_region_ratio: RegionRatio | None = None
@@ -716,8 +686,8 @@ class MainWindow(tk.Tk):
             # HYTrans manages its browser worker; this watchdog monitors the server.
             "HYTrans": default_health_evaluator("HYTrans"),
         }
-        self._companion_watchdog_after_id: str | None = None
-        self._realtime_state_after_id: str | None = None
+        self._companion_watchdog_after_id: QTimer | None = None
+        self._realtime_state_after_id: QTimer | None = None
         self._realtime_requested = False
         self._realtime_service_status: dict[str, bool] = {}
         self._realtime_service_ports: tuple[int, int] | None = None
@@ -733,9 +703,6 @@ class MainWindow(tk.Tk):
             on_state=self._on_realtime_state_changed,
         )
         self.apply_settings(self.settings, persist=False)
-        self.bind("<Unmap>", self._on_unmap)
-        self.bind("<Destroy>", self._on_root_destroy, add="+")
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._companion_watchdog.start()
         self._schedule_companion_watchdog_poll()
         self._schedule_global_hotkey_poll()
@@ -743,63 +710,113 @@ class MainWindow(tk.Tk):
 
     def _build_ui(self) -> None:
         self._workflow_mode: str | None = None
-        header = tk.Frame(self, bg=BG)
-        header.pack(fill=tk.X, padx=12, pady=(8, 6))
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(12, 8, 12, 12)
+        root_layout.setSpacing(7)
+        header = QHBoxLayout()
+        mark = QLabel("✿", self)
+        mark.setProperty("role", "accent")
+        mark.setFont(make_font(("Segoe UI Symbol", 17)))
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setFixedSize(27, 30)
+        header.addWidget(mark)
+        self.workflow_title = QLabel("MekiCopy", self)
+        self.workflow_title.setFont(make_font(("Malgun Gothic", 15, "bold")))
+        header.addWidget(self.workflow_title)
+        header.addStretch()
         self.workflow_back_button = RoundedButton(
-            header, text="‹ 작업 선택", command=self._show_workflow_picker,
-            width=106, height=34,
+            self, text="‹  작업 선택", command=self._show_workflow_picker,
+            height=31, radius=11, variant="subtle",
         )
-        self.workflow_title = tk.Label(header, text="MekiCopy", font=TITLE_FONT, bg=BG, fg=ROSE)
-        self.workflow_title.pack(side=tk.RIGHT, expand=True)
+        self.workflow_back_button.setFixedWidth(105)
+        header.addWidget(self.workflow_back_button)
+        root_layout.addLayout(header)
 
-        self.workflow_picker = tk.Frame(self, bg=BG, padx=24, pady=14)
-        tk.Label(
-            self.workflow_picker, text="무엇을 번역하시겠어요?",
-            font=("Malgun Gothic", 18, "bold"), bg=BG, fg=INK,
-        ).pack(anchor="w", pady=(4, 18))
+        self.workflow_pages = QStackedWidget(self)
+        root_layout.addWidget(self.workflow_pages, stretch=1)
+
+        self.workflow_picker = QFrame(self.workflow_pages)
+        self.workflow_picker.setProperty("role", "card")
+        picker = QVBoxLayout(self.workflow_picker)
+        picker.setContentsMargins(15, 12, 15, 12)
+        picker.setSpacing(7)
+        title = QLabel("무엇을 번역하시겠어요?", self.workflow_picker)
+        title.setFont(make_font(("Malgun Gothic", 17, "bold")))
+        picker.addWidget(title)
         self.workflow_buttons: dict[str, RoundedButton] = {}
         for mode, label in (
-            ("screen", "화면에 나오는 일본어를 번역"),
-            ("audio", "스피커에서 나오는 음성을 번역"),
-            ("subtitle", "영상 파일에 대한 자막 생성"),
+            ("screen", "화면에 나오는 일본어 번역"),
+            ("audio", "스피커에서 나오는 일본어 음성 번역"),
+            ("subtitle", "영상 파일의 한국어 자막 생성"),
         ):
             button = RoundedButton(
                 self.workflow_picker, text=label,
-                command=lambda selected=mode: self._select_workflow(selected),
-                height=66, font=("Malgun Gothic", 12, "bold"),
-                variant="primary" if mode == "screen" else "normal", radius=22,
+                height=45, font=("Malgun Gothic", 11, "bold"),
+                variant="primary" if mode == "screen" else "normal",
+                radius=14, anchor="w",
             )
-            button.pack(fill=tk.X, pady=7)
+            button.clicked.connect(lambda checked=False, selected=mode: self._select_workflow(selected))
+            picker.addWidget(button)
             self.workflow_buttons[mode] = button
+        settings = RoundedButton(
+            self.workflow_picker, "설정 열기", self._on_open_settings,
+            height=31, radius=11, variant="subtle",
+        )
+        settings.setFixedHeight(31)
+        picker.addWidget(settings, alignment=Qt.AlignmentFlag.AlignRight)
+        self.workflow_pages.addWidget(self.workflow_picker)
 
-        self.workflow_body = tk.Frame(self, bg=BG)
+        self.workflow_body = QFrame(self.workflow_pages)
+        body = QHBoxLayout(self.workflow_body)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(8)
+        self.workflow_pages.addWidget(self.workflow_body)
+
         self.tab_buttons: dict[str, RoundedButton] = {}
-        self.tab_frames: dict[str, tk.Frame] = {}
+        self.tab_frames: dict[str, QFrame] = {}
         self.active_tab_name = "영역 설정"
+        self.tab_bar = QWidget(self.workflow_body)
+        self.tab_bar.setFixedWidth(MAIN_TAB_BAR_WIDTH)
+        tabs = QVBoxLayout(self.tab_bar)
+        tabs.setContentsMargins(0, 0, 0, 0)
+        tabs.setSpacing(5)
+        body.addWidget(self.tab_bar)
 
-        self.tab_bar = tk.Frame(self.workflow_body, width=MAIN_TAB_BAR_WIDTH, bg=BG)
-        self.tab_bar.pack_propagate(False)
+        self.workflow_content = QFrame(self.workflow_body)
+        self.workflow_content.setProperty("role", "card")
+        content_layout = QVBoxLayout(self.workflow_content)
+        content_layout.setContentsMargins(7, 7, 7, 7)
+        self.tab_pages = QStackedWidget(self.workflow_content)
+        content_layout.addWidget(self.tab_pages)
+        body.addWidget(self.workflow_content, stretch=1)
+        self._tab_scroll_areas: dict[str, QScrollArea] = {}
 
-        content = tk.Frame(self.workflow_body, bg=BG, highlightthickness=1, highlightbackground=BORDER)
-        self.workflow_content = content
-        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        for tab_name in (
+        for name in (
             "영역 설정", "캡쳐 설정", "도구", "행동", "소리 번역", "영상 자막 생성", "설정",
         ):
-            button = RoundedButton(
-                self.tab_bar,
-                text=tab_name,
-                command=(self._on_open_settings if tab_name == "설정"
-                         else lambda name=tab_name: self._select_tab(name)),
-                anchor="w",
-                height=40,
-                radius=18,
-            )
-            self.tab_buttons[tab_name] = button
+            button = RoundedButton(self.tab_bar, text=name, anchor="w", height=34, radius=12)
+            if name == "설정":
+                button.clicked.connect(self._on_open_settings)
+            else:
+                button.clicked.connect(lambda checked=False, tab_name=name: self._select_tab(tab_name))
+            tabs.addWidget(button)
+            self.tab_buttons[name] = button
 
-            frame = tk.Frame(content, bg=SURFACE, padx=12, pady=12)
-            self.tab_frames[tab_name] = frame
+            scroll = QScrollArea(self.tab_pages)
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setStyleSheet("QWidget#MekiTab, QScrollArea > QWidget > QWidget { background: white; }")
+            frame = QFrame()
+            frame.setObjectName("MekiTab")
+            tab_layout = QVBoxLayout(frame)
+            tab_layout.setContentsMargins(4, 3, 4, 3)
+            tab_layout.setSpacing(5)
+            tab_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+            scroll.setWidget(frame)
+            self.tab_frames[name] = frame
+            self._tab_scroll_areas[name] = scroll
+            self.tab_pages.addWidget(scroll)
+        tabs.addStretch()
 
         self._build_region_tab(self.tab_frames["영역 설정"])
         self._build_capture_tab(self.tab_frames["캡쳐 설정"])
@@ -807,9 +824,8 @@ class MainWindow(tk.Tk):
         self._build_subtitle_tab(self.tab_frames["영상 자막 생성"])
         self._build_tools_tab(self.tab_frames["도구"])
         self._build_action_tab(self.tab_frames["행동"])
-        self._pack_tab_button(self.tab_frames["설정"], "설정 열기", self._on_open_settings)
+        self._add_tab_button(self.tab_frames["설정"], "설정 열기", self._on_open_settings)
 
-        style_tree(self)
         self._show_workflow_picker()
         self._update_status()
 
@@ -818,10 +834,9 @@ class MainWindow(tk.Tk):
         self._realtime_requested = False
         self._sync_realtime_ocr()
         self._configure_global_hotkey(self.settings)
-        self.workflow_body.pack_forget()
-        self.workflow_back_button.pack_forget()
-        self.workflow_title.config(text="MekiCopy")
-        self.workflow_picker.pack(fill=tk.BOTH, expand=True)
+        self.workflow_back_button.hide()
+        self.workflow_title.setText("MekiCopy")
+        self.workflow_pages.setCurrentWidget(self.workflow_picker)
 
     def _select_workflow(self, mode: str) -> None:
         choices = {
@@ -835,109 +850,77 @@ class MainWindow(tk.Tk):
         self._workflow_mode = mode
         self._sync_realtime_ocr()
         self._configure_global_hotkey(self.settings)
-        self.workflow_picker.pack_forget()
-        self.workflow_title.config(text=title)
-        self.workflow_back_button.pack(side=tk.LEFT)
-        self.workflow_body.pack(padx=12, pady=(0, 12), fill=tk.BOTH, expand=True)
+        self.workflow_title.setText(title)
+        self.workflow_back_button.show()
         for name, button in self.tab_buttons.items():
-            button.pack_forget()
-            if name in tabs:
-                button.pack(fill=tk.X, pady=2)
-        if mode == "screen":
-            self.tab_bar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 12), before=self.workflow_content)
-        else:
-            self.tab_bar.pack_forget()
+            button.setVisible(name in tabs)
+        self.tab_bar.setVisible(mode == "screen")
+        self.workflow_pages.setCurrentWidget(self.workflow_body)
         self._select_tab(tabs[0])
 
-    def _build_region_tab(self, frame: tk.Frame) -> None:
-        self.status_label = tk.Label(
-            frame,
-            text="",
-            justify="left",
-            wraplength=330,
-            bg=SURFACE,
-            fg=INK,
-        )
-        self.status_label.pack(pady=(4, 6), fill=tk.X)
+    @staticmethod
+    def _add_tab_label(frame: QFrame, text: str = "", *, role: str = "") -> QLabel:
+        label = QLabel(text, frame)
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setWordWrap(True)
+        if role:
+            label.setProperty("role", role)
+        frame.layout().addWidget(label)
+        return label
 
-        buttons = [
-            ("임시 영역 선택", self._on_select_region),
+    def _build_region_tab(self, frame: QFrame) -> None:
+        self.status_label = self._add_tab_label(frame, role="muted")
+        self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.status_label.setContentsMargins(4, 2, 4, 4)
+        self._add_tab_button(frame, "임시 영역 선택", self._on_select_region, variant="primary")
+        for text, command in (
             ("현재 임시/확정 영역 보기", self._on_view_regions),
             ("임시 영역을 확정", self._on_set_region),
             ("확정 영역을 북마크에 추가", self._on_save_active_bookmark),
             ("북마크 영역 불러오기", self._on_load_bookmark),
-        ]
-        for text, command in buttons:
-            self._pack_tab_button(frame, text, command)
+        ):
+            self._add_tab_button(frame, text, command)
 
-    def _build_capture_tab(self, frame: tk.Frame) -> None:
-        self.capture_status_label = tk.Label(
-            frame,
-            text=self.capture_status_text,
-            justify="left",
-            wraplength=330,
-            bg=SURFACE,
-            fg=ROSE,
-        )
-        self.capture_status_label.pack(pady=(4, 12), fill=tk.X)
+    def _build_capture_tab(self, frame: QFrame) -> None:
+        self.capture_status_label = self._add_tab_label(frame, self.capture_status_text, role="accent")
+        self.capture_status_label.setContentsMargins(4, 2, 4, 4)
 
-        buttons = [
+        for text, command in (
             ("캡쳐 진단 저장", self._on_capture_diagnostics),
             ("모니터 다시 검색", self._on_refresh_capture_monitors),
             ("비율 좌표로 영역 복구", self._on_restore_region_from_ratio),
-        ]
-        for text, command in buttons:
-            self._pack_tab_button(frame, text, command)
-        self.magpie_button = self._pack_tab_button(
-            frame,
-            "Magpie 실행",
-            self._on_start_magpie,
-        )
+        ):
+            self._add_tab_button(frame, text, command)
+        self.magpie_button = self._add_tab_button(frame, "MagPie 실행", self._on_start_magpie)
 
-    def _build_tools_tab(self, frame: tk.Frame) -> None:
+    def _build_tools_tab(self, frame: QFrame) -> None:
         self._build_translation_status_label(frame)
-        self.hytrans_button = self._pack_tab_button(
-            frame,
-            "번역 엔진 실행",
-            self._on_start_hytrans,
+        self.hytrans_button = self._add_tab_button(
+            frame, "번역 엔진 실행", self._on_start_hytrans, variant="primary",
         )
-        self.overlayer_button = self._pack_tab_button(
-            frame,
-            "번역결과 표시기 실행",
-            self._on_start_overlayer,
+        self.overlayer_button = self._add_tab_button(
+            frame, "번역 결과 표시기 실행", self._on_start_overlayer,
         )
-        self._pack_tab_button(
-            frame,
-            "모든 도구 연결 상태 확인",
-            self._on_test_overlay_connection,
-        )
+        self._add_tab_button(frame, "모든 도구 연결 상태 확인", self._on_test_overlay_connection)
 
-    def _build_audio_tab(self, frame: tk.Frame) -> None:
-        self._build_translation_status_label(frame, wraplength=420)
-        self._pack_tab_button(frame, "녹음 엔진 실행", self._on_start_audio_capture)
-        self._pack_tab_button(frame, "번역 엔진 실행", self._on_start_hytrans)
-        self._pack_tab_button(frame, "번역결과 표시기 실행", self._on_start_script)
-        self._pack_tab_button(
-            frame,
-            "연결 상태 확인",
-            self._on_test_audio_connection,
-        )
-        self._pack_tab_button(frame, "설정", self._on_open_settings)
+    def _build_audio_tab(self, frame: QFrame) -> None:
+        self._build_translation_status_label(frame)
+        self._add_tab_button(frame, "녹음 엔진 실행", self._on_start_audio_capture, variant="primary")
+        self._add_tab_button(frame, "번역 엔진 실행", self._on_start_hytrans)
+        self._add_tab_button(frame, "번역 결과 표시기 실행", self._on_start_script)
+        self._add_tab_button(frame, "연결 상태 확인", self._on_test_audio_connection)
+        self._add_tab_button(frame, "설정", self._on_open_settings)
 
-    def _build_translation_status_label(self, frame: tk.Frame, *, wraplength: int = 300) -> None:
-        self._translation_status_labels.append(tk.Label(
-            frame, bg=SURFACE, fg=ROSE, justify=tk.LEFT, wraplength=wraplength,
-        ))
+    def _build_translation_status_label(self, frame: QFrame) -> None:
+        label = self._add_tab_label(frame, role="accent")
+        label.setContentsMargins(4, 2, 4, 4)
+        label.hide()
+        self._translation_status_labels.append(label)
 
     def _set_translation_status(self, text: str) -> None:
         for label in self._translation_status_labels:
-            shown = bool(label.winfo_manager())
-            if text:
-                label.config(text=text, fg=ROSE)
-                if not shown:
-                    label.pack(pady=(4, 12), fill=tk.X, before=label.master.pack_slaves()[0])
-            elif shown:
-                label.pack_forget()
+            label.setText(text)
+            label.setVisible(bool(text))
 
     def _schedule_translation_status_poll(self, *, immediately: bool = False) -> None:
         if self._translation_status_after_id is not None:
@@ -959,7 +942,7 @@ class MainWindow(tk.Tk):
         self._schedule_translation_status_poll()
         if (self._workflow_mode not in {"screen", "audio"}
                 or self.active_tab_name not in {"도구", "소리 번역"}
-                or self.state() not in {"normal", "zoomed"}):
+                or not self.isVisible() or self.isMinimized()):
             return
         target = self._translation_status_target()
         url, backend, model_id, _, process = target
@@ -1003,33 +986,27 @@ class MainWindow(tk.Tk):
             on_error=unavailable,
         )
 
-    def _build_subtitle_tab(self, frame: tk.Frame) -> None:
-        tk.Label(
-            frame,
-            text="영상 자막 생성",
-            font=TITLE_FONT,
-            bg=SURFACE,
-            fg=ROSE,
-        ).pack(pady=(4, 4), anchor="w")
-        tk.Label(
-            frame,
-            text=(
-                "영상 파일의 일본어 음성을 인식하고 번역해 한국어 자막 파일을 만듭니다."
-            ),
-            justify="left",
-            wraplength=330,
-            bg=SURFACE,
-            fg=INK,
-        ).pack(pady=(0, 14), fill=tk.X)
-        self._pack_tab_button(frame, "자막 제작 도구 열기", self._on_open_meki_subtitle)
-        self._pack_tab_button(frame, "설정", self._on_open_settings)
+    def _build_subtitle_tab(self, frame: QFrame) -> None:
+        title = self._add_tab_label(frame, "영상 자막 생성", role="accent")
+        title.setFont(make_font(("Malgun Gothic", 14, "bold")))
+        self._add_tab_label(
+            frame, "영상 파일의 일본어 음성을 인식하고 번역해 한국어 자막 파일을 만듭니다.",
+            role="muted",
+        )
+        self._add_tab_button(
+            frame, "자막 제작 도구 열기", self._on_open_meki_subtitle, variant="primary",
+        )
+        self._add_tab_button(frame, "설정", self._on_open_settings)
+
+    @staticmethod
+    def _bring_forward(window: QWidget) -> None:
+        window.showNormal()
+        window.raise_()
+        window.activateWindow()
 
     def _on_open_meki_subtitle(self) -> None:
-        window = self.subtitle_window
-        if window is not None and window.winfo_exists():
-            window.deiconify()
-            window.lift()
-            window.focus_force()
+        if self.subtitle_window is not None:
+            self._bring_forward(self.subtitle_window)
             return
 
         def forget_window() -> None:
@@ -1044,56 +1021,40 @@ class MainWindow(tk.Tk):
         )
         self.subtitle_window = window
         _set_window_icon(window)
+        window.show()
 
-
-    def _build_action_tab(self, frame: tk.Frame) -> None:
-        self.detach_button = self._pack_tab_button(
-            frame,
-            "",
-            self._on_detach_ocr_button,
-        )
-
-        ocr_button_frame = tk.Frame(frame, height=OCR_BUTTON_HEIGHT_PX, bg=SURFACE)
-        ocr_button_frame.pack(fill=tk.X, pady=(10, 4))
-        ocr_button_frame.pack_propagate(False)
+    def _build_action_tab(self, frame: QFrame) -> None:
+        self.detach_button = self._add_tab_button(frame, "", self._on_detach_ocr_button)
         self.ocr_button = RoundedButton(
-            ocr_button_frame,
+            frame,
             text="번역 후 표시",
             command=self._on_translation_action,
-            font=("Malgun Gothic", 18, "bold"),
+            font=("Malgun Gothic", 16, "bold"),
             variant="primary",
-            radius=28,
+            radius=16,
         )
-        self.ocr_button.pack(fill=tk.BOTH, expand=True)
+        self.ocr_button.setFixedHeight(OCR_BUTTON_HEIGHT_PX)
+        frame.layout().addWidget(self.ocr_button)
         self.realtime_button = self.ocr_button
-        self.action_status_label = tk.Label(
-            frame, text="", bg=SURFACE, fg=INK, justify=tk.LEFT, wraplength=290,
-        )
-        self.action_status_label.pack(fill=tk.X, pady=(4, 0))
+        self.action_status_label = self._add_tab_label(frame, role="muted")
 
-    def _pack_tab_button(
-        self,
-        frame: tk.Frame,
+    @staticmethod
+    def _add_tab_button(
+        frame: QFrame,
         text: str,
         command: Callable[[], None],
+        *,
+        variant: str = "normal",
     ) -> RoundedButton:
-        button = RoundedButton(frame, text=text, command=command, anchor="center")
-        button.pack(fill=tk.X, pady=4)
+        button = RoundedButton(frame, text=text, command=command, height=35, radius=12, variant=variant)
+        frame.layout().addWidget(button)
         return button
 
     def _select_tab(self, name: str) -> None:
         self.active_tab_name = name
-        for tab_name, frame in self.tab_frames.items():
-            if tab_name == name:
-                frame.pack(fill=tk.BOTH, expand=True)
-                frame.lift()
-            else:
-                frame.pack_forget()
+        self.tab_pages.setCurrentWidget(self._tab_scroll_areas[name])
         for tab_name, button in self.tab_buttons.items():
-            if tab_name == name:
-                button.config(bg=SURFACE, fg=ROSE, activebackground=SOFT)
-            else:
-                button.config(bg=SOFT, fg=INK, activebackground=SURFACE)
+            button.set_variant("tab-active" if tab_name == name else "normal")
         if name in {"도구", "소리 번역"}:
             self._schedule_translation_status_poll(immediately=True)
 
@@ -1114,17 +1075,14 @@ class MainWindow(tk.Tk):
         active = realtime is not None and realtime.active
         realtime_mode = self.settings.realtime_ocr_enabled
         reason = self._realtime_block_reason() if realtime_mode and realtime is not None else ""
-        self.ocr_button.config(
-            text=self.ocr_action_label(),
-            state=tk.DISABLED if realtime_mode and reason and not active else tk.NORMAL,
-        )
-        self.detach_button.config(
-            text="'번역 후 표시' 버튼 분리하기",
-            state=tk.DISABLED if realtime_mode else tk.NORMAL,
-        )
+        if self.ocr_button.property("variant") != "success" or realtime_mode:
+            self.ocr_button.setText(self.ocr_action_label())
+        self.ocr_button.setEnabled(not (realtime_mode and reason and not active))
+        self.detach_button.setText("'번역 후 표시' 버튼 분리하기")
+        self.detach_button.setEnabled(not realtime_mode)
         status_label = getattr(self, "action_status_label", None)
         if status_label is not None:
-            status_label.config(text=(self.capture_status_text if active else reason))
+            status_label.setText(self.capture_status_text if active else reason)
 
     @staticmethod
     def _global_hotkey_configuration(settings: AppSettings) -> tuple[bool, str]:
@@ -1196,8 +1154,8 @@ class MainWindow(tk.Tk):
         if progress is not None:
             self._set_capture_status(progress)
         activations = self._global_hotkey.drain_activations()
-        # A fast sequence of key repeats can all arrive in one Tk turn. One
-        # OCR request is enough; TkTaskRunner also keeps the actual work single.
+        # Collapse key repeats that arrive in the same event-loop turn.
+        # The keyed task runner also serializes manual OCR requests.
         if (
             activations
             and self.settings.global_hotkey_enabled
@@ -1221,38 +1179,23 @@ class MainWindow(tk.Tk):
     def _on_global_hotkey_action_finished(self) -> None:
         self._global_hotkey_action_active = False
 
-    def _on_root_destroy(self, event: tk.Event) -> None:
-        if event.widget == self:
-            self._closing = True
-            if self._translation_status_after_id is not None:
-                try:
-                    self.after_cancel(self._translation_status_after_id)
-                except tk.TclError:
-                    pass
-                self._translation_status_after_id = None
-            if getattr(self, "_realtime_ocr", None) is not None:
-                self._realtime_ocr.close()
-            self._global_hotkey.close()
-
     def _format_region(self, region: Region | None) -> str:
         if not region:
             return "설정되지 않음"
-        return f"left={region.left}, top={region.top}, width={region.width}, height={region.height}"
+        return f"({region.left}, {region.top}) · {region.width} × {region.height} px"
 
     def _update_status(self) -> None:
         draft_text = self._format_region(self.draft_region)
         active_text = self._format_region(self.active_region)
-        self.status_label.config(
-            text=f"임시 영역 :\n{draft_text}\n확정 영역 :\n{active_text}"
-        )
+        self.status_label.setText(f"임시 영역 · {draft_text}\n확정 영역 · {active_text}")
 
     def _set_capture_status(self, text: str) -> None:
         self.capture_status_text = text
-        if hasattr(self, "capture_status_label") and self.capture_status_label.winfo_exists():
-            self.capture_status_label.config(text=text)
+        if hasattr(self, "capture_status_label"):
+            self.capture_status_label.setText(text)
         label = getattr(self, "action_status_label", None)
         if label is not None:
-            label.config(text=text)
+            label.setText(text)
 
     def _set_capture_status_from_last_result(self) -> None:
         result = get_capture_manager().last_result
@@ -1382,17 +1325,23 @@ class MainWindow(tk.Tk):
         self._set_capture_status("캡처 상태: 비율 좌표로 OCR 영역을 복구했습니다.")
 
     def _on_capture_diagnostics(self) -> None:
-        try:
-            directory = run_capture_diagnostics(self.active_region)
+        region = self.active_region
+
+        def succeeded(directory) -> None:
             self._set_capture_status(f"캡처 진단 저장 완료: {directory}")
             messagebox.showinfo(
-                "MekiCopy",
-                f"캡처 진단 파일을 저장했습니다:\n{directory}",
-                parent=self,
+                "MekiCopy", f"캡처 진단 파일을 저장했습니다:\n{directory}", parent=self,
             )
-        except Exception as exc:
+
+        def failed(exc: Exception) -> None:
             _log_runtime_error("capture_diagnostics", exc)
             messagebox.showerror("MekiCopy", f"캡처 진단 실패:\n{exc}", parent=self)
+
+        if self._task_runner.submit(
+            "capture_diagnostics", lambda: run_capture_diagnostics(region),
+            on_success=succeeded, on_error=failed,
+        ):
+            self._set_capture_status("캡처 진단을 진행 중입니다.")
 
     def _launch_magpie(self, executable: str) -> None:
         if _is_process_alive(self.magpie_process):
@@ -1416,49 +1365,27 @@ class MainWindow(tk.Tk):
         if executable:
             self._launch_magpie(executable)
             return
-        if self._magpie_installing:
-            messagebox.showinfo(
-                "MekiCopy",
-                "MagPie 최신 버전을 다운로드하고 있습니다.",
-                parent=self,
-            )
-            return
+        def reset_button() -> None:
+            self.magpie_button.setEnabled(True)
+            self.magpie_button.setText("MagPie 실행")
 
-        self._magpie_installing = True
-        self.magpie_button.config(state=tk.DISABLED, text="MagPie 다운로드 중...")
-        self._set_capture_status("MagPie 최신 버전을 다운로드하고 압축을 푸는 중입니다...")
+        def installed(executable: str) -> None:
+            reset_button()
+            self._set_capture_status(f"MagPie 설치 완료: {executable}")
+            self._launch_magpie(executable)
 
-        def install_worker() -> None:
-            try:
-                installed_executable = _install_latest_magpie()
-                self._magpie_install_results.put((True, installed_executable))
-            except Exception as exc:
-                _log_runtime_error("install_magpie", exc)
-                self._magpie_install_results.put((False, str(exc)))
-
-        threading.Thread(target=install_worker, daemon=True).start()
-        self.after(100, self._poll_magpie_install_result)
-
-    def _poll_magpie_install_result(self) -> None:
-        try:
-            succeeded, result = self._magpie_install_results.get_nowait()
-        except queue.Empty:
-            if self._magpie_installing and not self._closing:
-                self.after(100, self._poll_magpie_install_result)
-            return
-
-        self._magpie_installing = False
-        self.magpie_button.config(state=tk.NORMAL, text="Magpie 실행")
-        if succeeded:
-            self._set_capture_status(f"MagPie 설치 완료: {result}")
-            self._launch_magpie(result)
-        else:
+        def failed(exc: Exception) -> None:
+            reset_button()
+            _log_runtime_error("install_magpie", exc)
             self._set_capture_status("MagPie 다운로드 또는 설치 실패")
-            messagebox.showerror(
-                "MekiCopy",
-                f"MagPie 다운로드 또는 설치 실패:\n{result}",
-                parent=self,
-            )
+            messagebox.showerror("MekiCopy", f"MagPie 다운로드 또는 설치 실패:\n{exc}", parent=self)
+
+        if self._task_runner.submit(
+            "magpie_install", _install_latest_magpie, on_success=installed, on_error=failed,
+        ):
+            self.magpie_button.setEnabled(False)
+            self.magpie_button.setText("MagPie 다운로드 중…")
+            self._set_capture_status("MagPie 최신 버전을 다운로드하고 압축을 푸는 중입니다…")
 
     def _on_select_region(self) -> None:
         initial = self.draft_region or self.active_region
@@ -1487,6 +1414,9 @@ class MainWindow(tk.Tk):
         name = name.strip()
         if not name:
             return
+        if any(separator in name for separator in ("\t", "\n", "\r")):
+            messagebox.showerror("MekiCopy", "북마크 이름에 탭 또는 줄바꿈을 사용할 수 없습니다.", parent=self)
+            return
         bookmarks = load_bookmarks()
         if name in bookmarks and not messagebox.askyesno(
             "MekiCopy",
@@ -1501,8 +1431,10 @@ class MainWindow(tk.Tk):
             width=self.active_region.width,
             height=self.active_region.height,
         )
-        save_bookmarks(bookmarks)
-        messagebox.showinfo("MekiCopy", "확정 영역이 북마크에 추가되었습니다!", parent=self)
+        if not save_bookmarks(bookmarks):
+            messagebox.showerror("MekiCopy", "북마크를 저장하지 못했습니다.", parent=self)
+            return
+        messagebox.showinfo("MekiCopy", "확정 영역이 북마크에 추가되었습니다.", parent=self)
 
     def _load_bookmark_region(self, bookmark: Bookmark) -> None:
         region = Region(
@@ -1560,10 +1492,11 @@ class MainWindow(tk.Tk):
             )
 
     def _on_open_settings(self) -> None:
-        if self.settings_window and self.settings_window.winfo_exists():
-            self.settings_window.lift()
+        if self.settings_window is not None:
+            self._bring_forward(self.settings_window)
             return
         self.settings_window = SettingsWindow(self)
+        self.settings_window.show()
 
     def _hytrans_base_url(self) -> str:
         return f"http://127.0.0.1:{self.settings.hytrans_port}"
@@ -1787,7 +1720,7 @@ class MainWindow(tk.Tk):
                 500,
                 self._poll_companion_watchdog,
             )
-        except tk.TclError:
+        except RuntimeError:
             self._companion_watchdog_after_id = None
 
     def _poll_companion_watchdog(self) -> None:
@@ -2142,11 +2075,11 @@ class MainWindow(tk.Tk):
 
     def _on_hdtrans_settings(self) -> None:
         from hdtrans_settings_window import HdTransSettingsWindow
-        dialog = getattr(self, "hdtrans_settings_window", None)
-        if dialog is not None and dialog.winfo_exists():
-            dialog.lift()
+        if self.hdtrans_settings_window is not None:
+            self._bring_forward(self.hdtrans_settings_window)
             return
         self.hdtrans_settings_window = HdTransSettingsWindow(self, main_window=self)
+        self.hdtrans_settings_window.show()
 
     def _on_start_hytrans(self) -> bool:
         if self._hytrans_restart_after_id is not None:
@@ -2517,7 +2450,7 @@ class MainWindow(tk.Tk):
                 messagebox.showerror("MekiCopy", f"MekiOverlayer 실행 실패:\n{exc}", parent=self)
             return False
 
-    def _on_test_overlay_connection(self, parent: tk.Misc | None = None) -> None:
+    def _on_test_overlay_connection(self, parent: QWidget | None = None) -> None:
         owner = parent or self
         failures: list[str] = []
         try:
@@ -2598,7 +2531,7 @@ class MainWindow(tk.Tk):
         ))
 
     def _refresh_realtime_services(self) -> None:
-        """Probe both owned and external services without waiting on Tk's thread."""
+        """Probe both owned and external services without waiting on the GUI thread."""
         self._sync_realtime_ocr()
         if self._realtime_block_reason(include_services=False):
             return
@@ -2667,7 +2600,7 @@ class MainWindow(tk.Tk):
         if self._realtime_state_after_id is not None:
             try:
                 self.after_cancel(self._realtime_state_after_id)
-            except tk.TclError:
+            except RuntimeError:
                 pass
             self._realtime_state_after_id = None
         realtime = self._realtime_ocr
@@ -2680,7 +2613,7 @@ class MainWindow(tk.Tk):
             self._realtime_state_after_id = self.after(1000, self._publish_realtime_state)
 
     def _prepare_realtime_operation(self, session, previous):
-        # Snapshot UI-owned state before handing any work to TkTaskRunner.
+        # Snapshot UI-owned state before handing any work to the worker.
         region, settings = self.active_region, self.settings
         monitor, ratio = self.active_monitor, self.active_region_ratio
         reason = self._realtime_block_reason()
@@ -2758,7 +2691,7 @@ class MainWindow(tk.Tk):
 
     def _on_ocr_copy(
         self,
-        source_button: tk.Button | None = None,
+        source_button: RoundedButton | None = None,
         *,
         on_finished: Callable[[], None] | None = None,
     ) -> bool:
@@ -2796,7 +2729,7 @@ class MainWindow(tk.Tk):
         self,
         image: Image.Image,
         *,
-        source_button: tk.Button,
+        source_button: RoundedButton,
         simple_feedback: bool,
         on_finished: Callable[[], None] | None = None,
     ) -> bool:
@@ -2855,48 +2788,24 @@ class MainWindow(tk.Tk):
             on_error=on_error,
         )
 
-    def _show_copy_feedback(self, button: tk.Button) -> None:
-        if not button.winfo_exists():
-            return
-        previous_after_id = getattr(button, "_mekicopy_feedback_after_id", None)
-        if previous_after_id:
-            try:
-                button.after_cancel(previous_after_id)
-            except tk.TclError:
-                pass
-        original = getattr(button, "_mekicopy_feedback_original", None)
-        if original is None:
-            original = {
-                "text": button.cget("text"),
-                "bg": button.cget("bg"),
-                "fg": button.cget("fg"),
-                "activebackground": button.cget("activebackground"),
-                "activeforeground": button.cget("activeforeground"),
-                "font": button.cget("font"),
-            }
-            setattr(button, "_mekicopy_feedback_original", original)
-
-        button.update_idletasks()
-        font_size = 72 if button.winfo_height() >= 220 else 42
-        button.config(
-            text="✓",
-            bg=SUCCESS,
-            fg="white",
-            activebackground=SUCCESS,
-            activeforeground="white",
-            font=("Malgun Gothic", font_size, "bold"),
-        )
+    def _show_copy_feedback(self, button: RoundedButton) -> None:
+        previous_timer = getattr(button, "_feedback_timer", None)
+        if previous_timer is not None:
+            self.after_cancel(previous_timer)
+        else:
+            button._feedback_font = button.font()
+        button.set_variant("success")
+        button.setText("✓")
+        button.setFont(make_font(("Segoe UI Symbol", 58, "bold")))
 
         def restore() -> None:
-            if not button.winfo_exists():
-                return
-            original["text"] = self.ocr_action_label()
-            button.config(**original)
-            setattr(button, "_mekicopy_feedback_original", None)
-            setattr(button, "_mekicopy_feedback_after_id", None)
+            button._feedback_timer = None
+            if not self._closing:
+                button.setFont(button._feedback_font)
+                button.set_variant("primary")
+                button.setText(self.ocr_action_label())
 
-        after_id = button.after(1000, restore)
-        setattr(button, "_mekicopy_feedback_after_id", after_id)
+        button._feedback_timer = self.after(1000, restore)
 
     def apply_settings(
         self, settings: AppSettings, persist: bool, *, api_settings: ApiSettings | None = None
@@ -2996,13 +2905,13 @@ class MainWindow(tk.Tk):
             self._realtime_service_ports = None
         hdtrans_button = getattr(self, "hdtrans_settings_button", None)
         if hdtrans_button is not None:
-            hdtrans_button.configure(state=tk.NORMAL if backend == "hdtrans" else tk.DISABLED)
+            hdtrans_button.setEnabled(backend == "hdtrans")
         self._hytrans_config_fingerprint = current_fingerprint
         profile = selected_api_settings.profiles.get(backend)
         self._translation_status_api_model = profile.model.strip() if profile else None
         set_debug_enabled(self.settings.debug_logging)
-        self.attributes("-topmost", self.settings.main_always_on_top)
-        if self.subtitle_window is not None and self.subtitle_window.winfo_exists():
+        self._apply_main_topmost()
+        if self.subtitle_window is not None:
             self.subtitle_window.refresh_settings(self.settings)
         self._apply_overlay_mode_ui()
         self._sync_realtime_ocr()
@@ -3022,35 +2931,45 @@ class MainWindow(tk.Tk):
             return restarting
         return False
 
-    def _on_unmap(self, event: tk.Event) -> None:
-        if event.widget != self or not self.settings.minimize_to_tray:
-            return
-        if self._closing or self._restoring_from_tray:
-            return
-        if self.state() == "iconic":
+    def _apply_main_topmost(self) -> None:
+        flag = Qt.WindowType.WindowStaysOnTopHint
+        desired = self.settings.main_always_on_top
+        if bool(self.windowFlags() & flag) != desired:
+            was_visible = self.isVisible()
+            self.setWindowFlag(flag, desired)
+            if was_visible:
+                self.show()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if (event.type() == QEvent.Type.WindowStateChange and self.isMinimized()
+                and self.settings.minimize_to_tray and not self._closing
+                and not self._restoring_from_tray):
             self.after(0, self._minimize_to_tray)
 
     def _minimize_to_tray(self) -> None:
-        if self.tray_icon.show():
-            self.withdraw()
+        if self.isMinimized() and self.tray_icon.show():
+            self.hide()
 
     def _restore_from_tray(self) -> None:
         self._restoring_from_tray = True
         try:
             self.tray_icon.hide()
-            self.deiconify()
-            self.state("normal")
-            self.lift()
-            self.focus_force()
-            self.attributes("-topmost", self.settings.main_always_on_top)
+            self._apply_main_topmost()
+            self._bring_forward(self)
         finally:
             self.after(100, lambda: setattr(self, "_restoring_from_tray", False))
 
-    def _on_close(self) -> None:
+    def closeEvent(self, event) -> None:
+        if self._closing or self._on_close():
+            super().closeEvent(event)
+        else:
+            event.ignore()
+
+    def _on_close(self) -> bool:
         subtitle_window = self.subtitle_window
         if (
             subtitle_window is not None
-            and subtitle_window.winfo_exists()
             and subtitle_window.is_running
             and not messagebox.askyesno(
                 "MekiCopy 종료",
@@ -3058,7 +2977,7 @@ class MainWindow(tk.Tk):
                 parent=self,
             )
         ):
-            return
+            return False
         if _is_process_alive(self.audio_capture_process):
             try:
                 audio_health = _json_request(
@@ -3084,32 +3003,35 @@ class MainWindow(tk.Tk):
                 "음성 녹음 또는 처리가 진행 중입니다. 지금 종료하면 작업이 중단됩니다.\n\n그래도 종료할까요?",
                 parent=self,
             ):
-                return
+                return False
         self._closing = True
+        if self._translation_status_after_id is not None:
+            self.after_cancel(self._translation_status_after_id)
+            self._translation_status_after_id = None
         self._realtime_ocr.close()
         if self._global_hotkey_after_id is not None:
             try:
                 self.after_cancel(self._global_hotkey_after_id)
-            except tk.TclError:
+            except RuntimeError:
                 pass
             self._global_hotkey_after_id = None
         self._global_hotkey.close()
         if self._companion_watchdog_after_id is not None:
             try:
                 self.after_cancel(self._companion_watchdog_after_id)
-            except tk.TclError:
+            except RuntimeError:
                 pass
             self._companion_watchdog_after_id = None
         self._companion_watchdog.stop()
         for signal in self._companion_manual_close_signals.values():
             discard_manual_close_signal(signal)
         self._companion_manual_close_signals.clear()
-        if subtitle_window is not None and subtitle_window.winfo_exists():
+        if subtitle_window is not None:
             subtitle_window.cancel_for_parent_shutdown()
         if self._hytrans_restart_after_id is not None:
             try:
                 self.after_cancel(self._hytrans_restart_after_id)
-            except tk.TclError:
+            except RuntimeError:
                 pass
             self._hytrans_restart_after_id = None
         self._task_runner.close()
@@ -3131,7 +3053,7 @@ class MainWindow(tk.Tk):
                     _terminate_process_tree(process)
                 except Exception:
                     pass
-        self.destroy()
+        return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -3180,10 +3102,8 @@ def run_detached_button() -> None:
         raise
     finally:
         try:
-            if app and app.root.winfo_exists():
+            if app is not None:
                 app.close()
-        except tk.TclError:
-            pass
         finally:
             mutex.close()
 
@@ -3203,7 +3123,6 @@ def main() -> None:
 
         run_runtime_self_test()
         return
-    _prepare_tk_library_paths()
     if args.detached_button:
         run_detached_button()
         return
@@ -3247,10 +3166,18 @@ def main() -> None:
         if not bookmark:
             messagebox.showerror("MekiCopy", "북마크를 찾을 수 없습니다.")
             return
-        run_selection(initial_region=bookmark, capture_on_enter=False)
+        region = run_selection(initial_region=bookmark, capture_on_enter=False)
+        if region is not None:
+            bookmarks[bookmark.name] = Bookmark(
+                name=bookmark.name, left=region.left, top=region.top,
+                width=region.width, height=region.height,
+            )
+            if not save_bookmarks(bookmarks):
+                messagebox.showerror("MekiCopy", "바뀐 북마크 영역을 저장하지 못했습니다.")
         return
-    app = MainWindow()
-    app.mainloop()
+    window = MainWindow()
+    window.show()
+    ensure_application().exec()
 
 
 if __name__ == "__main__":

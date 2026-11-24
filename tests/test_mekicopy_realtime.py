@@ -595,12 +595,13 @@ class RealtimeUiEntryTests(unittest.TestCase):
         import mekicopy_capture
         manager = mekicopy_capture.CaptureManager.__new__(mekicopy_capture.CaptureManager)
         manager.sct = mock.Mock()
-        shot = SimpleNamespace(size=(2, 2), rgb=b"\x00" * 12)
+        shot = SimpleNamespace(size=(2, 2), raw=bytearray([3, 2, 1, 0]) * 4)
         local_capture = mock.MagicMock()
         local_capture.__enter__.return_value.grab.return_value = shot
         with mock.patch.object(mekicopy_capture.mss, "mss", return_value=local_capture):
             image = manager._capture_with_mss(mekicopy_capture.Region(0, 0, 2, 2))
         self.assertEqual(image.size, (2, 2))
+        self.assertEqual(image.getpixel((0, 0)), (1, 2, 3))
         manager.sct.grab.assert_not_called()
         local_capture.__exit__.assert_called_once()
 

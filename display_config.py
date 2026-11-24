@@ -5,6 +5,8 @@ from dataclasses import fields
 import math
 from typing import Any
 
+from PySide6.QtGui import QColor
+
 
 def normalize_font_name(value: object) -> str:
     return str(value).strip().lstrip("@").strip() or "Malgun Gothic"
@@ -19,7 +21,13 @@ def apply_display_config(config: Any, data: dict[str, Any]) -> None:
             continue
         value = data[key]
         if isinstance(getattr(config, key), bool):
-            value = bool(value)
+            normalized = str(value).strip().lower()
+            if normalized in {"1", "true", "on", "yes"}:
+                value = True
+            elif normalized in {"0", "false", "off", "no"}:
+                value = False
+            else:
+                raise ValueError(f"Invalid {key}: expected a boolean")
         elif key == "opacity":
             value = float(value)
             if not math.isfinite(value):
@@ -29,15 +37,12 @@ def apply_display_config(config: Any, data: dict[str, Any]) -> None:
             value = max(8, min(96, int(value)))
         elif key.endswith("_font"):
             value = normalize_font_name(value)
+        elif key.endswith("_color"):
+            value = str(value).strip()
+            if not QColor.isValidColor(value):
+                raise ValueError(f"Invalid {key}: {value}")
         else:
             value = str(value)
         updates[key] = value
     for key, value in updates.items():
         setattr(config, key, value)
-
-
-def validate_display_colors(root: Any, data: dict[str, Any]) -> None:
-    """Resolve Tk colors on the UI thread before applying any settings."""
-    for key, value in data.items():
-        if key.endswith("_color"):
-            root.winfo_rgb(str(value))

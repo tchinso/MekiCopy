@@ -1,26 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
-from build_runtime_data import ssl_runtime_data
+from build_runtime_data import qt_license_data, ssl_runtime_data, without_windows_icu
 
 datas = [("MekiCopy.ico", ".")] if Path("MekiCopy.ico").exists() else []
-datas += ssl_runtime_data()
+datas += ssl_runtime_data() + qt_license_data()
 common = dict(
     pathex=[], binaries=[], datas=datas,
     hookspath=[],
-    hooksconfig={}, runtime_hooks=[], excludes=["PyQt5", "PyQt6", "PySide2", "PySide6"],
+    hooksconfig={}, runtime_hooks=[], excludes=["PyQt5", "PyQt6", "PySide2", "tkinter"],
     noarchive=False, optimize=0,
 )
 
 overlayer = Analysis(
     ["meki_bootstrap.py"],
-    hiddenimports=["meki_overlayer", "tkinter", "tkinter.constants"],
+    hiddenimports=["meki_overlayer"],
     **common,
 )
 script = Analysis(
     ["meki_bootstrap.py"],
-    hiddenimports=["meki_script", "tkinter", "tkinter.constants"],
+    hiddenimports=["meki_script"],
     **common,
 )
+overlayer.binaries = without_windows_icu(overlayer.binaries)
+script.binaries = without_windows_icu(script.binaries)
 MERGE((overlayer, "MekiOverlayer", "MekiOverlayer"), (script, "MekiScript", "MekiScript"))
 
 overlayer_pyz = PYZ(overlayer.pure)

@@ -2,7 +2,7 @@
 
 [처음으로](../README.md) · [빌드 안내](../BUILDING.md) · [검증 기록](../VALIDATION.md)
 
-MekiCopy는 Tk 본체와 별도 프로세스로 실행하는 번역·표시·음성 도구로 구성됩니다. 각 기능의 로직은 해당 모듈에 두고, 본체는 사용자 입력과 작업 상태를 연결합니다.
+MekiCopy는 PySide6 본체와 별도 프로세스로 실행하는 번역·표시·음성 도구로 구성됩니다. 각 기능의 로직은 해당 모듈에 두고, 본체는 사용자 입력과 작업 상태를 연결합니다.
 
 ## 모듈별 책임
 
@@ -13,7 +13,7 @@ MekiCopy는 Tk 본체와 별도 프로세스로 실행하는 번역·표시·음
 | 화면 캡처 | `mekicopy_capture.py`, `mekicopy_region_ui.py` | 모니터·DPI·영역 좌표, MSS 캡처, 영역 선택 UI |
 | OCR | `mekicopy_ocr.py` | 모델 준비, GPU/CPU 선택, 인식과 복사 |
 | 실시간 OCR | `mekicopy_realtime.py` | 주기·중복 판정·세션 취소 |
-| UI 작업 | `mekicopy_tasks.py`, `mekicopy_tooltip.py`, `mekicopy_hotkey.py`, `mekicopy_tray.py` | 작업 스레드 결과 전달, 툴팁, 단축키, 트레이 |
+| UI 작업 | `mekicopy_qt_tasks.py`, `mekicopy_tooltip.py`, `mekicopy_hotkey.py`, `mekicopy_tray.py` | 작업 스레드 결과 전달, 툴팁, 단축키, 트레이 |
 | 외부 도구 | `mekicopy_companions.py`, `companion_http.py`, `companion_json.py`, `companion_watchdog.py`, `companion_liveness.py`, `companion_manual_close.py` | 실행·통신·JSON 객체 검증·상태 검사·복구·수동 종료 |
 | 번역 서버 | `hytrans_main.py`, `hytrans/app.py`, `hytrans/queue.py` | HTTP API, 제한된 순차 작업 큐 |
 | 번역 엔진 | `hytrans/hdtrans_backend.py`, `hytrans/browser.py`, `hytrans/api_client.py` | 네이티브·브라우저·클라우드 번역 |
@@ -22,7 +22,7 @@ MekiCopy는 Tk 본체와 별도 프로세스로 실행하는 번역·표시·음
 | 오버레이 | `meki_overlayer.py`, `win32_overlay.py`, `overlay_receipts.py`, `display_config.py` | 창 표시, 설정 정규화, Windows 이벤트, 표시 완료·취소 |
 | 음성 | `audio_capture_core.py`, `meki_audio_capture.py`, `meki_script.py` | 녹음·VAD·STT·번역과 대본 표시 |
 | 자막 | `meki_subtitle_pipeline.py`, `meki_subtitle_window.py`, `meki_subtitle_paths.py`, `process_output.py` | 영상 처리, SRT 원자 저장, 취소 가능한 자식 프로세스 출력 수집, 작업 UI와 경로 |
-| 공통 런타임 | `runtime_paths.py`, `mekicopy_runtime.py`, `meki_bootstrap.py`, `system_logging.py`, `service_ports.py` | 저장·배포 경로, 공통 DLL/Tk 준비, 로그, 포트 |
+| 공통 런타임 | `runtime_paths.py`, `mekicopy_runtime.py`, `meki_bootstrap.py`, `system_logging.py`, `service_ports.py` | 저장·배포 경로, 공통 DLL 준비, 로그, 포트 |
 | 선택 구성요소 | `gpu_runtime.py`, `media_tools_download.py` | 공식 고정 자산 다운로드·SHA-256 검증·잠금·원자 설치·캐시 재사용 |
 | 실행 검사 | `mekicopy_selftest.py`, `tests/` | frozen 자기검증, 단위·회귀·통합 검사 |
 | 배포 | `build_mekicopy.ps1`, `release_packaging.py`, `*.spec` | 실행 파일 생성·검사, 자산·manifest·ZIP |
@@ -40,7 +40,7 @@ MekiCopy는 Tk 본체와 별도 프로세스로 실행하는 번역·표시·음
 - 음성: WASAPI loopback → VAD → 일본어 STT → MekiScript 원문 → HYTrans → MekiScript 번역.
 - 영상: FFmpeg 오디오 추출 → FAST VAD → 일본어 STT → HYTrans → SRT. 녹음과 영상은 `meki_subtitle_vad.py`의 NyanKat 방식 경계 추적기와 공용 VAD 모델을 사용합니다.
 
-OCR 작업은 겹쳐 실행하지 않습니다. MSS 캡처는 작업 스레드에 맞는 캡처 인스턴스를 사용합니다. Tk 위젯과 Tcl 변수는 UI 스레드에서 다루며 백그라운드 결과는 `TkTaskRunner`로 전달합니다. Windows 이벤트 콜백은 상태만 기록하고 Tk 타이머가 UI 변경을 수행합니다.
+OCR 작업은 겹쳐 실행하지 않습니다. MSS 캡처는 작업 스레드에 맞는 캡처 인스턴스를 사용합니다. Qt 위젯은 GUI 스레드에서 다루며 백그라운드 작업 결과는 큐에 넣은 Qt 시그널로 전달합니다. `QtTaskRunner`는 창당 동시 작업 4개와 대기 작업 8개까지 처리합니다. Windows 이벤트 콜백은 상태를 기록하고 Qt 타이머가 UI 변경을 수행합니다.
 
 상태 조회 응답은 해당 프로세스·포트·모델의 현재 상태에 속하는지 확인해야 합니다. 프로세스 교체나 설정 변경 전 요청의 늦은 응답을 새 상태로 반영하면 안 됩니다. 자동 복구는 본체가 소유한 프로세스에만 적용합니다.
 
@@ -57,7 +57,7 @@ OCR 작업은 겹쳐 실행하지 않습니다. MSS 캡처는 작업 스레드�
 실제 새 번역 표시 완료 + 0.5초
 ```
 
-표시 완료는 오버레이의 Tk 그리기 완료 응답으로 확인합니다. 빈 결과·중복·실패에는 표시 대기를 추가하지 않습니다. 주기 대기 중에도 수동 번역 버튼과 단축키 잠금을 유지합니다.
+표시 완료는 오버레이의 Qt 그리기 완료 응답으로 확인합니다. 빈 결과·중복·실패에는 표시 대기를 추가하지 않습니다. 주기 대기 중에도 수동 번역 버튼과 단축키 잠금을 유지합니다.
 
 중복 비교 기준은 마지막으로 복사 또는 번역·표시에 성공한 원문입니다.
 

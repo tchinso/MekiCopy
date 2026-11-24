@@ -18,6 +18,7 @@ MIN_SIZE_PX = 10
 
 _DPI_AWARENESS_READY = False
 _CAPTURE_MANAGER = None
+_CAPTURE_MANAGER_LOCK = threading.Lock()
 
 _AppDirProvider = Callable[[], str]
 _ErrorLogger = Callable[[str, Exception], None]
@@ -75,15 +76,15 @@ def enable_dpi_awareness() -> None:
         return
     _DPI_AWARENESS_READY = True
     try:
-        # Per-monitor v2 keeps Tk coordinates aligned with physical pixels where
+        # Per-monitor v2 keeps native coordinates aligned with physical pixels where
         # Windows allows it. Older systems fall back below.
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
-        return
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
     except Exception:
         pass
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        return
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:
+            return
     except Exception:
         pass
     try:
@@ -335,7 +336,7 @@ def _capture_stats(image: Image.Image) -> CaptureFrameStats:
 
 class CaptureManager:
     def __init__(self) -> None:
-        self.sct = None
+        self._monitors: list[MonitorInfo] = []
         self._lock = threading.RLock()
         self.monitor_signature: tuple[tuple[int, int, int, int], ...] = ()
         self.last_result: CaptureResult | None = None
@@ -345,51 +346,37 @@ class CaptureManager:
 
     def close(self) -> None:
         with self._lock:
-            if self.sct is None:
-                return
-            try:
-                self.sct.close()
-            except Exception:
-                pass
-            self.sct = None
+            self._monitors = []
+            self.monitor_signature = ()
+
+    @staticmethod
+    def _read_monitors() -> list[MonitorInfo]:
+        # Native display handles are acquired and released on the same thread.
+        with mss.mss() as display:
+            return [
+                _monitor_from_mss(index, monitor, is_virtual=(index == 0))
+                for index, monitor in enumerate(display.monitors)
+            ]
 
     def reinitialize(self, reason: str) -> None:
         with self._lock:
-            self.close()
             try:
-                self.sct = mss.mss()
-                raw_monitors = list(self.sct.monitors)
-                monitors = [
-                    _monitor_from_mss(index, monitor, is_virtual=(index == 0))
-                    for index, monitor in enumerate(raw_monitors)
-                ]
-                self.monitor_signature = monitor_signature(monitors)
+                self._monitors = self._read_monitors()
+                self.monitor_signature = monitor_signature(self._monitors)
                 _log_runtime_message(
                     "capture_reinitialize",
                     f"reason: {reason}\nmonitor_signature: {self.monitor_signature}",
                 )
             except Exception as exc:
                 self.close()
-                self.monitor_signature = ()
                 _log_runtime_error("capture_reinitialize", exc)
 
     def get_monitors(self, refresh: bool = True) -> list[MonitorInfo]:
         del refresh
         with self._lock:
-            if self.sct is None:
+            if not self._monitors:
                 self.reinitialize("missing_mss")
-            if self.sct is None:
-                return []
-            try:
-                raw_monitors = list(self.sct.monitors)
-            except Exception as exc:
-                _log_runtime_error("capture_get_monitors", exc)
-                self.close()
-                return []
-            return [
-                _monitor_from_mss(index, monitor, is_virtual=(index == 0))
-                for index, monitor in enumerate(raw_monitors)
-            ]
+            return list(self._monitors)
 
     def get_real_monitors(self) -> list[MonitorInfo]:
         monitors = [monitor for monitor in self.get_monitors() if not monitor.is_virtual]
@@ -398,21 +385,18 @@ class CaptureManager:
         return self.get_monitors()[:1]
 
     def refresh_if_display_changed(self) -> bool:
-        try:
-            with mss.mss() as fresh:
-                fresh_monitors = [
-                    _monitor_from_mss(index, monitor, is_virtual=(index == 0))
-                    for index, monitor in enumerate(list(fresh.monitors))
-                ]
+        with self._lock:
+            try:
+                fresh_monitors = self._read_monitors()
+            except Exception as exc:
+                _log_runtime_error("capture_check_display_changed", exc)
+                return False
             fresh_signature = monitor_signature(fresh_monitors)
-        except Exception as exc:
-            _log_runtime_error("capture_check_display_changed", exc)
-            self.reinitialize("display_check_failed")
-            return bool(self.monitor_signature)
-        if fresh_signature == self.monitor_signature:
-            return False
-        previous = self.monitor_signature
-        self.reinitialize("display_changed")
+            previous = self.monitor_signature
+            self._monitors = fresh_monitors
+            self.monitor_signature = fresh_signature
+            if previous == fresh_signature:
+                return False
         _log_runtime_message(
             "capture_display_changed",
             f"before: {previous}\nafter: {fresh_signature}",
@@ -505,6 +489,7 @@ class CaptureManager:
         ]
         retry_mss = False
         first_blank: tuple[str, Image.Image, CaptureFrameStats] | None = None
+        first_mismatch: tuple[str, Image.Image, CaptureFrameStats] | None = None
         errors: list[str] = []
 
         for strategy, force_reinit in attempts:
@@ -516,12 +501,11 @@ class CaptureManager:
                     monitors = self.get_monitors()
                 image = self._capture_with_strategy(strategy, region)
                 if image.size != (region.width, region.height):
-                    stats = _capture_stats(image)
                     errors.append(
                         f"{strategy}: size mismatch {image.size} != {(region.width, region.height)}"
                     )
-                    if first_blank is None:
-                        first_blank = (strategy, image, stats)
+                    if first_mismatch is None:
+                        first_mismatch = (strategy, image, _capture_stats(image))
                     retry_mss = retry_mss or strategy == "mss"
                     continue
                 stats = _capture_stats(image)
@@ -547,15 +531,16 @@ class CaptureManager:
                 errors.append(f"{strategy}: {type(exc).__name__}: {exc}")
                 if strategy == "mss":
                     retry_mss = True
-                    self.reinitialize("mss_exception")
 
-        if first_blank is not None:
-            strategy, image, stats = first_blank
-            self.blank_frame_count += 1
+        failed_frame = first_blank or first_mismatch
+        if failed_frame is not None:
+            strategy, image, stats = failed_frame
+            if first_blank is not None:
+                self.blank_frame_count += 1
             self.failure_count += 1
             result = CaptureResult(
                 image=image,
-                status=CaptureStatus.BLACK_FRAME_SUSPECTED,
+                status=CaptureStatus.BLACK_FRAME_SUSPECTED if first_blank else CaptureStatus.SIZE_MISMATCH,
                 strategy=strategy,
                 region=region,
                 monitors=monitors,
@@ -565,7 +550,7 @@ class CaptureManager:
             )
             self.last_result = result
             _log_runtime_message(
-                "capture_blank_frame",
+                "capture_blank_frame" if first_blank else "capture_size_mismatch",
                 (
                     f"count: {self.blank_frame_count}\n"
                     f"strategy: {strategy}\n"
@@ -608,11 +593,11 @@ class CaptureManager:
             "width": region.width,
             "height": region.height,
         }
-        # Windows MSS owns thread-local DCs. TkTaskRunner uses a fresh worker
+        # Windows MSS owns thread-local DCs. QtTaskRunner uses a fresh worker
         # per OCR operation, so never borrow the UI thread's cached instance.
         with mss.mss() as capture:
             sct_image = capture.grab(mss_region)
-            return Image.frombytes("RGB", sct_image.size, sct_image.rgb)
+            return Image.frombytes("RGB", sct_image.size, sct_image.raw, "raw", "BGRX")
 
     def _capture_with_pillow(self, region: Region) -> Image.Image:
         bbox = (
@@ -719,6 +704,10 @@ class CaptureManager:
             ):
                 raise RuntimeError("BitBlt failed")
 
+            # GetDIBits requires its source bitmap to be deselected from the DC.
+            if not gdi32.SelectObject(hdc_mem, old_bitmap):
+                raise RuntimeError("Failed to deselect capture bitmap")
+            old_bitmap = None
             bitmap_info = BITMAPINFO()
             bitmap_info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
             bitmap_info.bmiHeader.biWidth = region.width
@@ -760,9 +749,10 @@ class CaptureManager:
 
 def get_capture_manager() -> CaptureManager:
     global _CAPTURE_MANAGER
-    if _CAPTURE_MANAGER is None:
-        _CAPTURE_MANAGER = CaptureManager()
-    return _CAPTURE_MANAGER
+    with _CAPTURE_MANAGER_LOCK:
+        if _CAPTURE_MANAGER is None:
+            _CAPTURE_MANAGER = CaptureManager()
+        return _CAPTURE_MANAGER
 
 
 def capture_region_result(left: int, top: int, width: int, height: int) -> CaptureResult:

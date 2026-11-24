@@ -354,7 +354,11 @@ async def _translate_text(text: str, *, realtime: bool = False,
     except Exception as exc:
         # A request-specific generation error does not make a connected model
         # permanently unhealthy. Fatal/disconnect paths clear worker_ready.
-        state.state = "READY" if state.worker_ready else "ERROR"
+        if not state.worker_ready:
+            # The lifecycle handler already published the disconnect, timeout
+            # or replacement worker's loading state.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        state.state = "READY"
         state.error = str(exc)
         error("translate", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc

@@ -3,13 +3,11 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
-import tkinter as tk
 from ctypes import wintypes
 
-from PIL import Image, ImageTk
-from runtime_paths import prepare_tk_environment, state_data_dir
+from app_identity import ICON_FILENAME, apply_qt_icon
+from runtime_paths import state_data_dir
 
-ICON_FILENAME = "MekiCopy.ico"
 APP_USER_MODEL_ID = "MekiCopy.MekiCopy"
 DETACHED_REGION_FILENAME = "detached_button_region.json"
 DETACHED_GEOMETRY_FILENAME = "detached_button_geometry.json"
@@ -60,29 +58,7 @@ def _get_icon_path() -> str | None:
     return None
 
 
-def _set_window_icon(window: tk.Misc) -> None:
-    icon_path = _get_icon_path()
-    if not icon_path:
-        return
-    try:
-        window.iconbitmap(default=icon_path)
-    except tk.TclError:
-        try:
-            window.iconbitmap(icon_path)
-        except tk.TclError:
-            pass
-    try:
-        with Image.open(icon_path) as icon_image:
-            icon_image.seek(0)
-            photo = ImageTk.PhotoImage(icon_image.copy())
-        window.iconphoto(True, photo)
-        setattr(window, "_mekicopy_icon_photo", photo)
-    except Exception:
-        pass
-
-
-def _prepare_tk_library_paths() -> None:
-    prepare_tk_environment("MekiCopyRuntime")
+_set_window_icon = apply_qt_icon
 
 
 def _prepare_native_runtime_paths() -> None:

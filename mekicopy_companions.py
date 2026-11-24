@@ -206,7 +206,7 @@ def request_translation_and_show(
     """Translate text through HYTrans and publish it to a verified overlay.
 
     This is deliberately UI-free so desktop windows can run the network wait
-    outside Tk's event loop. All URLs are captured by the caller before a
+    outside the GUI event loop. All URLs are captured by the caller before a
     background task starts, preventing settings edits from changing a request
     midway through execution. The default exceeds HYTrans's bounded 600-second
     server timeout so a slow translation receives the server's real response
@@ -268,7 +268,7 @@ def request_translation_and_show(
             if shown.get("ok") is not True or shown.get("displayed") is not True:
                 raise RuntimeError(str(shown.get("error") or "오버레이 표시 완료를 확인하지 못했습니다."))
             # On Windows Python's monotonic clock is shared across processes.
-            # Use the Tk paint timestamp, so network latency never adds another
+            # Use the overlay paint timestamp, so network latency never adds another
             # display hold after the two scheduling deadlines have elapsed.
             if (not isinstance(displayed_at, (int, float)) or isinstance(displayed_at, bool)
                     or not math.isfinite(displayed_at) or displayed_at < 0

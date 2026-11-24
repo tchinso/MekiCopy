@@ -6,17 +6,15 @@ from contextlib import contextmanager
 from pathlib import Path
 import os
 import threading
-import tkinter as tk
 from functools import lru_cache
 from typing import Callable
-from tkinter import messagebox
 
-import mss
 from PIL import Image
+from PySide6.QtWidgets import QWidget
+from mekicopy_theme import messagebox
 from mekicopy_capture import (
     MIN_SIZE_PX,
     CaptureStatus,
-    Region,
     capture_problem_message as _capture_problem_message,
     capture_region_result,
     configure_capture_runtime,
@@ -29,7 +27,6 @@ from mekicopy_runtime import (
     _register_native_dll_directories,
     _get_resource_dir,
     _prepare_native_runtime_paths,
-    _prepare_tk_library_paths,
     _prepare_windowed_streams,
 )
 from system_logging import log_debug as _system_debug
@@ -37,6 +34,7 @@ from system_logging import log_error as _system_error
 from system_logging import is_debug_enabled as _system_debug_enabled
 
 _OCR_ENGINE = None
+_LAST_RECOGNITION: tuple[object, tuple[int, int], bytes, str] | None = None
 _ORT_PRELOAD_READY = False
 _ORT_GPU_RUNTIME_AVAILABLE = False
 _OCR_PROGRESS: deque[tuple[str, Callable[[], bool] | None]] = deque(maxlen=1)
@@ -93,7 +91,7 @@ def _publish_ocr_progress(message: str, is_cancelled: Callable[[], bool] | None 
 
 
 def take_ocr_progress() -> str | None:
-    """Consume the newest worker status from an existing Tk polling callback."""
+    """Consume the newest worker status from the UI thread."""
     with _OCR_PROGRESS_LOCK:
         item = _OCR_PROGRESS.pop() if _OCR_PROGRESS else None
     if item is None:
@@ -246,11 +244,14 @@ def _create_meikiocr_engine(meikiocr_ocr, provider: str):
             if "CUDAExecutionProvider" not in providers
         ]
         if active_provider != "CUDAExecutionProvider" or missing_cuda_sessions:
-            # ONNX Runtime can accept the CUDA request, then consistently
-            # create every session on CPU when a driver or a dependent DLL is
-            # unavailable.  That engine is already a valid CPU engine.  Do
-            # not discard it and create the three sessions a second time:
-            # the duplicate allocation is especially costly alongside a game.
+            # Each OCR stage uses an independent session. Keep successfully
+            # accelerated stages when another stage falls back to CPU.
+            if len(session_providers) == 3 and all(
+                providers and providers[0] in ("CUDAExecutionProvider", "CPUExecutionProvider")
+                for providers in session_providers.values()
+            ) and any(providers[0] == "CUDAExecutionProvider" for providers in session_providers.values()):
+                _log_runtime_message("mixed_meikiocr_providers", session_details)
+                return engine
             complete_cpu_fallback = (
                 active_provider == "CPUExecutionProvider"
                 and all(
@@ -343,34 +344,34 @@ def _ocr_lock(lock, is_cancelled: Callable[[], bool] | None):
 
 
 def recognize_image(image: Image.Image, *, is_cancelled: Callable[[], bool] | None = None) -> str:
-    """Run OCR on a captured image without touching Tk or temporary files."""
+    """Recognize a capture, reusing successful inference for an identical frame."""
+    global _LAST_RECOGNITION
     try:
+        _check_ocr_cancelled(is_cancelled)
         _prepare_native_runtime_paths()
         import numpy as np
 
-        rgb_image = image.convert("RGB")
-        # OpenCV/MeikiOCR receive BGR data when they load an image file. Keep
-        # that channel order while avoiding fragile temporary Unicode paths.
-        image_data = np.asarray(rgb_image)[:, :, ::-1].copy()
-        if image_data.size == 0:
+        if not image.width or not image.height:
             raise OcrError("captured image is empty")
         with _ocr_lock(_OCR_RUN_LOCK, is_cancelled):
             engine = _get_ocr_engine(is_cancelled)
             _check_ocr_cancelled(is_cancelled)
+            rgb = image if image.mode == "RGB" else image.convert("RGB")
+            pixels = rgb.tobytes("raw", "BGR")
+            digest = hashlib.sha256(pixels).digest()
+            previous = _LAST_RECOGNITION
+            if previous and previous[0] is engine and previous[1] == image.size and previous[2] == digest:
+                return previous[3]
+            image_data = np.frombuffer(pixels, dtype=np.uint8).reshape(image.height, image.width, 3)
             results = engine.run_ocr(image_data)
+            text = postprocess_text("\n".join(line["text"] for line in results if line.get("text")))
+            _LAST_RECOGNITION = engine, image.size, digest, text
+            return text
     except OcrError:
         raise
     except Exception as exc:
         _log_runtime_error("recognize_image", exc)
         raise OcrError(str(exc) or type(exc).__name__) from exc
-
-    output_lines = []
-    for line in results:
-        text = line.get("text", "")
-        if text:
-            output_lines.append(text)
-    return postprocess_text("\n".join(output_lines))
-
 
 def run_meikiocr(image_path: str) -> str:
     try:
@@ -391,7 +392,7 @@ def capture_region(left: int, top: int, width: int, height: int) -> Image.Image:
 
 
 def capture_ocr_image(left: int, top: int, width: int, height: int) -> Image.Image:
-    """Capture a valid OCR frame without presenting a Tk dialog."""
+    """Capture a valid OCR frame without presenting a dialog."""
     if width < MIN_SIZE_PX or height < MIN_SIZE_PX:
         raise OcrError("OCR capture region is too small")
     result = capture_region_result(left, top, width, height)
@@ -410,7 +411,7 @@ def ocr_region(
     top: int,
     width: int,
     height: int,
-    parent: tk.Misc | None = None,
+    parent: QWidget | None = None,
 ) -> str | None:
     if width < MIN_SIZE_PX or height < MIN_SIZE_PX:
         messagebox.showerror("MekiCopy", "캡처 영역이 너무 작습니다.", parent=parent)
@@ -440,11 +441,10 @@ def ocr_and_translate(
     width: int,
     height: int,
     notify: bool = True,
-    parent: tk.Misc | None = None,
+    parent: QWidget | None = None,
     on_translation_complete: Callable[[], None] | None = None,
 ) -> None:
     """Translate a one-shot CLI/bookmark capture with the saved tool settings."""
-    _prepare_tk_library_paths()
     settings = load_settings()
     text = ocr_region(left, top, width, height, parent=parent)
     if text is None:

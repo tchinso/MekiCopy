@@ -1,28 +1,33 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import tkinter as tk
-from tkinter import colorchooser, messagebox, ttk
+from dataclasses import replace
+import os
 
-from mekicopy_hotkey import (
-    DEFAULT_GLOBAL_HOTKEY,
-    hotkey_from_tk_event,
-    parse_hotkey,
+from PySide6.QtCore import QEvent, QLocale, QPointF, QSignalBlocker, Qt
+from PySide6.QtGui import QColor, QFontDatabase, QIcon, QIntValidator, QKeyEvent, QKeySequence, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QScrollArea,
+    QSizePolicy,
+    QSlider,
+    QStyle,
+    QStyleOptionComboBox,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
-from mekicopy_runtime import _set_window_icon
-from mekicopy_tooltip import Tooltip
-from mekicopy_realtime import REALTIME_INTERVALS, normalize_interval
-from mekicopy_settings import (
-    AppSettings,
-    _geometry_size,
-    _japanese_font_families,
-    _korean_font_families,
-    _normalize_hex_color,
-    _normalize_font_name,
-    _normalize_port,
-    load_detached_geometry,
-)
-from hytrans.model_files import MT15_PROFILE, PLAMO3_PROFILE, get_model_profile
+
 from hytrans.api_settings import (
     BACKEND_LABELS,
     PROVIDERS,
@@ -32,21 +37,13 @@ from hytrans.api_settings import (
     normalize_backend,
     validate_provider_settings,
 )
+from hytrans.model_files import MT15_PROFILE, PLAMO3_PROFILE, get_model_profile
+from mekicopy_hotkey import DEFAULT_GLOBAL_HOTKEY, parse_hotkey
+from mekicopy_realtime import REALTIME_INTERVALS, normalize_interval
+from mekicopy_settings import AppSettings, _geometry_size, _normalize_font_name, load_detached_geometry
+from mekicopy_theme import ACCENT_INK, BG, BORDER, DISABLED_FG, RoundedButton, configure_window_theme
 from service_ports import validate_unique_ports
-from mekicopy_theme import (
-    BG,
-    BORDER,
-    INK,
-    ROSE,
-    SOFT,
-    SURFACE,
-    configure_window_theme,
-    style_color_button,
-    style_standard_button,
-    style_tree,
-)
 
-BACKEND_IDS_BY_LABEL = {label: backend for backend, label in BACKEND_LABELS.items()}
 TRANSLATION_ENGINES = {
     BACKEND_LABELS["hdtrans"]: ("hdtrans", MT15_PROFILE),
     BACKEND_LABELS["translator_api"]: ("translator_api", MT15_PROFILE),
@@ -58,833 +55,565 @@ STT_MODEL_LABELS = {
     "parakeet": "Parakeet TDT-CTC 0.6B 일본어 (기본, INT8)",
     "reazonspeech": "ReazonSpeech 일본어 (INT8 / FP32)",
 }
-STT_MODEL_IDS_BY_LABEL = {
-    label: model_id for model_id, label in STT_MODEL_LABELS.items()
+
+
+def _configure_dialog(dialog: QDialog, title: str, width: int, height: int) -> QVBoxLayout:
+    dialog.setWindowTitle(title)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    configure_window_theme(dialog)
+    screen = dialog.screen().availableGeometry()
+    available_width = max(320, screen.width() - 48)
+    available_height = max(300, screen.height() - 72)
+    dialog.setMinimumSize(min(520, available_width), min(420, available_height))
+    dialog.resize(min(width, available_width), min(height, available_height))
+    body = QVBoxLayout(dialog)
+    body.setContentsMargins(15, 13, 15, 13)
+    body.setSpacing(9)
+    heading = QLabel(title)
+    font = heading.font()
+    font.setPointSize(16)
+    font.setBold(True)
+    heading.setFont(font)
+    body.addWidget(heading)
+    return body
+
+
+def _scroll_content() -> tuple[QScrollArea, QVBoxLayout]:
+    scroll = QScrollArea()
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    content = QWidget()
+    content.setObjectName("settingsScrollBody")
+    content.setStyleSheet(f"QWidget#settingsScrollBody {{ background: {BG}; }}")
+    body = QVBoxLayout(content)
+    body.setContentsMargins(3, 6, 7, 2)
+    body.setSpacing(8)
+    scroll.setWidget(content)
+    return scroll, body
+
+
+def _section(parent: QVBoxLayout, title: str) -> QVBoxLayout:
+    card = QFrame()
+    card.setProperty("role", "card")
+    card.setAccessibleName(title)
+    layout = QVBoxLayout(card)
+    layout.setContentsMargins(12, 9, 12, 11)
+    layout.setSpacing(6)
+    label = QLabel(title)
+    font = label.font()
+    font.setPointSize(11)
+    font.setBold(True)
+    label.setFont(font)
+    layout.addWidget(label)
+    parent.addWidget(card)
+    return layout
+
+
+def _description(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setProperty("role", "muted")
+    return label
+
+
+def _action(text, callback, *, variant="normal") -> RoundedButton:
+    button = RoundedButton(None, text=text, command=callback, height=36, radius=12, variant=variant)
+    button.setAutoDefault(False)
+    return button
+
+
+def _show_dialog(dialog: QDialog) -> None:
+    if dialog.isMinimized():
+        dialog.showNormal()
+    else:
+        dialog.show()
+    dialog.raise_()
+    dialog.activateWindow()
+
+
+def _footer(body: QVBoxLayout, dismiss, confirm, *, confirm_text="저장") -> RoundedButton:
+    row = QHBoxLayout()
+    row.addStretch()
+    save = _action(confirm_text, confirm, variant="primary")
+    for button in (_action("닫기", dismiss), save):
+        button.setMinimumWidth(104)
+        button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
+        row.addWidget(button)
+    body.addLayout(row)
+    return save
+
+
+def _form(section: QVBoxLayout) -> QFormLayout:
+    form = QFormLayout()
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    form.setHorizontalSpacing(13)
+    form.setVerticalSpacing(6)
+    section.addLayout(form)
+    return form
+
+
+def _checkbox(section: QVBoxLayout, title: str, checked: bool) -> QCheckBox:
+    checkbox = QCheckBox(title)
+    checkbox.setChecked(checked)
+    section.addWidget(checkbox)
+    return checkbox
+
+
+class _NumberField(QLineEdit):
+    def __init__(self, label: str, value: int, minimum: int, maximum: int) -> None:
+        super().__init__(str(value))
+        self.setAccessibleName(label)
+        self.setInputMethodHints(Qt.InputMethodHint.ImhDigitsOnly)
+        locale = QLocale.c()
+        locale.setNumberOptions(QLocale.NumberOption.RejectGroupSeparator)
+        validator = QIntValidator(minimum, maximum, self)
+        validator.setLocale(locale)
+        self.setValidator(validator)
+
+    def value(self) -> int:
+        if not self.hasAcceptableInput():
+            validator = self.validator()
+            raise ValueError(
+                f"{self.accessibleName()} 값은 {validator.bottom()}부터 {validator.top()} 사이의 숫자여야 합니다."
+            )
+        return int(self.text())
+
+
+def _number_field(form: QFormLayout, label: str, value: int, minimum: int, maximum: int) -> _NumberField:
+    field = _NumberField(label, value, minimum, maximum)
+    form.addRow(label, field)
+    return field
+
+
+def _opacity_slider(form: QFormLayout, label: str, opacity: float) -> QSlider:
+    slider = QSlider(Qt.Orientation.Horizontal)
+    slider.setRange(10, 100)
+    slider.setSingleStep(1)
+    slider.setValue(round(opacity * 100))
+    slider.setAccessibleName(label)
+    amount = QLabel(f"{slider.value()}%")
+    amount.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    amount.setMinimumWidth(42)
+    slider.valueChanged.connect(lambda value: amount.setText(f"{value}%"))
+    row = QHBoxLayout()
+    row.addWidget(slider, 1)
+    row.addWidget(amount)
+    form.addRow(label, row)
+    return slider
+
+
+class _SettingsComboBox(QComboBox):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(14)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        center = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxArrow, self
+        ).center()
+        with QPainter(self) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            pen = QPen(QColor(ACCENT_INK if self.isEnabled() else DISABLED_FG), 1.5)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawPolyline(QPolygonF([
+                QPointF(center.x() - 4, center.y() - 2),
+                QPointF(center.x(), center.y() + 2),
+                QPointF(center.x() + 4, center.y() - 2),
+            ]))
+
+
+def _font_picker(writing_system: QFontDatabase.WritingSystem, selected: str) -> QComboBox:
+    combo = _SettingsComboBox()
+    selected = _normalize_font_name(selected)
+    families = QFontDatabase.families(writing_system)
+    combo.addItems(sorted({selected, *(name for name in families if not name.startswith("@"))}, key=str.casefold))
+    combo.setCurrentText(selected)
+    return combo
+
+
+class _ColorButton(RoundedButton):
+    def __init__(self, owner: QDialog, label: str, initial: str) -> None:
+        super().__init__(None, text="", command=self._choose, height=36, radius=12)
+        self.owner = owner
+        self.label = label
+        self.setAutoDefault(False)
+        self._set_color(QColor(initial))
+
+    def _set_color(self, color: QColor) -> None:
+        self._color = color
+        self.setText(color.name().upper())
+        swatch = QPixmap(18, 18)
+        swatch.fill(Qt.GlobalColor.transparent)
+        with QPainter(swatch) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QColor(BORDER))
+            painter.setBrush(color)
+            painter.drawRoundedRect(1, 1, 15, 15, 4, 4)
+        self.setIcon(QIcon(swatch))
+        self.setAccessibleName(f"{self.label} {color.name().upper()}")
+
+    def color(self) -> str:
+        return self._color.name()
+
+    def _choose(self) -> None:
+        color = QColorDialog.getColor(self._color, self.owner, self.label)
+        if color.isValid():
+            self._set_color(color)
+
+
+_SHORTCUT_MODIFIERS = (
+    (Qt.KeyboardModifier.ControlModifier, "Ctrl"),
+    (Qt.KeyboardModifier.AltModifier, "Alt"),
+    (Qt.KeyboardModifier.ShiftModifier, "Shift"),
+    (Qt.KeyboardModifier.MetaModifier, "Win"),
+)
+_SHIFTED_PUNCTUATION = dict(zip("!@#$%^&*()_+{}|:\"<>?~", "1234567890-=[]\\;',./`"))
+_WINDOWS_PUNCTUATION = {
+    0xBA: ";", 0xBB: "=", 0xBC: ",", 0xBD: "-", 0xBE: ".", 0xBF: "/",
+    0xC0: "`", 0xDB: "[", 0xDC: "\\", 0xDD: "]", 0xDE: "'",
 }
 
 
-class _ScrollableTab(tk.Frame):
-    def __init__(self, master: tk.Misc) -> None:
-        super().__init__(master, bg=BG)
-        self.canvas = tk.Canvas(
-            self,
-            bg=BG,
-            highlightthickness=0,
-            bd=0,
-        )
-        self.scrollbar = ttk.Scrollbar(
-            self,
-            orient=tk.VERTICAL,
-            command=self.canvas.yview,
-        )
-        self.interior = tk.Frame(self.canvas, bg=BG, padx=12, pady=12)
-        self._window_id = self.canvas.create_window(
-            (0, 0),
-            window=self.interior,
-            anchor="nw",
-        )
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.interior.bind("<Configure>", self._on_interior_configure, add="+")
-        self.canvas.bind("<Configure>", self._on_canvas_configure, add="+")
-        self.canvas.bind("<Enter>", self._bind_mousewheel, add="+")
-        self.canvas.bind("<Leave>", self._unbind_mousewheel, add="+")
-
-    def _on_interior_configure(self, _event: tk.Event) -> None:
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def _on_canvas_configure(self, event: tk.Event) -> None:
-        self.canvas.itemconfigure(self._window_id, width=event.width)
-
-    def _bind_mousewheel(self, _event: tk.Event) -> None:
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
-
-    def _unbind_mousewheel(self, _event: tk.Event) -> None:
-        self.canvas.unbind_all("<MouseWheel>")
-
-    def _on_mousewheel(self, event: tk.Event) -> None:
-        if self.canvas.bbox("all") is None:
-            return
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+def _shortcut_from_event(event: QKeyEvent) -> str | None:
+    key = event.key()
+    modifiers = event.modifiers()
+    native_key = event.nativeVirtualKey() if os.name == "nt" else 0
+    if Qt.Key.Key_0 <= key <= Qt.Key.Key_9 and modifiers & Qt.KeyboardModifier.KeypadModifier:
+        key_name = f"Num{key - Qt.Key.Key_0}"
+    elif 0x60 <= native_key <= 0x69:
+        key_name = f"Num{native_key - 0x60}"
+    elif native_key in _WINDOWS_PUNCTUATION:
+        key_name = _WINDOWS_PUNCTUATION[native_key]
+    elif 0x30 <= native_key <= 0x39:
+        key_name = chr(native_key)
+    elif key == Qt.Key.Key_Backtab:
+        key_name = "Tab"
+    else:
+        key_name = QKeySequence(key).toString(QKeySequence.SequenceFormat.PortableText)
+        key_name = _SHIFTED_PUNCTUATION.get(key_name, key_name)
+    parts = [name for flag, name in _SHORTCUT_MODIFIERS if modifiers & flag]
+    shortcut = parse_hotkey("+".join([*parts, key_name]))
+    return shortcut.text if shortcut else None
 
 
-class ApiSettingsDialog(tk.Toplevel):
-    """Edit provider drafts; the main settings Save commits them together."""
+class _HotkeyField(QLineEdit):
+    def __init__(self, value: str, owner: QWidget) -> None:
+        super().__init__(value)
+        self.owner = owner
+        self.setReadOnly(True)
+        self.setAccessibleName("전역 단축키 설정")
 
-    def __init__(self, owner: "SettingsWindow") -> None:
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.ShortcutOverride:
+            event.accept()
+            return True
+        if event.type() == QEvent.Type.KeyPress:
+            shortcut = _shortcut_from_event(event)
+            if shortcut is not None:
+                self.setText(shortcut)
+            return True
+        return super().event(event)
+
+    def focusInEvent(self, event) -> None:
+        super().focusInEvent(event)
+        pause = getattr(self.owner, "pause_global_hotkey", None)
+        if pause is not None:
+            pause()
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        resume = getattr(self.owner, "resume_global_hotkey", None)
+        if resume is not None:
+            resume()
+
+
+class ApiSettingsDialog(QDialog):
+    """Edit provider drafts for the parent settings window."""
+
+    def __init__(self, owner: SettingsWindow) -> None:
         super().__init__(owner)
         self.owner = owner
         self.settings = deepcopy(owner.api_settings)
-        backend = BACKEND_IDS_BY_LABEL.get(owner.hytrans_backend_var.get(), "local")
+        backend = owner.selected_engine()[0]
         self.provider = backend if backend in PROVIDERS else PROVIDERS[0]
-        self.title("번역 API 설정")
-        configure_window_theme(self)
-        self.geometry(
-            f"{min(660, max(560, self.winfo_screenwidth() - 80))}x"
-            f"{min(840, max(480, self.winfo_screenheight() - 100))}"
-        )
-        self.minsize(560, 480)
-        self.transient(owner)
-        _set_window_icon(self)
-        self.provider_var = tk.StringVar(value=BACKEND_LABELS[self.provider])
-        self.api_key_var = tk.StringVar()
-        self.account_id_var = tk.StringVar()
-        self.model_var = tk.StringVar()
-        self.show_key_var = tk.BooleanVar(value=False)
+        body = _configure_dialog(self, "번역 API 설정", 590, 650)
+        self.provider_combo = _SettingsComboBox()
+        for provider in PROVIDERS:
+            self.provider_combo.addItem(BACKEND_LABELS[provider], provider)
+        self.provider_combo.setCurrentIndex(self.provider_combo.findData(self.provider))
+        provider_form = _form(body)
+        provider_form.addRow("API 서비스", self.provider_combo)
 
-        body = tk.Frame(self, bg=BG, padx=14, pady=14)
-        body.pack(fill=tk.BOTH, expand=True)
-        provider_row = tk.Frame(body, bg=BG)
-        provider_row.pack(fill=tk.X, pady=(0, 8))
-        tk.Label(provider_row, text="API 서비스").pack(side=tk.LEFT)
-        tk.OptionMenu(
-            provider_row,
-            self.provider_var,
-            *(BACKEND_LABELS[provider] for provider in PROVIDERS),
-            command=self._on_provider_changed,
-        ).pack(side=tk.RIGHT)
+        scroll, fields = _scroll_content()
+        body.addWidget(scroll, 1)
+        connection = _section(fields, "연결 정보")
+        connection_form = _form(connection)
+        self.key_entry = QLineEdit()
+        connection_form.addRow("API 키", self.key_entry)
+        self.account_entry = QLineEdit()
+        connection_form.addRow("Cloudflare Account ID", self.account_entry)
+        self.show_key = _checkbox(connection, "API 키 표시", False)
+        self.show_key.toggled.connect(self._update_key_visibility)
+        self._connection_form = connection_form
 
-        wrapper = _ScrollableTab(body)
-        wrapper.pack(fill=tk.BOTH, expand=True)
-        fields = wrapper.interior
-        key_frame = tk.LabelFrame(fields, text="연결 정보", padx=10, pady=8)
-        key_frame.pack(fill=tk.X)
-        tk.Label(key_frame, text="API 키", anchor="w").pack(fill=tk.X)
-        self.key_entry = tk.Entry(key_frame, textvariable=self.api_key_var, show="•")
-        self.key_entry.pack(fill=tk.X, pady=(4, 2))
-        tk.Checkbutton(
-            key_frame,
-            text="API 키 표시",
-            variable=self.show_key_var,
-            command=self._update_key_visibility,
-            anchor="w",
-        ).pack(fill=tk.X)
-        self.account_row = tk.Frame(key_frame, bg=BG)
-        tk.Label(self.account_row, text="Cloudflare Account ID", anchor="w").pack(fill=tk.X)
-        tk.Entry(self.account_row, textvariable=self.account_id_var).pack(fill=tk.X, pady=(4, 0))
+        model = _section(fields, "모델")
+        self.model_combo = _SettingsComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        _form(model).addRow("사용할 모델 ID", self.model_combo)
+        model.addWidget(_description("모델 ID를 직접 입력할 수 있습니다. 아래 목록에는 한 줄에 하나씩 입력하세요."))
+        self.models_text = QPlainTextEdit()
+        self.models_text.setAccessibleName("모델 목록")
+        self.models_text.setFixedHeight(82)
+        model.addWidget(self.models_text)
 
-        model_frame = tk.LabelFrame(fields, text="모델", padx=10, pady=8)
-        model_frame.pack(fill=tk.X, pady=(10, 0))
-        tk.Label(model_frame, text="사용할 모델 ID (직접 입력 가능)", anchor="w").pack(fill=tk.X)
-        self.model_combo = ttk.Combobox(model_frame, textvariable=self.model_var, state="normal")
-        self.model_combo.pack(fill=tk.X, pady=(4, 8))
-        tk.Label(model_frame, text="모델 목록 (한 줄에 모델 ID 하나)", anchor="w").pack(fill=tk.X)
-        self.models_text = self._text_field(model_frame, height=4)
-        self.models_text.bind("<<Modified>>", self._on_model_list_changed)
-
-        prompt_frame = tk.LabelFrame(fields, text="번역 프롬프트", padx=10, pady=8)
-        prompt_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-        tk.Label(
-            prompt_frame,
-            text="{source}: 원문 언어 · {target}: 번역 언어 · {text}: 원문\n"
-            "프롬프트와 모델 목록은 서비스별로 따로 보관됩니다.",
-            justify=tk.LEFT,
-            anchor="w",
-            wraplength=520,
-        ).pack(fill=tk.X, pady=(0, 6))
-        self.prompt_text = self._text_field(prompt_frame, height=8)
-
-        tk.Label(
-            body,
-            text="적용한 뒤 MekiCopy 설정의 '저장'을 누르면 반영됩니다.",
-            anchor="w",
-        ).pack(fill=tk.X, pady=(10, 4))
-        buttons = tk.Frame(body, bg=BG)
-        buttons.pack(fill=tk.X)
-        apply_button = tk.Button(buttons, text="적용", command=self._on_apply)
-        apply_button.pack(side=tk.RIGHT, padx=(8, 0))
-        tk.Button(buttons, text="취소", command=self._on_close).pack(side=tk.RIGHT)
-        style_tree(self)
-        style_standard_button(apply_button, "primary")
+        prompt = _section(fields, "번역 프롬프트")
+        prompt.addWidget(_description(
+            "{source} 원문 언어 · {target} 번역 언어 · {text} 원문\n"
+            "프롬프트와 모델 목록은 서비스별로 따로 보관됩니다."
+        ))
+        self.prompt_text = QPlainTextEdit()
+        self.prompt_text.setAccessibleName("번역 프롬프트")
+        self.prompt_text.setMinimumHeight(112)
+        prompt.addWidget(self.prompt_text)
+        fields.addStretch()
+        body.addWidget(_description("적용한 뒤 MekiCopy 설정을 저장하면 반영됩니다."))
+        _footer(body, self.reject, self._on_apply, confirm_text="적용")
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        self.models_text.textChanged.connect(self._refresh_models)
         self._load_provider()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    @staticmethod
-    def _text_field(master: tk.Misc, *, height: int) -> tk.Text:
-        row = tk.Frame(master, bg=BG)
-        row.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-        field = tk.Text(
-            row,
-            height=height,
-            width=1,
-            wrap=tk.WORD,
-            undo=True,
-            bg=SURFACE,
-            fg=INK,
-            insertbackground=ROSE,
-            selectbackground=SOFT,
-            highlightbackground=BORDER,
-            highlightcolor=ROSE,
-            relief=tk.FLAT,
-        )
-        scrollbar = ttk.Scrollbar(row, command=field.yview)
-        field.configure(yscrollcommand=scrollbar.set)
-        field.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        return field
 
     def _models(self) -> list[str]:
         return list(dict.fromkeys(
-            line.strip()
-            for line in self.models_text.get("1.0", "end-1c").splitlines()
-            if line.strip()
+            line.strip() for line in self.models_text.toPlainText().splitlines() if line.strip()
         ))
 
     def _store_provider(self) -> None:
         self.settings.profiles[self.provider] = ProviderSettings(
-            api_key=self.api_key_var.get().strip(),
-            account_id=self.account_id_var.get().strip(),
-            model=self.model_var.get().strip(),
+            api_key=self.key_entry.text().strip(),
+            account_id=self.account_entry.text().strip(),
+            model=self.model_combo.currentText().strip(),
             models=self._models(),
-            prompt=self.prompt_text.get("1.0", "end-1c"),
+            prompt=self.prompt_text.toPlainText(),
         )
 
     def _load_provider(self) -> None:
         profile = self.settings.profiles[self.provider]
-        self.api_key_var.set(profile.api_key)
-        self.account_id_var.set(profile.account_id)
-        self.model_var.set(profile.model)
-        self.models_text.delete("1.0", tk.END)
-        self.models_text.insert("1.0", "\n".join(profile.models))
-        self.prompt_text.delete("1.0", tk.END)
-        self.prompt_text.insert("1.0", profile.prompt)
-        self.models_text.edit_reset()
-        self.prompt_text.edit_reset()
-        self.model_combo.configure(values=profile.models)
-        self.show_key_var.set(False)
+        self.key_entry.setText(profile.api_key)
+        self.account_entry.setText(profile.account_id)
+        with QSignalBlocker(self.models_text):
+            self.models_text.setPlainText("\n".join(profile.models))
+        self.prompt_text.setPlainText(profile.prompt)
+        self._refresh_models(profile.model)
+        self.show_key.setChecked(False)
         self._update_key_visibility()
-        if self.provider == "cloudflare":
-            self.account_row.pack(fill=tk.X, pady=(8, 0))
-        else:
-            self.account_row.pack_forget()
+        self._connection_form.setRowVisible(self.account_entry, self.provider == "cloudflare")
 
-    def _on_provider_changed(self, label: str) -> None:
+    def _on_provider_changed(self) -> None:
         self._store_provider()
-        self.provider = BACKEND_IDS_BY_LABEL[label]
+        self.provider = self.provider_combo.currentData()
         self._load_provider()
 
-    def _on_model_list_changed(self, _event: tk.Event) -> None:
-        if self.models_text.edit_modified():
-            self.model_combo.configure(values=self._models())
-            self.models_text.edit_modified(False)
+    def _refresh_models(self, selected: str | None = None) -> None:
+        if selected is None:
+            selected = self.model_combo.currentText()
+        self.model_combo.clear()
+        self.model_combo.addItems(self._models())
+        self.model_combo.setEditText(selected)
 
     def _update_key_visibility(self) -> None:
-        self.key_entry.configure(show="" if self.show_key_var.get() else "•")
+        echo_mode = QLineEdit.EchoMode.Normal if self.show_key.isChecked() else QLineEdit.EchoMode.Password
+        self.key_entry.setEchoMode(echo_mode)
 
     def _on_apply(self) -> None:
         self._store_provider()
         self.owner.api_settings = deepcopy(self.settings)
         self.owner._update_translation_controls()
-        self._on_close()
+        self.accept()
 
-    def _on_close(self) -> None:
-        self.owner.api_settings_dialog = None
-        self.destroy()
+    def done(self, result: int) -> None:
+        if self.owner.api_settings_dialog is self:
+            self.owner.api_settings_dialog = None
+        super().done(result)
 
 
-class SettingsWindow(tk.Toplevel):
-    def __init__(self, owner) -> None:
+class SettingsWindow(QDialog):
+    def __init__(self, owner: QWidget) -> None:
         super().__init__(owner)
         self.owner = owner
-        self.title("MekiCopy 설정")
-        configure_window_theme(self)
-        self.resizable(True, True)
-        self._set_safe_geometry(580, 720)
-        self.minsize(560, 520)
-        _set_window_icon(self)
-
-        settings = owner.settings
-        self.minimize_to_tray_var = tk.BooleanVar(value=settings.minimize_to_tray)
-        self.main_topmost_var = tk.BooleanVar(value=settings.main_always_on_top)
-        self.detached_topmost_var = tk.BooleanVar(value=settings.detached_always_on_top)
-        self.detached_hide_titlebar_var = tk.BooleanVar(
-            value=settings.detached_hide_titlebar
-        )
-        self.detached_fixed_size_var = tk.BooleanVar(value=settings.detached_fixed_size)
-        self.simple_copy_complete_var = tk.BooleanVar(
-            value=settings.simple_copy_complete
-        )
-        self.global_hotkey_enabled_var = tk.BooleanVar(
-            value=settings.global_hotkey_enabled
-        )
-        self.global_hotkey_var = tk.StringVar(value=settings.global_hotkey)
-        self.realtime_ocr_enabled_var = tk.BooleanVar(value=settings.realtime_ocr_enabled)
-        self.realtime_ocr_interval_var = tk.StringVar(
-            value=f"{settings.realtime_ocr_interval:g}"
-        )
         self.api_settings: ApiSettings = load_api_settings()
         self.api_settings_dialog: ApiSettingsDialog | None = None
-        backend = normalize_backend(settings.hytrans_backend)
-        model = get_model_profile(settings.hytrans_model_id) if backend == "local" else MT15_PROFILE
-        engine_label = next(label for label, engine in TRANSLATION_ENGINES.items() if engine == (backend, model))
-        self.hytrans_backend_var = tk.StringVar(value=engine_label)
-        self.hytrans_port_var = tk.IntVar(value=settings.hytrans_port)
-        self.overlayer_port_var = tk.IntVar(value=settings.overlayer_port)
-        self.audio_capture_port_var = tk.IntVar(value=settings.audio_capture_port)
-        self.script_port_var = tk.IntVar(value=settings.script_port)
-        self.overlayer_topmost_var = tk.BooleanVar(value=settings.overlayer_always_on_top)
-        self.overlayer_hide_titlebar_var = tk.BooleanVar(
-            value=settings.overlayer_hide_titlebar
-        )
-        self.overlayer_fixed_size_var = tk.BooleanVar(value=settings.overlayer_fixed_size)
-        self.overlayer_exclude_capture_var = tk.BooleanVar(
-            value=settings.overlayer_exclude_from_capture
-        )
-        self.overlayer_bg_color_var = tk.StringVar(value=settings.overlayer_bg_color)
-        self.overlayer_opacity_var = tk.IntVar(
-            value=max(10, min(100, int(settings.overlayer_bg_opacity * 100)))
-        )
-        self.overlayer_text_color_var = tk.StringVar(value=settings.overlayer_text_color)
-        self.overlayer_text_size_var = tk.IntVar(value=settings.overlayer_text_size)
-        self.overlayer_text_font_var = tk.StringVar(value=settings.overlayer_text_font)
-        selected_stt_model = (
-            settings.audio_stt_model
-            if settings.audio_stt_model in STT_MODEL_LABELS
-            else "parakeet"
-        )
-        self.audio_stt_model_var = tk.StringVar(
-            value=STT_MODEL_LABELS[selected_stt_model]
-        )
-        self.audio_stt_precision_var = tk.StringVar(
-            value=("int8" if selected_stt_model == "parakeet" else settings.audio_stt_precision)
-        )
-        self.audio_chunk_preset_var = tk.StringVar(value=settings.audio_chunk_preset)
-        self.script_topmost_var = tk.BooleanVar(value=settings.script_always_on_top)
-        self.script_bg_color_var = tk.StringVar(value=settings.script_bg_color)
-        self.script_opacity_var = tk.IntVar(
-            value=max(10, min(100, int(settings.script_bg_opacity * 100)))
-        )
-        self.script_original_color_var = tk.StringVar(value=settings.script_original_text_color)
-        self.script_original_size_var = tk.IntVar(value=settings.script_original_text_size)
-        self.script_original_font_var = tk.StringVar(value=settings.script_original_text_font)
-        self.script_translated_color_var = tk.StringVar(value=settings.script_translated_text_color)
-        self.script_translated_size_var = tk.IntVar(value=settings.script_translated_text_size)
-        self.script_translated_font_var = tk.StringVar(value=settings.script_translated_text_font)
-        self.suppress_magpie_notice_var = tk.BooleanVar(
-            value=settings.suppress_magpie_launch_notice
-        )
-        self.debug_logging_var = tk.BooleanVar(value=settings.debug_logging)
-        self.detached_label_controls: list[tuple[tk.Widget, str]] = []
-        self._color_buttons: list[tuple[tk.Button, tk.StringVar]] = []
-        self._global_hotkey_controls: list[tk.Widget] = []
-        self._manual_translation_widgets: list[tk.Widget] = []
-
-        self._build_ui()
-        self.audio_stt_model_var.trace_add("write", self._on_audio_stt_model_changed)
-        self._on_audio_stt_model_changed()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.transient(owner)
-        self.attributes("-topmost", settings.main_always_on_top)
-        self.realtime_ocr_enabled_var.trace_add(
-            "write", lambda *_: self._update_manual_translation_controls()
-        )
-        self.global_hotkey_enabled_var.trace_add(
-            "write", lambda *_: self._update_global_hotkey_controls()
-        )
-        self._update_mode_labels()
-        self._update_manual_translation_controls()
-        self.hytrans_backend_var.trace_add("write", lambda *_: self._update_translation_controls())
-        self._update_translation_controls()
-
-    def _on_audio_stt_model_changed(self, *_args) -> None:
-        is_parakeet = (
-            STT_MODEL_IDS_BY_LABEL.get(self.audio_stt_model_var.get()) == "parakeet"
-        )
-        if is_parakeet:
-            # The packaged Parakeet checkpoint only supports INT8.
-            self.audio_stt_precision_var.set("int8")
-        precision_menu = getattr(self, "audio_stt_precision_menu", None)
-        if precision_menu is not None:
-            precision_menu.config(state=tk.DISABLED if is_parakeet else tk.NORMAL)
-
-    def _set_safe_geometry(self, width: int, height: int) -> None:
-        safe_height = max(520, min(height, self.winfo_screenheight() - 90))
-        safe_width = max(560, min(width, self.winfo_screenwidth() - 80))
-        self.geometry(f"{safe_width}x{safe_height}")
-
-    def _add_scrollable_tab(self, notebook: ttk.Notebook, title: str) -> tk.Frame:
-        wrapper = _ScrollableTab(notebook)
-        notebook.add(wrapper, text=title)
-        return wrapper.interior
-
-    def _build_ui(self) -> None:
-        body = tk.Frame(self, padx=14, pady=14, bg=BG)
-        body.pack(fill=tk.BOTH, expand=True)
-        notebook = ttk.Notebook(body)
-        notebook.pack(fill=tk.BOTH, expand=True)
-        pages = (
+        settings = owner.settings
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, settings.main_always_on_top)
+        body = _configure_dialog(self, "MekiCopy 설정", 590, 590)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setUsesScrollButtons(True)
+        body.addWidget(self.tabs, 1)
+        for title, build in (
             ("일반", self._build_general_page),
             ("실시간/수동 번역", self._build_translation_page),
             ("번역 오버레이", self._build_overlay_page),
             ("음성인식", self._build_audio_page),
+        ):
+            scroll, page = _scroll_content()
+            build(page, settings)
+            page.addStretch()
+            self.tabs.addTab(scroll, title)
+        _footer(body, self.reject, self._on_save)
+        self._update_translation_controls()
+        self._update_manual_translation_controls()
+        self._on_audio_stt_model_changed()
+
+    def _build_general_page(self, page: QVBoxLayout, settings: AppSettings) -> None:
+        windows = _section(page, "앱 동작")
+        self.minimize_to_tray = _checkbox(windows, "최소화할 때 시스템 트레이로 이동", settings.minimize_to_tray)
+        self.main_topmost = _checkbox(windows, "MekiCopy를 항상 위로", settings.main_always_on_top)
+        self.detached_hide_titlebar = _checkbox(
+            windows, "분리된 '번역 후 표시' 버튼의 제목표시줄 숨김", settings.detached_hide_titlebar
         )
-        for title, build_page in pages:
-            build_page(self._add_scrollable_tab(notebook, title))
-
-        button_row = tk.Frame(body, bg=BG)
-        button_row.pack(fill=tk.X, pady=(14, 0))
-        save_button = tk.Button(button_row, text="저장", command=self._on_save)
-        save_button.pack(side=tk.RIGHT, padx=(8, 0))
-        close_button = tk.Button(button_row, text="닫기", command=self._on_close)
-        close_button.pack(side=tk.RIGHT)
-        style_tree(self)
-        style_standard_button(save_button, "primary")
-        style_standard_button(close_button)
-        self._refresh_color_buttons()
-
-    def _build_general_page(self, general_tab: tk.Frame) -> None:
-        options = [
-            (
-                "MekiCopy가 최소화되면 시스템 트레이로 이동",
-                self.minimize_to_tray_var,
-            ),
-            ("MekiCopy를 항상 위로", self.main_topmost_var),
-            ("분리된 '번역 후 표시' 버튼의 제목표시줄 숨김", self.detached_hide_titlebar_var),
-        ]
-        for text, variable in options:
-            checkbox = tk.Checkbutton(general_tab, text=text, variable=variable, anchor="w")
-            checkbox.pack(fill=tk.X, pady=4)
-
-        self._build_translation_engine_controls(general_tab)
-
-        suppress_magpie_notice_checkbox = tk.Checkbutton(
-            general_tab,
-            text="MagPie 실행 시 안내 띄우지 않기",
-            variable=self.suppress_magpie_notice_var,
-            anchor="w",
+        self.suppress_magpie_notice = _checkbox(
+            windows, "MagPie 실행 안내 숨김", settings.suppress_magpie_launch_notice
         )
-        suppress_magpie_notice_checkbox.pack(fill=tk.X, pady=4)
+        self.debug_logging = _checkbox(windows, "오류 분석을 위한 디버그 로그 켜기", settings.debug_logging)
 
-        debug_checkbox = tk.Checkbutton(
-            general_tab,
-            text="오류 분석을 위한 디버그 로그 켜기",
-            variable=self.debug_logging_var,
-            anchor="w",
-        )
-        debug_checkbox.pack(fill=tk.X, pady=(4, 8))
+        translation = _section(page, "번역 엔진")
+        translation.addWidget(_description("화면 번역, 음성인식, 자막에서 함께 사용하는 설정입니다."))
+        self.hytrans_backend = _SettingsComboBox()
+        for label, engine in TRANSLATION_ENGINES.items():
+            self.hytrans_backend.addItem(label, engine[0])
+        backend = normalize_backend(settings.hytrans_backend)
+        profile = get_model_profile(settings.hytrans_model_id) if backend == "local" else MT15_PROFILE
+        selected_engine = next(label for label, engine in TRANSLATION_ENGINES.items() if engine == (backend, profile))
+        self.hytrans_backend.setCurrentText(selected_engine)
+        connection = _form(translation)
+        connection.addRow("번역 서비스", self.hytrans_backend)
+        self.hytrans_port = _number_field(connection, "HYTrans 포트", settings.hytrans_port, 1, 65535)
+        self.translation_model_label = _description("")
+        translation.addWidget(self.translation_model_label)
+        actions = QHBoxLayout()
+        actions.addWidget(_action("API 키 · 모델 · 프롬프트", self._open_api_settings))
+        self.hdtrans_settings_button = _action("hdTrans 설치 · 사전 · 문맥", self._open_hdtrans_settings)
+        actions.addWidget(self.hdtrans_settings_button)
+        translation.addLayout(actions)
+        self.hytrans_backend.currentIndexChanged.connect(self._update_translation_controls)
 
-    def _build_translation_page(self, translation_tab: tk.Frame) -> None:
-        self._build_realtime_controls(translation_tab)
-        manual_frame = tk.LabelFrame(
-            translation_tab, text="수동 번역", padx=10, pady=8
+    def _build_translation_page(self, page: QVBoxLayout, settings: AppSettings) -> None:
+        realtime = _section(page, "실시간 OCR")
+        self.realtime_ocr_enabled = _checkbox(realtime, "실시간 번역 모드 사용", settings.realtime_ocr_enabled)
+        self.realtime_ocr_enabled.setToolTip(
+            "설정을 저장한 뒤 OCR 영역을 확정하고 HYTrans와 MekiOverlayer를 실행하세요.\n"
+            "화면 번역 화면의 '실시간 OCR 시작' 버튼으로 시작할 수 있습니다.\n"
+            "조건을 만족하지 않게 되거나 '실시간 OCR 중지'를 누르면 중지됩니다.\n"
+            "실시간 모드를 끄면 '번역 후 표시' 버튼으로 수동 번역할 수 있습니다."
         )
-        manual_frame.pack(fill=tk.X, pady=(10, 0))
-        simple_complete_checkbox = tk.Checkbutton(
-            manual_frame,
-            text="번역 완료를 간단하게 표시하기",
-            variable=self.simple_copy_complete_var,
-            anchor="w",
-        )
-        simple_complete_checkbox.pack(fill=tk.X, pady=4)
-        self._manual_translation_widgets.append(simple_complete_checkbox)
+        self.realtime_ocr_interval = _SettingsComboBox()
+        self.realtime_ocr_interval.addItems([f"{value:g}" for value in REALTIME_INTERVALS])
+        self.realtime_ocr_interval.setCurrentText(f"{settings.realtime_ocr_interval:g}")
+        _form(realtime).addRow("최소 인식 간격(초)", self.realtime_ocr_interval)
 
-        global_hotkey_frame = tk.LabelFrame(
-            manual_frame,
-            text="전역 단축키",
-            padx=10,
-            pady=8,
-        )
-        global_hotkey_frame.pack(fill=tk.X, pady=(8, 4))
-        global_hotkey_checkbox = tk.Checkbutton(
-            global_hotkey_frame,
-            text="전역 단축키 사용",
-            variable=self.global_hotkey_enabled_var,
-            anchor="w",
-        )
-        global_hotkey_checkbox.pack(fill=tk.X, pady=(0, 4))
-        self._manual_translation_widgets.append(global_hotkey_checkbox)
-        self.global_hotkey_action_label = tk.Label(
-            global_hotkey_frame,
-            anchor="w",
-        )
-        self.global_hotkey_action_label.pack(fill=tk.X, pady=(0, 4))
-        global_hotkey_row = tk.Frame(global_hotkey_frame)
-        global_hotkey_row.pack(fill=tk.X)
-        global_hotkey_key_label = tk.Label(global_hotkey_row, text="전역 단축키 설정")
-        global_hotkey_key_label.pack(side=tk.LEFT)
-        self.global_hotkey_entry = tk.Entry(
-            global_hotkey_row,
-            width=18,
-            textvariable=self.global_hotkey_var,
-        )
-        self.global_hotkey_entry.pack(side=tk.RIGHT, padx=(8, 0))
-        self.global_hotkey_entry.bind(
-            "<KeyPress>",
-            self._capture_global_hotkey,
-            add="+",
-        )
-        self.global_hotkey_entry.bind(
-            "<FocusIn>",
-            self._on_global_hotkey_focus_in,
-            add="+",
-        )
-        self.global_hotkey_entry.bind(
-            "<FocusOut>",
-            self._on_global_hotkey_focus_out,
-            add="+",
-        )
-        self.global_hotkey_default_button = tk.Button(
-            global_hotkey_frame,
-            text="기본값 B",
-            command=self._restore_default_global_hotkey,
-        )
-        self.global_hotkey_default_button.pack(anchor="e", pady=(4, 2))
-        global_hotkey_help_label = tk.Label(
-            global_hotkey_frame,
-            text="입력칸을 클릭한 뒤 키를 누르세요. B 같은 일반 키도 단독으로 사용할 수 있습니다.",
-            anchor="w",
-            justify=tk.LEFT,
-        )
-        global_hotkey_help_label.pack(fill=tk.X)
-        self._manual_translation_widgets.extend([
-            self.global_hotkey_action_label,
-            global_hotkey_key_label,
-            global_hotkey_help_label,
-        ])
-        self._global_hotkey_controls.extend(
-            [self.global_hotkey_entry, self.global_hotkey_default_button]
-        )
+        manual = _section(page, "수동 번역")
+        self.manual_controls = QWidget()
+        controls = QVBoxLayout(self.manual_controls)
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(6)
+        manual.addWidget(self.manual_controls)
+        self.simple_copy_complete = _checkbox(controls, "번역 완료를 간단하게 표시", settings.simple_copy_complete)
+        self.detached_topmost = _checkbox(controls, "분리된 '번역 후 표시' 버튼을 항상 위로", settings.detached_always_on_top)
+        self.detached_fixed_size = _checkbox(controls, "분리된 '번역 후 표시' 버튼의 크기 고정", settings.detached_fixed_size)
+        self.global_hotkey_enabled = _checkbox(controls, "전역 단축키로 '번역 후 표시' 실행", settings.global_hotkey_enabled)
 
-        detached_options = [
-            ("버튼을 항상 위로", self.detached_topmost_var),
-            ("버튼의 크기를 고정", self.detached_fixed_size_var),
-        ]
-        for suffix, variable in detached_options:
-            checkbox = tk.Checkbutton(manual_frame, variable=variable, anchor="w")
-            checkbox.pack(fill=tk.X, pady=4)
-            self.detached_label_controls.append((checkbox, suffix))
-            self._manual_translation_widgets.append(checkbox)
+        hotkey_row = QHBoxLayout()
+        self.global_hotkey_entry = _HotkeyField(settings.global_hotkey, self.owner)
+        hotkey_row.addWidget(self.global_hotkey_entry, 1)
+        self.global_hotkey_default_button = _action("기본값 B", self._restore_default_global_hotkey)
+        hotkey_row.addWidget(self.global_hotkey_default_button)
+        _form(controls).addRow("전역 단축키 설정", hotkey_row)
+        controls.addWidget(_description("입력칸을 클릭한 뒤 키를 누르세요. B 같은 일반 키도 단독으로 사용할 수 있습니다."))
+        self.realtime_ocr_enabled.toggled.connect(self._update_manual_translation_controls)
+        self.global_hotkey_enabled.toggled.connect(self._update_manual_translation_controls)
 
-    def _build_translation_engine_controls(self, general_tab: tk.Frame) -> None:
-        translation_frame = tk.LabelFrame(general_tab, text="번역 엔진", padx=10, pady=8)
-        translation_frame.pack(fill=tk.X, pady=(8, 4))
-        tk.Label(
-            translation_frame,
-            text="번역 오버레이와 음성인식 등 HYTrans를 사용하는 모든 번역에 적용됩니다.",
-            justify=tk.LEFT,
-            anchor="w",
-            wraplength=460,
-        ).pack(fill=tk.X, pady=(0, 8))
-        provider_row = tk.Frame(translation_frame)
-        provider_row.pack(fill=tk.X, pady=3)
-        tk.Label(provider_row, text="번역 서비스").pack(side=tk.LEFT)
-        provider_menu = tk.OptionMenu(
-            provider_row, self.hytrans_backend_var, *TRANSLATION_ENGINES
-        )
-        provider_menu.configure(width=28, anchor="e")
-        provider_menu.pack(side=tk.RIGHT)
-        self.translation_model_label = tk.Label(
-            translation_frame, anchor="w", justify=tk.LEFT, wraplength=460
-        )
-        self.translation_model_label.pack(fill=tk.X, pady=(4, 8))
-        tk.Button(
-            translation_frame,
-            text="API 키 · 모델 목록 · 번역 프롬프트 설정",
-            command=self._open_api_settings,
-        ).pack(fill=tk.X, pady=3)
-        self.hdtrans_settings_button = tk.Button(
-            translation_frame, text="hdTrans 설정 · 사전 · 문맥 · 설치", command=self._open_hdtrans_settings,
-        )
-        self.hdtrans_settings_button.pack(fill=tk.X, pady=3)
-        port_row = tk.Frame(translation_frame)
-        port_row.pack(fill=tk.X, pady=3)
-        tk.Label(port_row, text="HYTrans 포트").pack(side=tk.LEFT)
-        tk.Spinbox(
-            port_row,
-            from_=1,
-            to=65535,
-            width=8,
-            textvariable=self.hytrans_port_var,
-        ).pack(side=tk.RIGHT)
+    def _build_overlay_page(self, page: QVBoxLayout, settings: AppSettings) -> None:
+        window = _section(page, "번역결과 표시기")
+        self.overlayer_port = _number_field(_form(window), "MekiOverlayer 포트", settings.overlayer_port, 1, 65535)
+        self.overlayer_topmost = _checkbox(window, "MekiOverlayer를 항상 위로", settings.overlayer_always_on_top)
+        self.overlayer_hide_titlebar = _checkbox(window, "제목표시줄 숨김", settings.overlayer_hide_titlebar)
+        self.overlayer_fixed_size = _checkbox(window, "창 크기 고정", settings.overlayer_fixed_size)
+        self.overlayer_exclude_capture = _checkbox(window, "화면 캡처에서 오버레이 제외", settings.overlayer_exclude_from_capture)
 
-    def _build_realtime_controls(self, parent: tk.Frame) -> None:
-        frame = tk.LabelFrame(parent, text="실시간 OCR", padx=10, pady=8)
-        frame.pack(fill=tk.X)
-        enabled_row = tk.Frame(frame)
-        enabled_row.pack(fill=tk.X)
-        tk.Checkbutton(
-            enabled_row,
-            text="실시간 번역 모드 사용",
-            variable=self.realtime_ocr_enabled_var,
-            anchor="w",
-        ).pack(side=tk.LEFT)
-        help_icon = tk.Label(enabled_row, text="?", width=2, cursor="question_arrow")
-        help_icon.pack(side=tk.LEFT, padx=(4, 0))
-        self.realtime_ocr_tooltip = Tooltip(
-            help_icon,
-            "설정 저장 후 아래 조건을 모두 만족하면 화면 번역의\n"
-            "'실시간 OCR 시작' 버튼으로 시작할 수 있습니다.\n\n"
-            "• 확정된 OCR 영역이 있음\n"
-            "• 번역 엔진(HyTrans)과 번역결과 표시기(MekiOverlayer)가 모두 실행 중\n"
-            "• '실시간 번역 모드 사용'이 켜져 있음\n\n"
-            "조건을 만족하지 않게 되면 중지됩니다.\n"
-            "중지하려면 '실시간 OCR 중지' 버튼을 누르세요.\n"
-            "실시간 모드를 끄면 '번역 후 표시' 버튼으로 수동 번역할 수 있습니다.",
-        )
-        interval_row = tk.Frame(frame)
-        interval_row.pack(fill=tk.X, pady=(8, 0))
-        tk.Label(interval_row, text="최소 인식 간격(초)").pack(side=tk.LEFT)
-        ttk.Combobox(
-            interval_row,
-            textvariable=self.realtime_ocr_interval_var,
-            values=[f"{value:g}" for value in REALTIME_INTERVALS],
-            state="readonly",
-            width=8,
-        ).pack(side=tk.RIGHT)
+        appearance = _form(_section(page, "오버레이 모양"))
+        self.overlayer_bg_color = _ColorButton(self, "배경색", settings.overlayer_bg_color)
+        appearance.addRow("배경색", self.overlayer_bg_color)
+        self.overlayer_opacity = _opacity_slider(appearance, "배경 불투명도", settings.overlayer_bg_opacity)
+        self.overlayer_text_color = _ColorButton(self, "글자색", settings.overlayer_text_color)
+        appearance.addRow("글자색", self.overlayer_text_color)
+        self.overlayer_text_size = _number_field(appearance, "글자 크기", settings.overlayer_text_size, 8, 96)
+        self.overlayer_text_font = _font_picker(QFontDatabase.WritingSystem.Korean, settings.overlayer_text_font)
+        appearance.addRow("글꼴", self.overlayer_text_font)
 
-    def _build_overlay_page(self, overlay_tab: tk.Frame) -> None:
-        overlay_frame = tk.LabelFrame(overlay_tab, text="번역결과 표시기 (MekiOverlayer)", padx=10, pady=8)
-        overlay_frame.pack(fill=tk.BOTH, expand=True)
+    def _build_audio_page(self, page: QVBoxLayout, settings: AppSettings) -> None:
+        audio = _form(_section(page, "음성인식"))
+        self.audio_stt_model = _SettingsComboBox()
+        for model, label in STT_MODEL_LABELS.items():
+            self.audio_stt_model.addItem(label, model)
+        self.audio_stt_model.setCurrentIndex(max(0, self.audio_stt_model.findData(settings.audio_stt_model)))
+        audio.addRow("STT 모델", self.audio_stt_model)
+        self.audio_stt_precision = _SettingsComboBox()
+        self.audio_stt_precision.addItems(["int8", "fp32"])
+        self.audio_stt_precision.setCurrentText(settings.audio_stt_precision)
+        self._reazonspeech_precision = self.audio_stt_precision.currentText()
+        audio.addRow("정밀도", self.audio_stt_precision)
+        self.audio_capture_port = _number_field(audio, "MekiAudioCapture 포트", settings.audio_capture_port, 1, 65535)
+        self.audio_chunk_preset = _SettingsComboBox()
+        self.audio_chunk_preset.addItems(["FAST", "BALANCED", "LONG"])
+        self.audio_chunk_preset.setCurrentText(settings.audio_chunk_preset)
+        audio.addRow("음성 구간 길이", self.audio_chunk_preset)
+        self.audio_stt_model.currentIndexChanged.connect(self._on_audio_stt_model_changed)
 
-        overlayer_port_row = tk.Frame(overlay_frame)
-        overlayer_port_row.pack(fill=tk.X, pady=3)
-        overlayer_port_label = tk.Label(overlayer_port_row, text="MekiOverlayer 포트")
-        overlayer_port_label.pack(side=tk.LEFT)
-        overlayer_port_spin = tk.Spinbox(
-            overlayer_port_row,
-            from_=1,
-            to=65535,
-            width=8,
-            textvariable=self.overlayer_port_var,
-        )
-        overlayer_port_spin.pack(side=tk.RIGHT)
+        script = _section(page, "MekiScript")
+        self.script_topmost = _checkbox(script, "MekiScript를 항상 위로", settings.script_always_on_top)
+        appearance = _form(script)
+        self.script_port = _number_field(appearance, "MekiScript 포트", settings.script_port, 1, 65535)
+        self.script_bg_color = _ColorButton(self, "자막 배경색", settings.script_bg_color)
+        appearance.addRow("배경색", self.script_bg_color)
+        self.script_opacity = _opacity_slider(appearance, "배경 불투명도", settings.script_bg_opacity)
 
-        overlayer_options = [
-            ("MekiOverlayer를 항상 위로", self.overlayer_topmost_var),
-            ("MekiOverlayer의 제목표시줄 숨김", self.overlayer_hide_titlebar_var),
-            ("MekiOverlayer 크기 고정", self.overlayer_fixed_size_var),
-            (
-                "MekiOverlayer가 캡쳐되지 않도록 방지",
-                self.overlayer_exclude_capture_var,
-            ),
-        ]
-        for text, variable in overlayer_options:
-            checkbox = tk.Checkbutton(
-                overlay_frame,
-                text=text,
-                variable=variable,
-                anchor="w",
-            )
-            checkbox.pack(fill=tk.X, pady=3)
+        original = _form(_section(page, "원문 자막"))
+        self.script_original_color = _ColorButton(self, "원문 자막 글자색", settings.script_original_text_color)
+        original.addRow("글자색", self.script_original_color)
+        self.script_original_size = _number_field(original, "글자 크기", settings.script_original_text_size, 8, 96)
+        self.script_original_font = _font_picker(QFontDatabase.WritingSystem.Japanese, settings.script_original_text_font)
+        original.addRow("글꼴", self.script_original_font)
 
-        overlayer_style = tk.LabelFrame(
-            overlay_frame,
-            text="MekiOverlayer 설정",
-            padx=8,
-            pady=8,
-        )
-        overlayer_style.pack(fill=tk.X, pady=(8, 2))
+        translated = _form(_section(page, "번역 자막"))
+        self.script_translated_color = _ColorButton(self, "번역 자막 글자색", settings.script_translated_text_color)
+        translated.addRow("글자색", self.script_translated_color)
+        self.script_translated_size = _number_field(translated, "글자 크기", settings.script_translated_text_size, 8, 96)
+        self.script_translated_font = _font_picker(QFontDatabase.WritingSystem.Korean, settings.script_translated_text_font)
+        translated.addRow("글꼴", self.script_translated_font)
 
-        bg_button = tk.Button(
-            overlayer_style,
-            text="배경색깔",
-            command=lambda: self._choose_color(self.overlayer_bg_color_var, bg_button),
-        )
-        bg_button.pack(fill=tk.X, pady=2)
-        self._color_buttons.append((bg_button, self.overlayer_bg_color_var))
-
-        opacity_row = tk.Frame(overlayer_style)
-        opacity_row.pack(fill=tk.X, pady=2)
-        tk.Label(opacity_row, text="배경 투명도").pack(side=tk.LEFT)
-        opacity_scale = tk.Scale(
-            opacity_row,
-            from_=10,
-            to=100,
-            orient=tk.HORIZONTAL,
-            showvalue=True,
-            variable=self.overlayer_opacity_var,
-            length=180,
-        )
-        opacity_scale.pack(side=tk.RIGHT)
-
-        text_color_button = tk.Button(
-            overlayer_style,
-            text="글씨 색깔",
-            command=lambda: self._choose_color(
-                self.overlayer_text_color_var, text_color_button
-            ),
-        )
-        text_color_button.pack(fill=tk.X, pady=2)
-        self._color_buttons.append((text_color_button, self.overlayer_text_color_var))
-
-        size_row = tk.Frame(overlayer_style)
-        size_row.pack(fill=tk.X, pady=2)
-        tk.Label(size_row, text="글씨 크기").pack(side=tk.LEFT)
-        size_spin = tk.Spinbox(
-            size_row,
-            from_=8,
-            to=96,
-            width=6,
-            textvariable=self.overlayer_text_size_var,
-        )
-        size_spin.pack(side=tk.RIGHT)
-
-        font_row = tk.Frame(overlayer_style)
-        font_row.pack(fill=tk.X, pady=2)
-        tk.Label(font_row, text="글씨 폰트").pack(side=tk.LEFT)
-        font_names = _korean_font_families(self)
-        current_font = _normalize_font_name(self.overlayer_text_font_var.get())
-        if font_names:
-            selected_font = current_font if current_font in font_names else (
-                "Malgun Gothic" if "Malgun Gothic" in font_names else (
-                    "맑은 고딕" if "맑은 고딕" in font_names else font_names[0]
-                )
-            )
-            self.overlayer_text_font_var.set(selected_font)
-            menu_values = font_names
-        else:
-            self.overlayer_text_font_var.set("")
-            menu_values = [""]
-        self.korean_font_names = font_names
-        font_menu = tk.OptionMenu(
-            font_row,
-            self.overlayer_text_font_var,
-            *menu_values,
-        )
-        font_menu.config(width=20)
-        if not font_names:
-            font_menu.config(state=tk.DISABLED)
-        font_menu.pack(side=tk.RIGHT)
-
-    def _build_audio_page(self, audio_tab: tk.Frame) -> None:
-        audio_model_frame = tk.LabelFrame(audio_tab, text="음성인식", padx=10, pady=8)
-        audio_model_frame.pack(fill=tk.X)
-        model_row = tk.Frame(audio_model_frame)
-        model_row.pack(fill=tk.X, pady=3)
-        tk.Label(model_row, text="STT 모델").pack(side=tk.LEFT)
-        tk.OptionMenu(
-            model_row,
-            self.audio_stt_model_var,
-            *STT_MODEL_IDS_BY_LABEL,
-        ).pack(side=tk.RIGHT)
-        precision_row = tk.Frame(audio_model_frame)
-        precision_row.pack(fill=tk.X, pady=3)
-        tk.Label(precision_row, text="ReazonSpeech 정밀도").pack(side=tk.LEFT)
-        self.audio_stt_precision_menu = tk.OptionMenu(
-            precision_row,
-            self.audio_stt_precision_var,
-            "fp32",
-            "int8",
-        )
-        self.audio_stt_precision_menu.pack(side=tk.RIGHT)
-        audio_port_row = tk.Frame(audio_model_frame)
-        audio_port_row.pack(fill=tk.X, pady=3)
-        tk.Label(audio_port_row, text="MekiAudioCapture 포트").pack(side=tk.LEFT)
-        tk.Spinbox(
-            audio_port_row,
-            from_=1,
-            to=65535,
-            width=8,
-            textvariable=self.audio_capture_port_var,
-        ).pack(side=tk.RIGHT)
-        preset_row = tk.Frame(audio_model_frame)
-        preset_row.pack(fill=tk.X, pady=3)
-        tk.Label(preset_row, text="음성 CHUNK 기준").pack(side=tk.LEFT)
-        tk.OptionMenu(preset_row, self.audio_chunk_preset_var, "FAST", "BALANCED", "LONG").pack(side=tk.RIGHT)
-
-        self._build_script_controls(audio_tab)
-
-    def _build_script_controls(self, audio_tab: tk.Frame) -> None:
-        script_frame = tk.LabelFrame(audio_tab, text="MekiScript", padx=10, pady=8)
-        script_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-        script_port_row = tk.Frame(script_frame)
-        script_port_row.pack(fill=tk.X, pady=2)
-        tk.Label(script_port_row, text="MekiScript 포트").pack(side=tk.LEFT)
-        tk.Spinbox(
-            script_port_row,
-            from_=1,
-            to=65535,
-            width=8,
-            textvariable=self.script_port_var,
-        ).pack(side=tk.RIGHT)
-        tk.Checkbutton(
-            script_frame,
-            text="MekiScript를 항상 위로",
-            variable=self.script_topmost_var,
-            anchor="w",
-        ).pack(fill=tk.X, pady=2)
-
-        def color_button(text: str, variable: tk.StringVar) -> None:
-            button = tk.Button(script_frame, text=text)
-            button.configure(command=lambda: self._choose_color(variable, button))
-            button.pack(fill=tk.X, pady=2)
-            self._color_buttons.append((button, variable))
-
-        color_button("배경색", self.script_bg_color_var)
-        script_opacity_row = tk.Frame(script_frame)
-        script_opacity_row.pack(fill=tk.X, pady=2)
-        tk.Label(script_opacity_row, text="배경 투명도").pack(side=tk.LEFT)
-        tk.Scale(
-            script_opacity_row, from_=10, to=100, orient=tk.HORIZONTAL,
-            variable=self.script_opacity_var, length=180,
-        ).pack(side=tk.RIGHT)
-        color_button("미번역 글씨 색깔", self.script_original_color_var)
-
-        original_size_row = tk.Frame(script_frame)
-        original_size_row.pack(fill=tk.X, pady=2)
-        tk.Label(original_size_row, text="미번역 글씨 크기").pack(side=tk.LEFT)
-        tk.Spinbox(original_size_row, from_=8, to=96, width=6, textvariable=self.script_original_size_var).pack(side=tk.RIGHT)
-
-        japanese_fonts = _japanese_font_families(self)
-        current_japanese = _normalize_font_name(self.script_original_font_var.get())
-        if japanese_fonts:
-            if current_japanese not in japanese_fonts:
-                self.script_original_font_var.set("Yu Gothic UI" if "Yu Gothic UI" in japanese_fonts else japanese_fonts[0])
-        else:
-            japanese_fonts = [current_japanese]
-        original_font_row = tk.Frame(script_frame)
-        original_font_row.pack(fill=tk.X, pady=2)
-        tk.Label(original_font_row, text="미번역 글씨 폰트").pack(side=tk.LEFT)
-        original_font_menu = tk.OptionMenu(original_font_row, self.script_original_font_var, *japanese_fonts)
-        original_font_menu.config(width=20)
-        original_font_menu.pack(side=tk.RIGHT)
-
-        color_button("번역 글씨 색깔", self.script_translated_color_var)
-        translated_size_row = tk.Frame(script_frame)
-        translated_size_row.pack(fill=tk.X, pady=2)
-        tk.Label(translated_size_row, text="번역 글씨 크기").pack(side=tk.LEFT)
-        tk.Spinbox(translated_size_row, from_=8, to=96, width=6, textvariable=self.script_translated_size_var).pack(side=tk.RIGHT)
-
-        korean_fonts = _korean_font_families(self) or [_normalize_font_name(self.script_translated_font_var.get())]
-        current_korean = _normalize_font_name(self.script_translated_font_var.get())
-        if current_korean not in korean_fonts:
-            self.script_translated_font_var.set(
-                "Malgun Gothic" if "Malgun Gothic" in korean_fonts else (
-                    "맑은 고딕" if "맑은 고딕" in korean_fonts else korean_fonts[0]
-                )
-            )
-        translated_font_row = tk.Frame(script_frame)
-        translated_font_row.pack(fill=tk.X, pady=2)
-        tk.Label(translated_font_row, text="번역 글씨 폰트").pack(side=tk.LEFT)
-        translated_font_menu = tk.OptionMenu(translated_font_row, self.script_translated_font_var, *korean_fonts)
-        translated_font_menu.config(width=20)
-        translated_font_menu.pack(side=tk.RIGHT)
-
-    def _choose_color(self, variable: tk.StringVar, button: tk.Button) -> None:
-        color = colorchooser.askcolor(color=variable.get(), parent=self)[1]
-        if not color:
-            return
-        variable.set(color)
-        self._refresh_color_buttons()
+    def selected_engine(self):
+        return TRANSLATION_ENGINES[self.hytrans_backend.currentText()]
 
     def _open_api_settings(self) -> None:
-        if self.api_settings_dialog is not None and self.api_settings_dialog.winfo_exists():
-            self.api_settings_dialog.lift()
-            self.api_settings_dialog.focus_set()
-            return
-        self.api_settings_dialog = ApiSettingsDialog(self)
+        if self.api_settings_dialog is None:
+            self.api_settings_dialog = ApiSettingsDialog(self)
+        _show_dialog(self.api_settings_dialog)
 
     def _open_hdtrans_settings(self) -> None:
-        from hdtrans_settings_window import HdTransSettingsWindow
-        dialog = getattr(self, "hdtrans_settings_dialog", None)
-        if dialog is not None and dialog.winfo_exists():
-            dialog.lift()
-            return
-        self.hdtrans_settings_dialog = HdTransSettingsWindow(self, main_window=self.owner)
+        self.owner._on_hdtrans_settings()
 
     def _update_translation_controls(self) -> None:
-        backend, model = TRANSLATION_ENGINES[self.hytrans_backend_var.get()]
+        backend, model = self.selected_engine()
         if backend == "local":
             text = model.display_label
             if model == PLAMO3_PROFILE:
@@ -892,240 +621,107 @@ class SettingsWindow(tk.Toplevel):
         elif backend == "translator_api":
             text = "브라우저 내장 Translator API · 일본어 → 한국어 (첫 사용 시 모델 다운로드)"
         elif backend == "hdtrans":
-            text = "hdTrans · 네이티브 일본어 → 한국어 · 브라우저/API 키 불필요 · Lite 최초 다운로드"
+            text = "hdTrans · 일본어 → 한국어 · 브라우저/API 키 불필요 · Lite 첫 사용 시 다운로드"
         else:
             profile = self.api_settings.profiles[backend]
-            text = f"API 모델: {profile.model or '(모델 ID를 입력하세요)'}"
-        self.translation_model_label.configure(text=text)
-        self.hdtrans_settings_button.configure(state=tk.NORMAL if backend == "hdtrans" else tk.DISABLED)
-
-    def _refresh_color_buttons(self) -> None:
-        for button, variable in self._color_buttons:
-            color = variable.get()
-            style_color_button(button, color)
-
-    def _mode_action_label(self) -> str:
-        return "번역 후 표시"
-
-    def _update_mode_labels(self) -> None:
-        action_label = self._mode_action_label()
-        for widget, suffix in self.detached_label_controls:
-            widget.configure(text=f"분리된 '{action_label}' {suffix}")
-        global_hotkey_label = getattr(self, "global_hotkey_action_label", None)
-        if global_hotkey_label is not None:
-            global_hotkey_label.configure(
-                text=f"전역 단축키를 누르면 '{action_label}' 실행"
-            )
+            text = f"API 모델 {profile.model or '(모델 ID를 입력하세요)'}"
+        self.translation_model_label.setText(text)
+        self.hdtrans_settings_button.setEnabled(backend == "hdtrans")
 
     def _update_manual_translation_controls(self) -> None:
-        state = tk.DISABLED if self.realtime_ocr_enabled_var.get() else tk.NORMAL
-        for widget in self._manual_translation_widgets:
-            widget.configure(state=state)
-        self._update_global_hotkey_controls()
-
-    def _update_global_hotkey_controls(self) -> None:
-        enabled = (
-            not self.realtime_ocr_enabled_var.get()
-            and self.global_hotkey_enabled_var.get()
-        )
-        state = tk.NORMAL if enabled else tk.DISABLED
-        for widget in self._global_hotkey_controls:
-            widget.configure(state=state)
-
-    def _capture_global_hotkey(self, event: tk.Event) -> str:
-        hotkey = hotkey_from_tk_event(event.keysym, event.state)
-        if hotkey is not None:
-            self.global_hotkey_var.set(hotkey)
-        # This is a dedicated capture field. Do not let a keypress append raw
-        # text after it has been converted to the canonical shortcut.
-        return "break"
+        manual_enabled = not self.realtime_ocr_enabled.isChecked()
+        self.manual_controls.setEnabled(manual_enabled)
+        hotkey_enabled = manual_enabled and self.global_hotkey_enabled.isChecked()
+        self.global_hotkey_entry.setEnabled(hotkey_enabled)
+        self.global_hotkey_default_button.setEnabled(hotkey_enabled)
 
     def _restore_default_global_hotkey(self) -> None:
-        self.global_hotkey_var.set(DEFAULT_GLOBAL_HOTKEY)
+        self.global_hotkey_entry.setText(DEFAULT_GLOBAL_HOTKEY)
 
-    def _on_global_hotkey_focus_in(self, _event: tk.Event) -> None:
-        pause = getattr(self.owner, "pause_global_hotkey", None)
-        if callable(pause):
-            pause()
-
-    def _on_global_hotkey_focus_out(self, _event: tk.Event) -> None:
-        resume = getattr(self.owner, "resume_global_hotkey", None)
-        if callable(resume):
-            resume()
-
-    def _read_port(self, variable: tk.IntVar, label: str) -> int:
-        try:
-            return _normalize_port(variable.get(), 0)
-        except (tk.TclError, ValueError):
-            raise ValueError(f"{label} 포트 번호는 1부터 65535 사이의 숫자여야 합니다.")
-
-    def _read_int_range(
-        self,
-        variable: tk.IntVar,
-        label: str,
-        minimum: int,
-        maximum: int,
-    ) -> int:
-        try:
-            value = int(variable.get())
-        except (tk.TclError, ValueError):
-            raise ValueError(f"{label} 값은 {minimum}부터 {maximum} 사이의 숫자여야 합니다.")
-        return max(minimum, min(maximum, value))
-
-    def _read_color(self, variable: tk.StringVar, label: str, fallback: str) -> str:
-        color = _normalize_hex_color(variable.get(), "")
-        if not color:
-            raise ValueError(f"{label} 색상은 #RRGGBB 형식이어야 합니다.")
-        return color
+    def _on_audio_stt_model_changed(self) -> None:
+        is_parakeet = self.audio_stt_model.currentData() == "parakeet"
+        if is_parakeet and self.audio_stt_precision.isEnabled():
+            self._reazonspeech_precision = self.audio_stt_precision.currentText()
+        self.audio_stt_precision.setCurrentText("int8" if is_parakeet else self._reazonspeech_precision)
+        self.audio_stt_precision.setEnabled(not is_parakeet)
 
     def _collect_settings(self) -> AppSettings:
         current = self.owner.settings
-        backend, model = TRANSLATION_ENGINES[self.hytrans_backend_var.get()]
+        backend, model = self.selected_engine()
         if backend in PROVIDERS:
             error = validate_provider_settings(self.api_settings.profiles[backend], backend)
             if error:
                 raise ValueError(f"{BACKEND_LABELS[backend]} API 설정을 확인하세요.\n{error}")
-        detached_geometry = load_detached_geometry(current.detached_geometry)
-        global_hotkey = parse_hotkey(self.global_hotkey_var.get())
+        global_hotkey = parse_hotkey(self.global_hotkey_entry.text())
         if global_hotkey is None:
-            raise ValueError(
-                "전역 단축키는 B 또는 Ctrl+Alt+B처럼 키 하나를 포함해 입력하세요."
-            )
-        hytrans_port = self._read_port(self.hytrans_port_var, "HYTrans")
-        overlayer_port = self._read_port(self.overlayer_port_var, "MekiOverlayer")
-        audio_capture_port = self._read_port(
-            self.audio_capture_port_var, "MekiAudioCapture"
-        )
-        script_port = self._read_port(self.script_port_var, "MekiScript")
-        validate_unique_ports(
-            {
-                "HYTrans": hytrans_port,
-                "MekiOverlayer": overlayer_port,
-                "MekiAudioCapture": audio_capture_port,
-                "MekiScript": script_port,
-            }
-        )
-        opacity = self._read_int_range(self.overlayer_opacity_var, "MekiOverlayer 배경 투명도", 10, 100) / 100.0
-        text_size = self._read_int_range(self.overlayer_text_size_var, "MekiOverlayer 글씨 크기", 8, 96)
-        script_opacity = self._read_int_range(self.script_opacity_var, "MekiScript 배경 투명도", 10, 100) / 100.0
-        script_original_size = self._read_int_range(self.script_original_size_var, "미번역 글씨 크기", 8, 96)
-        script_translated_size = self._read_int_range(self.script_translated_size_var, "번역 글씨 크기", 8, 96)
-        return AppSettings(
-            minimize_to_tray=self.minimize_to_tray_var.get(),
-            main_always_on_top=self.main_topmost_var.get(),
-            detached_always_on_top=self.detached_topmost_var.get(),
-            detached_hide_titlebar=self.detached_hide_titlebar_var.get(),
-            detached_fixed_size=self.detached_fixed_size_var.get(),
-            simple_copy_complete=self.simple_copy_complete_var.get(),
-            global_hotkey_enabled=self.global_hotkey_enabled_var.get(),
+            raise ValueError("전역 단축키는 B 또는 Ctrl+Alt+B처럼 키 하나를 포함해 입력하세요.")
+        ports = (self.hytrans_port.value(), self.overlayer_port.value(),
+                 self.audio_capture_port.value(), self.script_port.value())
+        validate_unique_ports(dict(zip(("HYTrans", "MekiOverlayer", "MekiAudioCapture", "MekiScript"), ports)))
+        detached_geometry = load_detached_geometry(current.detached_geometry)
+        detached_fixed_size = self.detached_fixed_size.isChecked()
+        detached_size = _geometry_size(detached_geometry) if detached_fixed_size else None
+        return replace(
+            current,
+            minimize_to_tray=self.minimize_to_tray.isChecked(),
+            main_always_on_top=self.main_topmost.isChecked(),
+            detached_always_on_top=self.detached_topmost.isChecked(),
+            detached_hide_titlebar=self.detached_hide_titlebar.isChecked(),
+            detached_fixed_size=detached_fixed_size,
+            simple_copy_complete=self.simple_copy_complete.isChecked(),
+            global_hotkey_enabled=self.global_hotkey_enabled.isChecked(),
             global_hotkey=global_hotkey.text,
             detached_geometry=detached_geometry,
-            detached_fixed_width=current.detached_fixed_width,
-            detached_fixed_height=current.detached_fixed_height,
-            realtime_ocr_enabled=self.realtime_ocr_enabled_var.get(),
-            realtime_ocr_interval=normalize_interval(self.realtime_ocr_interval_var.get()),
+            detached_fixed_width=detached_size[0] if detached_size else current.detached_fixed_width,
+            detached_fixed_height=detached_size[1] if detached_size else current.detached_fixed_height,
+            realtime_ocr_enabled=self.realtime_ocr_enabled.isChecked(),
+            realtime_ocr_interval=normalize_interval(self.realtime_ocr_interval.currentText()),
             hytrans_backend=backend,
             hytrans_model_id=model.key,
-            hytrans_port=hytrans_port,
-            overlayer_port=overlayer_port,
-            audio_capture_port=audio_capture_port,
-            script_port=script_port,
-            overlayer_always_on_top=self.overlayer_topmost_var.get(),
-            overlayer_hide_titlebar=self.overlayer_hide_titlebar_var.get(),
-            overlayer_fixed_size=self.overlayer_fixed_size_var.get(),
-            overlayer_exclude_from_capture=self.overlayer_exclude_capture_var.get(),
-            overlayer_bg_color=self._read_color(
-                self.overlayer_bg_color_var,
-                "MekiOverlayer 배경",
-                current.overlayer_bg_color,
-            ),
-            overlayer_bg_opacity=opacity,
-            overlayer_text_color=self._read_color(
-                self.overlayer_text_color_var,
-                "MekiOverlayer 글씨",
-                current.overlayer_text_color,
-            ),
-            overlayer_text_size=text_size,
-            overlayer_text_font=_normalize_font_name(self.overlayer_text_font_var.get()),
-            audio_stt_model=STT_MODEL_IDS_BY_LABEL.get(
-                self.audio_stt_model_var.get(),
-                "parakeet",
-            ),
-            audio_stt_precision=(
-                self.audio_stt_precision_var.get()
-                if self.audio_stt_precision_var.get() in {"fp32", "int8"}
-                else "fp32"
-            ),
-            audio_chunk_preset=(
-                self.audio_chunk_preset_var.get()
-                if self.audio_chunk_preset_var.get() in {"FAST", "BALANCED", "LONG"}
-                else "BALANCED"
-            ),
-            script_always_on_top=self.script_topmost_var.get(),
-            script_bg_color=self._read_color(
-                self.script_bg_color_var,
-                "MekiScript 배경",
-                current.script_bg_color,
-            ),
-            script_bg_opacity=script_opacity,
-            script_original_text_color=self._read_color(
-                self.script_original_color_var,
-                "미번역 글씨",
-                current.script_original_text_color,
-            ),
-            script_original_text_size=script_original_size,
-            script_original_text_font=_normalize_font_name(self.script_original_font_var.get()),
-            script_translated_text_color=self._read_color(
-                self.script_translated_color_var,
-                "번역 글씨",
-                current.script_translated_text_color,
-            ),
-            script_translated_text_size=script_translated_size,
-            script_translated_text_font=_normalize_font_name(self.script_translated_font_var.get()),
-            suppress_magpie_launch_notice=self.suppress_magpie_notice_var.get(),
-            debug_logging=self.debug_logging_var.get(),
+            hytrans_port=ports[0],
+            overlayer_port=ports[1],
+            audio_capture_port=ports[2],
+            script_port=ports[3],
+            overlayer_always_on_top=self.overlayer_topmost.isChecked(),
+            overlayer_hide_titlebar=self.overlayer_hide_titlebar.isChecked(),
+            overlayer_fixed_size=self.overlayer_fixed_size.isChecked(),
+            overlayer_exclude_from_capture=self.overlayer_exclude_capture.isChecked(),
+            overlayer_bg_color=self.overlayer_bg_color.color(),
+            overlayer_bg_opacity=self.overlayer_opacity.value() / 100,
+            overlayer_text_color=self.overlayer_text_color.color(),
+            overlayer_text_size=self.overlayer_text_size.value(),
+            overlayer_text_font=self.overlayer_text_font.currentText(),
+            audio_stt_model=self.audio_stt_model.currentData(),
+            audio_stt_precision=self.audio_stt_precision.currentText(),
+            audio_chunk_preset=self.audio_chunk_preset.currentText(),
+            script_always_on_top=self.script_topmost.isChecked(),
+            script_bg_color=self.script_bg_color.color(),
+            script_bg_opacity=self.script_opacity.value() / 100,
+            script_original_text_color=self.script_original_color.color(),
+            script_original_text_size=self.script_original_size.value(),
+            script_original_text_font=self.script_original_font.currentText(),
+            script_translated_text_color=self.script_translated_color.color(),
+            script_translated_text_size=self.script_translated_size.value(),
+            script_translated_text_font=self.script_translated_font.currentText(),
+            suppress_magpie_launch_notice=self.suppress_magpie_notice.isChecked(),
+            debug_logging=self.debug_logging.isChecked(),
         )
 
     def _on_save(self) -> None:
-        if self.api_settings_dialog is not None and self.api_settings_dialog.winfo_exists():
+        if self.api_settings_dialog is not None:
             self.api_settings_dialog._on_apply()
         try:
             settings = self._collect_settings()
         except ValueError as exc:
-            messagebox.showerror("MekiCopy", str(exc), parent=self)
-            return
-        if settings.detached_fixed_size:
-            detached_size = _geometry_size(settings.detached_geometry)
-            if detached_size:
-                width, height = detached_size
-                settings.detached_fixed_width = width
-                settings.detached_fixed_height = height
-        result = self.owner.apply_settings(settings, persist=True, api_settings=self.api_settings)
-        if result is None:
-            return
-        self._on_close()
-
-    def _on_test_connection(self) -> None:
-        if self.api_settings_dialog is not None and self.api_settings_dialog.winfo_exists():
-            self.api_settings_dialog._on_apply()
-        try:
-            settings = self._collect_settings()
-        except ValueError as exc:
-            messagebox.showerror("MekiCopy", str(exc), parent=self)
+            QMessageBox.critical(self, "MekiCopy", str(exc))
             return
         result = self.owner.apply_settings(settings, persist=True, api_settings=self.api_settings)
-        if result is None:
-            return
-        if result:
-            messagebox.showinfo(
-                "MekiCopy",
-                "HYTrans를 재시작하고 있습니다. 번역 서비스 준비가 끝난 뒤 연결 상태를 확인해 주세요.",
-                parent=self,
-            )
-            return
-        self.owner._on_test_overlay_connection(parent=self)
+        if result is not None:
+            self.accept()
 
-    def _on_close(self) -> None:
-        self._on_global_hotkey_focus_out(None)
-        self.owner.settings_window = None
-        self.destroy()
+    def done(self, result: int) -> None:
+        if self.api_settings_dialog is not None:
+            self.api_settings_dialog.reject()
+        if getattr(self.owner, "settings_window", None) is self:
+            self.owner.settings_window = None
+        super().done(result)

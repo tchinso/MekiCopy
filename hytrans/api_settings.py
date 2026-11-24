@@ -78,7 +78,7 @@ class ApiSettings:
 
 def api_settings_path() -> Path:
     # Settings can move to a writable fallback after a concrete file save
-    # failure. Honor that actual location without importing the Tk application
+    # failure. Honor that actual location without importing the desktop application
     # into an otherwise independent HYTrans API process.
     module = sys.modules.get("mekicopy_settings")
     settings_file = getattr(module, "SETTINGS_FILE", None)

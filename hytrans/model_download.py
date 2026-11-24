@@ -77,6 +77,7 @@ class ModelDownloadManager:
 
         with self._lock:
             self._activate_profile_locked(profile)
+            previous_state, previous_thread = self.state, self._thread
             should_verify = self.state != "DOWNLOADING"
 
         complete = (
@@ -92,6 +93,9 @@ class ModelDownloadManager:
                 self.downloaded_bytes = total_bytes
                 self.current_file = ""
                 self.error_message = ""
+            elif self.state == previous_state == "READY" and self._thread is previous_thread:
+                self.state = "IDLE"
+                self.downloaded_bytes = 0
             return {
                 "ok": self.state != "ERROR",
                 "state": self.state,

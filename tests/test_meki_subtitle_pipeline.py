@@ -76,6 +76,21 @@ class MekiSubtitlePathTests(unittest.TestCase):
 
 
 class MekiSubtitlePipelineTests(unittest.TestCase):
+    def test_unknown_stream_duration_uses_container_duration(self):
+        completed = SimpleNamespace(returncode=0, stdout=(
+            '{"streams":[{"index":1,"duration":"N/A"}],"format":{"duration":"6.25"}}'
+        ))
+        with mock.patch.object(pipeline.subprocess, "run", return_value=completed):
+            info = pipeline.probe_media(Path("clip.mkv"), Path("ffprobe"))
+        self.assertEqual(info.duration, 6.25)
+        self.assertEqual(info.audio_stream_index, 1)
+
+    @staticmethod
+    def _extract_silent_audio(source, target, ffmpeg, duration, **options):
+        if not options["raw_float"]:
+            raise AssertionError("expected raw mono float samples")
+        np.zeros(16_000, dtype="<f4").tofile(target)
+
     @contextmanager
     def _recognized_video(self, root: Path, results=None):
         source = root / "video.mp4"
@@ -85,9 +100,8 @@ class MekiSubtitlePipelineTests(unittest.TestCase):
         with (
             mock.patch.object(pipeline, "prepare_stt_models", return_value={"vad": root / "vad.onnx"}),
             mock.patch.object(pipeline, "probe_media", return_value=pipeline.MediaInfo(2.0, 0, "aac")),
-            mock.patch.object(pipeline, "extract_original_audio"),
+            mock.patch.object(pipeline, "extract_original_audio", side_effect=self._extract_silent_audio),
             mock.patch.object(pipeline, "writable_app_subdir", return_value=root),
-            mock.patch.object(audio_capture_core, "wav_to_mono_16k", return_value=np.zeros(16_000, dtype=np.float32)),
             mock.patch.object(pipeline, "collect_subtitle_segments", return_value=(1, [object()])),
             mock.patch.object(audio_capture_core, "create_recognizer"),
             mock.patch.object(pipeline, "_recognize_segments", return_value=results),
@@ -332,9 +346,8 @@ class MekiSubtitlePipelineTests(unittest.TestCase):
             with (
                 mock.patch.object(pipeline, "prepare_stt_models", return_value={"vad": root / "vad.onnx"}),
                 mock.patch.object(pipeline, "probe_media", return_value=pipeline.MediaInfo(3.0, 0, "aac")),
-                mock.patch.object(pipeline, "extract_original_audio"),
+                mock.patch.object(pipeline, "extract_original_audio", side_effect=self._extract_silent_audio),
                 mock.patch.object(pipeline, "writable_app_subdir", return_value=root),
-                mock.patch.object(audio_capture_core, "wav_to_mono_16k", return_value=np.zeros(16_000, dtype=np.float32)),
                 mock.patch.object(pipeline, "collect_subtitle_segments", return_value=(1, [segment])) as collect,
                 mock.patch.object(audio_capture_core, "create_recognizer", return_value=FakeRecognizer()),
             ):
@@ -370,7 +383,8 @@ class MekiSubtitlePipelineTests(unittest.TestCase):
                 kwargs["progress"]("모델 다운로드 중... 5%")
                 raise AssertionError("cancellation callback should have raised")
 
-            with mock.patch.object(pipeline, "prepare_stt_models", side_effect=prepare):
+            with (mock.patch.object(pipeline, "probe_media", return_value=pipeline.MediaInfo(1, 0, "aac")),
+                  mock.patch.object(pipeline, "prepare_stt_models", side_effect=prepare)):
                 with self.assertRaises(pipeline.SubtitleCancelledError):
                     pipeline.process_video(
                         source,
@@ -410,6 +424,7 @@ class MekiSubtitleIntegrationTests(unittest.TestCase):
         window = SimpleNamespace(
             _translate=translator,
             _events=events,
+            _wakeup=mock.Mock(),
             _emit_status=mock.Mock(),
             _emit_log=mock.Mock(),
             _cancel_event=threading.Event(),
@@ -437,25 +452,15 @@ class MekiSubtitleIntegrationTests(unittest.TestCase):
         events.put.assert_called_once_with(("done", summary))
 
     def test_subtitle_job_does_not_start_when_hytrans_launch_failed(self) -> None:
-        class Value:
-            def __init__(self, value: str) -> None:
-                self.value = value
-
-            def get(self) -> str:
-                return self.value
-
-            def set(self, value: str) -> None:
-                self.value = value
-
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "video.mp4"
             source.touch()
             start_hytrans = mock.Mock(return_value=False)
             window = SimpleNamespace(
-                input_var=Value(str(source)),
-                output_var=Value(str(root / "output.srt")),
-                skip_translation_var=SimpleNamespace(get=lambda: False),
+                input_entry=SimpleNamespace(text=lambda: str(source)),
+                output_entry=SimpleNamespace(text=lambda: str(root / "output.srt"), setText=mock.Mock()),
+                skip_translation_check=SimpleNamespace(isChecked=lambda: False),
                 _start_hytrans=start_hytrans,
             )
             MekiSubtitleWindow._start(window)
@@ -490,12 +495,12 @@ class MekiSubtitleIntegrationTests(unittest.TestCase):
         window = SimpleNamespace(
             _closing=False,
             _cancel=mock.Mock(),
-            withdraw=mock.Mock(),
+            hide=mock.Mock(),
         )
         MekiSubtitleWindow.cancel_for_parent_shutdown(window)
         self.assertTrue(window._closing)
         window._cancel.assert_called_once_with()
-        window.withdraw.assert_called_once_with()
+        window.hide.assert_called_once_with()
 
 
 class MekiSubtitleUiBufferTests(unittest.TestCase):
@@ -503,6 +508,7 @@ class MekiSubtitleUiBufferTests(unittest.TestCase):
     def _buffer_window() -> SimpleNamespace:
         return SimpleNamespace(
             _event_lock=threading.Lock(),
+            _wakeup=mock.Mock(),
             _latest_status=None,
             _pending_logs=deque(),
             _dropped_log_count=0,
@@ -533,15 +539,19 @@ class MekiSubtitleUiBufferTests(unittest.TestCase):
             ],
         )
 
-    def test_visible_log_trim_removes_excess_lines_in_one_batch(self) -> None:
-        log_text = mock.Mock()
-        log_text.index.return_value = "2002.0"
-        window = SimpleNamespace(
-            log_text=log_text,
-            _VISIBLE_LOG_MAX_LINES=2_000,
-        )
-        MekiSubtitleWindow._trim_visible_log(window)
-        log_text.delete.assert_called_once_with("1.0", "3.0")
+    def test_visible_log_keeps_the_latest_lines(self) -> None:
+        from mekicopy_settings import AppSettings
+        from mekicopy_theme import ensure_application
+        ensure_application()
+        window = MekiSubtitleWindow(None, settings=AppSettings(), hytrans_url=lambda: "", start_hytrans=lambda: False)
+        try:
+            count = window._VISIBLE_LOG_MAX_LINES
+            window._append_logs([str(index) for index in range(count + 2)])
+            lines = window.log_text.toPlainText().splitlines()
+            self.assertEqual(len(lines), count)
+            self.assertEqual((lines[0], lines[-1]), ("2", str(count + 1)))
+        finally:
+            window.deleteLater()
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ Windows 셸에 접근할 수 없는 제한된 빌드 환경에서는 `-SkipTrayS
 | 구성 요소 | 버전 / 출처 |
 |---|---|
 | OCR | [meikiocr 0.3.5](https://pypi.org/project/meikiocr/) |
+| GUI | [PySide6 Essentials 6.12.0](https://pypi.org/project/PySide6-Essentials/6.12.0/) · Shiboken6 6.12.0 |
 | 네이티브 추론 | ONNX Runtime / GPU 1.31.1, sherpa-onnx 2.0.1 |
 | 웹 추론 | [Transformers.js 4.3.2](https://github.com/huggingface/transformers.js/releases/tag/4.3.2), ONNX Runtime Web 1.31.1 |
 | 이미지 | Pillow 13.0.0, NumPy 2.5.4, OpenCV headless 5.0.0.93 |
@@ -34,6 +35,8 @@ Windows 셸에 접근할 수 없는 제한된 빌드 환경에서는 `-SkipTrayS
 | 모델 저장소 | huggingface-hub 2.4.0 |
 | 화면 확대 | [Magpie 0.13.0](https://github.com/Blinue/Magpie/releases/tag/v0.13.0) x64 |
 | 미디어 도구 | [FFmpeg / FFprobe 9.0.2 essentials](https://www.gyan.dev/ffmpeg/builds/) |
+
+GUI 실행 파일에는 Qt 라이브러리와 Windows 플랫폼 플러그인이 함께 들어갑니다. PySide6와 Qt 고지 및 소스 링크는 각 GUI 실행 파일의 `_internal/licenses/Qt`에 있습니다.
 
 Transformers.js는 공식 태그 `4.3.2`의 `packages/transformers/scripts/build.mjs`로 생성합니다. `packages/transformers/package.json`의 `onnxruntime-web`과 `onnxruntime-node`를 안정판 `1.31.1`로 고정하고 설치한 뒤 해당 스크립트를 실행합니다. 번들과 WASM은 동일한 ONNX Runtime 버전을 사용해야 하며, 출처·도구 버전·개별 SHA-256은 `assets/runtime_manifest.json`에 기록합니다. 파일 변경 후 해시도 갱신해야 빌드가 통과합니다.
 

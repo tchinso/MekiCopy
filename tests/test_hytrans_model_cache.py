@@ -12,7 +12,18 @@ from unittest import mock
 from fastapi import HTTPException
 
 from hytrans import model_cache
+from hytrans import model_download
 from hytrans.model_files import MT15_PROFILE, ModelFileSpec
+
+
+class DownloadStatusTests(unittest.TestCase):
+    def test_removed_model_files_invalidate_ready_status(self):
+        manager = model_download.ModelDownloadManager()
+        with mock.patch.object(model_download, "is_complete_model", side_effect=[True, False]):
+            self.assertEqual(manager.status()["state"], "READY")
+            status = manager.status()
+        self.assertEqual(status["state"], "IDLE")
+        self.assertEqual(status["downloadedBytes"], 0)
 
 
 class CacheUploadTests(unittest.IsolatedAsyncioTestCase):

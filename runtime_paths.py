@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import ctypes
-import hashlib
 import os
-import shutil
 import sys
 import tempfile
 import threading
@@ -18,52 +15,12 @@ FORCE_DATA_DIR_ENV = "MEKICOPY_FORCE_DATA_DIR"
 _DATA_DIR_CACHE: dict[tuple[str, str, str, str], Path] = {}
 _DATA_SUBDIR_CACHE: dict[tuple[str, str, str, str, str], Path] = {}
 _DATA_DIR_LOCK = threading.RLock()
-_TK_RUNTIME_SYNC_LOCK = threading.RLock()
 
 
 def app_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
-
-
-def is_ascii_path(path: str | Path) -> bool:
-    try:
-        str(path).encode("ascii")
-        return True
-    except UnicodeEncodeError:
-        return False
-
-
-def windows_short_path(path: str | Path) -> str | None:
-    if os.name != "nt":
-        return None
-    try:
-        source = str(Path(path).resolve())
-    except OSError:
-        source = str(path)
-
-    get_short = ctypes.windll.kernel32.GetShortPathNameW
-    required = get_short(source, None, 0)
-    if required <= 0:
-        return None
-    buffer = ctypes.create_unicode_buffer(required)
-    written = get_short(source, buffer, required)
-    if written <= 0:
-        return None
-    short = buffer.value
-    if short and is_ascii_path(short):
-        return short
-    return None
-
-
-def path_for_tcl(path: str | Path) -> str:
-    if is_ascii_path(path):
-        return str(path)
-    short = windows_short_path(path)
-    if short:
-        return short
-    return str(path)
 
 
 def _program_data_root() -> Path | None:
@@ -225,11 +182,8 @@ def exclusive_file_lock(
 ) -> Iterator[None]:
     """Acquire a small cross-process lock file.
 
-    Tcl/Tk's script folders are copied lazily when the executable lives below a
-    non-ASCII path.  Several companion executables can start simultaneously,
-    so a process-local lock alone is insufficient.  The lock is released by
-    the operating system if a process exits unexpectedly; the lock file itself
-    is deliberately retained and harmless.
+    The operating system releases the lock if a process exits unexpectedly.
+    The lock file can be reused by future processes.
     """
     lock_path = Path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -280,147 +234,3 @@ def exclusive_file_lock(
                 # The operating system will release a process-owned lock on
                 # close even if an explicit unlock fails.
                 pass
-
-
-def tk_runtime_roots(runtime_dirname: str) -> list[Path]:
-    secondary: list[Path] = []
-    override = os.environ.get(DATA_DIR_ENV)
-    if override:
-        secondary.append(Path(override).expanduser() / runtime_dirname)
-
-    local_app_data = _local_app_data_root()
-    if local_app_data:
-        secondary.append(local_app_data / runtime_dirname)
-
-    program_data = _program_data_root()
-    if program_data:
-        secondary.append(program_data / runtime_dirname)
-
-    secondary.append(Path(tempfile.gettempdir()) / "MekiCopy" / runtime_dirname)
-    force_override = os.environ.get(FORCE_DATA_DIR_ENV, "").strip().lower()
-    forced = force_override in {"1", "true", "yes", "on"} and bool(override)
-    candidates = (
-        [*secondary, app_root() / runtime_dirname]
-        if forced
-        else [app_root() / runtime_dirname, *secondary]
-    )
-    return _dedupe(candidates)
-
-
-def sync_tk_runtime(
-    source_tcl: str | Path,
-    source_tk: str | Path,
-    target_root: str | Path,
-) -> tuple[Path, Path]:
-    source_tcl_path = Path(source_tcl)
-    source_tk_path = Path(source_tk)
-    target_root_path = Path(target_root)
-    target_tcl = target_root_path / "tcl8.6"
-    target_tk = target_root_path / "tk8.6"
-    marker = target_root_path / ".runtime_signature"
-
-    digest = hashlib.sha256()
-    for script in (source_tcl_path / "init.tcl", source_tk_path / "tk.tcl"):
-        digest.update(script.read_bytes())
-    expected_signature = digest.hexdigest()
-
-    # Copying both script trees must be a single transaction from every
-    # companion process's perspective.  Without this lock, two frozen
-    # executables can interleave ``copytree`` calls and leave Tcl seeing a
-    # half-populated directory on startup.
-    target_root_path.mkdir(parents=True, exist_ok=True)
-    lock_path = target_root_path / ".runtime_sync.lock"
-    with _TK_RUNTIME_SYNC_LOCK, exclusive_file_lock(lock_path):
-        current_signature = ""
-        try:
-            current_signature = marker.read_text(encoding="ascii").strip()
-        except OSError:
-            pass
-
-        runtime_is_current = (
-            current_signature == expected_signature
-            and (target_tcl / "init.tcl").is_file()
-            and (target_tk / "tk.tcl").is_file()
-        )
-        if not runtime_is_current:
-            shutil.copytree(source_tcl_path, target_tcl, dirs_exist_ok=True)
-            shutil.copytree(source_tk_path, target_tk, dirs_exist_ok=True)
-            temporary_marker = marker.with_name(
-                f"{marker.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-            )
-            try:
-                temporary_marker.write_text(expected_signature, encoding="ascii")
-                os.replace(temporary_marker, marker)
-            finally:
-                try:
-                    temporary_marker.unlink(missing_ok=True)
-                except OSError:
-                    pass
-
-    return target_tcl, target_tk
-
-
-def prepare_tk_environment(runtime_dirname: str = "MekiCopyRuntime") -> bool:
-    """Set ASCII-safe Tcl/Tk paths before tkinter imports _tkinter."""
-    if os.name != "nt":
-        return True
-
-    resource_root = Path(getattr(sys, "_MEIPASS", app_root()))
-    application_root = app_root()
-    base_root = Path(sys.base_prefix)
-    if getattr(sys, "frozen", False):
-        tcl_candidates = [
-            resource_root / "_tcl_data",
-            resource_root / "tcl" / "tcl8.6",
-            resource_root / runtime_dirname / "tcl8.6",
-            application_root / runtime_dirname / "tcl8.6",
-            base_root / "tcl" / "tcl8.6",
-        ]
-        tk_candidates = [
-            resource_root / "_tk_data",
-            resource_root / "tcl" / "tk8.6",
-            resource_root / runtime_dirname / "tk8.6",
-            application_root / runtime_dirname / "tk8.6",
-            base_root / "tcl" / "tk8.6",
-        ]
-    else:
-        # Source runs must use the Tcl scripts matching the active Python DLL.
-        # A checked-in runtime may have been produced by a different Python/Tcl.
-        tcl_candidates = [
-            base_root / "tcl" / "tcl8.6",
-            application_root / runtime_dirname / "tcl8.6",
-        ]
-        tk_candidates = [
-            base_root / "tcl" / "tk8.6",
-            application_root / runtime_dirname / "tk8.6",
-        ]
-    source_tcl = next((path for path in tcl_candidates if (path / "init.tcl").is_file()), None)
-    source_tk = next((path for path in tk_candidates if (path / "tk.tcl").is_file()), None)
-    if source_tcl is None or source_tk is None:
-        return False
-
-    def activate(tcl_path: str | Path, tk_path: str | Path) -> bool:
-        tcl_env = path_for_tcl(tcl_path)
-        tk_env = path_for_tcl(tk_path)
-        if not is_ascii_path(tcl_env) or not is_ascii_path(tk_env):
-            return False
-        if not (Path(tcl_env) / "init.tcl").is_file() or not (Path(tk_env) / "tk.tcl").is_file():
-            return False
-        os.environ["TCL_LIBRARY"] = tcl_env.replace("\\", "/")
-        os.environ["TK_LIBRARY"] = tk_env.replace("\\", "/")
-        return True
-
-    if activate(source_tcl, source_tk):
-        return True
-
-    for safe_root in tk_runtime_roots(runtime_dirname):
-        safe_root_text = path_for_tcl(safe_root)
-        if not is_ascii_path(safe_root_text):
-            continue
-        try:
-            safe_tcl, safe_tk = sync_tk_runtime(source_tcl, source_tk, safe_root_text)
-        except OSError:
-            continue
-        if activate(safe_tcl, safe_tk):
-            return True
-    return False

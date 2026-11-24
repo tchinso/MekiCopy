@@ -72,7 +72,7 @@ pLaMo-3와 HY-MT1.5는 모델 로드가 완료된 뒤 음성 인식을 시작합
 - [빌드 안내](BUILDING.md): Lite/Full 빌드·고정 자산·소스와 라이선스
 - [검증 기록](VALIDATION.md): 수행한 검사와 확인 범위
 
-소스에서 실행하려면 Python 3.12~3.14와 Tcl/Tk를 설치한 뒤 `install_mekiocr.bat`, `run_mekicopy.bat` 순서로 실행하세요. 고정 의존성은 [requirements-build.txt](requirements-build.txt)에 있습니다.
+소스에서 실행하려면 Python 3.12~3.14를 설치한 뒤 `install_mekiocr.bat`, `run_mekicopy.bat` 순서로 실행하세요. 고정 의존성은 [requirements-build.txt](requirements-build.txt)에 있습니다.
 
 ## 라이선스
 

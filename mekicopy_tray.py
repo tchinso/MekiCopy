@@ -3,7 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import threading
-import tkinter as tk
+from PySide6.QtWidgets import QWidget
 from ctypes import wintypes
 from typing import Callable
 
@@ -73,14 +73,14 @@ class WindowsTrayIcon:
     LR_LOADFROMFILE = 0x00000010
     LR_DEFAULTSIZE = 0x00000040
     IDI_APPLICATION = 32512
-    # The native window only needs a Tk-side poll while the tray icon is
+    # The native window only needs a GUI-thread poll while the tray icon is
     # visible.  100 ms is still immediate to a person clicking the icon and
     # avoids a permanent 40 Hz idle timer in the main process.
     RESTORE_POLL_MS = 100
 
     def __init__(
         self,
-        root: tk.Tk,
+        root: QWidget,
         tooltip: str,
         on_restore: Callable[[], None],
     ) -> None:
@@ -143,7 +143,7 @@ class WindowsTrayIcon:
                 self.RESTORE_POLL_MS,
                 self._poll_restore_requests,
             )
-        except tk.TclError:
+        except RuntimeError:
             self._closed = True
 
     def _cancel_restore_poll(self) -> None:
@@ -151,7 +151,7 @@ class WindowsTrayIcon:
             return
         try:
             self.root.after_cancel(self._poll_after_id)
-        except tk.TclError:
+        except RuntimeError:
             pass
         self._poll_after_id = None
 
@@ -252,8 +252,8 @@ class WindowsTrayIcon:
                 self.WM_LBUTTONDBLCLK,
                 self.WM_RBUTTONUP,
             ):
-                # A ctypes WndProc must remain tiny. Calling into Tk from here can
-                # re-enter Tcl during native message dispatch. Tk polls this event.
+                # Keep the native handler independent of Qt widget calls. A deferred
+                # callback can safely restore the window after native dispatch.
                 self._restore_requested.set()
                 return 0
             return user32.DefWindowProcW(hwnd, msg, wparam, lparam)

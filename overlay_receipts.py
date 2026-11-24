@@ -1,4 +1,4 @@
-"""Bounded display receipts shared by the HTTP threads and the Tk consumer."""
+"""Bounded display receipts shared by the HTTP threads and the GUI consumer."""
 from __future__ import annotations
 
 from collections import OrderedDict

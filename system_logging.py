@@ -334,14 +334,3 @@ def install_exception_hooks() -> None:
 
     sys.excepthook = sys_hook
     threading.excepthook = thread_hook
-
-
-def install_tk_exception_hook(root) -> None:
-    def report_callback_exception(exc_type, exc_value, exc_tb) -> None:
-        log_error(
-            "tk_callback",
-            exc_value,
-            traceback_text="".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
-        )
-
-    root.report_callback_exception = report_callback_exception

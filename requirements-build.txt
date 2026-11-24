@@ -1,5 +1,7 @@
 # Reproducible Windows build/runtime dependencies (verified 2026-11-07).
 pyinstaller==6.22.3
+PySide6-Essentials==6.12.0
+shiboken6==6.12.0
 meikiocr==0.3.5
 mss==10.2.0
 pillow==13.0.0

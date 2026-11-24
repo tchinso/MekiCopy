@@ -1,4 +1,4 @@
-"""Windows application identity and Tk icon helpers shared by companion apps."""
+"""Windows application identity and icons shared by companion apps."""
 
 from __future__ import annotations
 
@@ -43,15 +43,10 @@ def set_windows_app_id(app_name: str) -> None:
         pass
 
 
-def apply_tk_icon(window) -> None:
-    """Apply the bundled multi-size ICO to a Tk window and its taskbar button."""
+def apply_qt_icon(window) -> None:
+    """Apply the bundled multi-size ICO to a window and its taskbar button."""
+    from PySide6.QtGui import QIcon
+
     icon_path = resource_file()
-    if icon_path is None:
-        return
-    try:
-        window.iconbitmap(default=str(icon_path))
-    except Exception:
-        try:
-            window.iconbitmap(str(icon_path))
-        except Exception:
-            pass
+    if icon_path is not None:
+        window.setWindowIcon(QIcon(str(icon_path)))

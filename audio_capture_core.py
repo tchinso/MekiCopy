@@ -735,9 +735,8 @@ def validate_tokens_file(tokens_path: Path) -> int:
 
     if not seen:
         raise ValueError("음성 모델 토큰 사전이 비어 있습니다.")
-    expected = set(range(max(seen) + 1))
-    if seen != expected:
-        missing = min(expected - seen)
+    if max(seen) + 1 != len(seen):
+        missing = next(index for index in range(len(seen)) if index not in seen)
         raise ValueError(f"음성 모델 토큰 사전에 ID {missing}이(가) 없습니다.")
     return len(seen)
 

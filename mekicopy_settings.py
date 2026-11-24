@@ -9,12 +9,10 @@ import os
 import re
 import shutil
 import threading
-import tkinter as tk
 import uuid
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import font as tkfont
 
 from mekicopy_capture import MIN_SIZE_PX, Region
 from mekicopy_hotkey import DEFAULT_GLOBAL_HOTKEY, normalize_hotkey
@@ -37,7 +35,12 @@ from service_ports import (
 
 DETACHED_DEFAULT_GEOMETRY = "260x160+120+120"
 KOREAN_FONT_TEST_CHARACTER = "쿈"
-GEOMETRY_RE = re.compile(r"([1-9][0-9]*)x([1-9][0-9]*)(?:[+-]-?[0-9]+[+-]-?[0-9]+)?")
+MAX_DETACHED_DIMENSION = 32_768
+MAX_DETACHED_COORDINATE = 1_000_000
+GEOMETRY_RE = re.compile(
+    r"([1-9][0-9]{0,4})x([1-9][0-9]{0,4})"
+    r"(?:(\+-[0-9]{1,7}|[+-][0-9]{1,7})(\+-[0-9]{1,7}|[+-][0-9]{1,7}))?"
+)
 HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 _STATE_FILENAMES = (
     "bookmarks.txt",
@@ -469,16 +472,6 @@ def _font_has_character(font_name: str, character: str = KOREAN_FONT_TEST_CHARAC
         gdi32.DeleteDC(hdc)
 
 
-def _korean_font_families(root: tk.Misc) -> list[str]:
-    font_names = sorted({_normalize_font_name(name) for name in tkfont.families(root) if name})
-    return [name for name in font_names if _font_has_character(name)]
-
-
-def _japanese_font_families(root: tk.Misc) -> list[str]:
-    font_names = sorted({_normalize_font_name(name) for name in tkfont.families(root) if name})
-    return [name for name in font_names if _font_has_character(name, "ー")]
-
-
 _CONFIG_UNSET = configparser._UNSET
 
 
@@ -708,16 +701,22 @@ def load_detached_geometry(fallback: str = DETACHED_DEFAULT_GEOMETRY) -> str:
     return fallback if _geometry_size(fallback) is not None else DETACHED_DEFAULT_GEOMETRY
 
 
-def _geometry_size(geometry: str) -> tuple[int, int] | None:
+def parse_detached_geometry(geometry: str) -> tuple[int, int, int, int] | None:
     if not isinstance(geometry, str):
         return None
     match = GEOMETRY_RE.fullmatch(geometry)
     if match is None:
         return None
-    try:
-        return int(match[1]), int(match[2])
-    except ValueError:
+    width, height = int(match[1]), int(match[2])
+    x, y = (int(item.removeprefix("+")) if item else 120 for item in (match[3], match[4]))
+    if max(width, height) > MAX_DETACHED_DIMENSION or max(abs(x), abs(y)) > MAX_DETACHED_COORDINATE:
         return None
+    return width, height, x, y
+
+
+def _geometry_size(geometry: str) -> tuple[int, int] | None:
+    parsed = parse_detached_geometry(geometry)
+    return parsed[:2] if parsed is not None else None
 
 
 def load_bookmarks() -> dict[str, Bookmark]:

@@ -7,6 +7,14 @@ from overlay_receipts import DisplayReceipts
 
 
 class DisplayValidationTests(unittest.TestCase):
+    def test_false_string_and_invalid_color_do_not_enable_or_partially_apply_config(self):
+        config = OverlayConfig()
+        config.update_from_dict({"topmost": "false"})
+        self.assertFalse(config.topmost)
+        with self.assertRaises(ValueError):
+            config.update_from_dict({"topmost": True, "bg_color": "not-a-color"})
+        self.assertFalse(config.topmost)
+
     def test_invalid_numeric_configuration_is_atomic(self):
         for config, method, size_key in ((ScriptConfig(), "update", "original_size"),
                                          (OverlayConfig(), "update_from_dict", "text_size")):
@@ -34,13 +42,12 @@ class DisplayValidationTests(unittest.TestCase):
 
 class DisplayEventRecoveryTests(unittest.TestCase):
     def test_bad_configuration_does_not_stop_transcript_events(self):
-        import queue
         from unittest import mock
         from meki_script import ScriptWindow
-        window = object.__new__(ScriptWindow)
-        window.root = mock.Mock()
-        window.config = ScriptConfig()
-        window.events = queue.Queue()
+        from mekicopy_theme import ensure_application
+        ensure_application()
+        window = ScriptWindow(ScriptConfig())
+        self.addCleanup(window.deleteLater)
         window.events.put(("config", {"original_size": "invalid"}))
         window.events.put(("append", {"id": "one", "text": "hello"}))
         window._append = mock.Mock()
@@ -49,5 +56,4 @@ class DisplayEventRecoveryTests(unittest.TestCase):
             window.drain()
         log.assert_called_once()
         window._append.assert_called_once_with({"id": "one", "text": "hello"})
-        window.root.after.assert_called_once()
         window.apply_config.assert_not_called()

@@ -68,15 +68,14 @@ class MeikiOcrGpuSelectionTests(unittest.TestCase):
         self.assertEqual(engine.active_provider, "CPUExecutionProvider")
         factory.assert_called_once_with(provider="CUDAExecutionProvider")
 
-    def test_partial_cuda_fallback_recreates_a_clean_cpu_engine(self) -> None:
+    def test_partial_cuda_fallback_preserves_accelerated_sessions(self) -> None:
         partially_accelerated = SimpleNamespace(
             active_provider="CUDAExecutionProvider",
             det_session=_Session(["CUDAExecutionProvider"]),
             rec_session=_Session(["CPUExecutionProvider"]),
             vrec_session=_Session(["CUDAExecutionProvider"]),
         )
-        clean_cpu_engine = _engine("CPUExecutionProvider", "CPUExecutionProvider")
-        factory = mock.Mock(side_effect=[partially_accelerated, clean_cpu_engine])
+        factory = mock.Mock(return_value=partially_accelerated)
         fake_meikiocr = SimpleNamespace(MeikiOCR=factory)
 
         with (
@@ -89,14 +88,8 @@ class MeikiOcrGpuSelectionTests(unittest.TestCase):
         ):
             engine = mekicopy_ocr._create_best_meikiocr_engine(fake_meikiocr)
 
-        self.assertIs(engine, clean_cpu_engine)
-        self.assertEqual(
-            factory.call_args_list,
-            [
-                mock.call(provider="CUDAExecutionProvider"),
-                mock.call(provider="CPUExecutionProvider"),
-            ],
-        )
+        self.assertIs(engine, partially_accelerated)
+        factory.assert_called_once_with(provider="CUDAExecutionProvider")
 
 
 
@@ -208,7 +201,6 @@ class OcrTranslationTests(unittest.TestCase):
         complete = mock.Mock()
         parent = mock.Mock()
         with (
-            mock.patch.object(mekicopy_ocr, "_prepare_tk_library_paths"),
             mock.patch.object(mekicopy_ocr, "load_settings", return_value=settings),
             mock.patch.object(mekicopy_ocr, "ocr_region", return_value="原文") as capture,
             mock.patch.object(mekicopy_ocr, "request_translation_and_show") as translate,
@@ -230,7 +222,6 @@ class OcrTranslationTests(unittest.TestCase):
         for text in (None, "", "  "):
             with self.subTest(text=text):
                 with (
-                    mock.patch.object(mekicopy_ocr, "_prepare_tk_library_paths"),
                     mock.patch.object(mekicopy_ocr, "load_settings", return_value=AppSettings()),
                     mock.patch.object(mekicopy_ocr, "ocr_region", return_value=text),
                     mock.patch.object(mekicopy_ocr, "request_translation_and_show") as translate,
@@ -242,7 +233,6 @@ class OcrTranslationTests(unittest.TestCase):
     def test_failed_translation_reports_failure_without_success_callback(self) -> None:
         complete = mock.Mock()
         with (
-            mock.patch.object(mekicopy_ocr, "_prepare_tk_library_paths"),
             mock.patch.object(mekicopy_ocr, "load_settings", return_value=AppSettings()),
             mock.patch.object(mekicopy_ocr, "ocr_region", return_value="原文"),
             mock.patch.object(
@@ -262,6 +252,22 @@ if __name__ == "__main__":
 
 
 class OcrCancellationTests(unittest.TestCase):
+    def test_equal_pixels_reuse_ocr_and_changes_invalidate_it(self):
+        from PIL import Image
+        engine = mock.Mock()
+        engine.run_ocr.side_effect = [[{"text": "first"}], [], [{"text": "reshaped"}]]
+        image = Image.new("RGB", (2, 1), (1, 2, 3))
+        with mock.patch.object(mekicopy_ocr, "_get_ocr_engine", return_value=engine):
+            self.assertEqual(mekicopy_ocr.recognize_image(image), "first")
+            self.assertEqual(mekicopy_ocr.recognize_image(image.convert("RGBA")), "first")
+            self.assertEqual(engine.run_ocr.call_args.args[0][0, 0].tolist(), [3, 2, 1])
+            image.putpixel((1, 0), (0, 2, 3))
+            self.assertEqual(mekicopy_ocr.recognize_image(image), "")
+            self.assertEqual(mekicopy_ocr.recognize_image(image.copy()), "")
+            self.assertEqual(mekicopy_ocr.recognize_image(
+                Image.frombytes("RGB", (1, 2), image.tobytes())), "reshaped")
+        self.assertEqual(engine.run_ocr.call_count, 3)
+
     def tearDown(self):
         mekicopy_ocr.take_ocr_progress()
 
@@ -346,13 +352,16 @@ class DetachedOcrProgressTests(unittest.TestCase):
         import mekicopy
         runner = mock.Mock()
         button = mock.Mock()
+        button.property.return_value = "primary"
         window = SimpleNamespace(_task_runner=runner, button=button,
                                  _ocr_progress_text="GPU runtime 45%", settings=AppSettings(realtime_ocr_enabled=False),
                                  ocr_action_label=lambda: "translate")
         with mock.patch.object(mekicopy, "detached_translation_locked", return_value=False):
             runner.is_running.return_value = True
             mekicopy.DetachedOcrButtonApp._refresh_realtime_lock(window)
-            button.config.assert_called_with(text="GPU runtime 45%", state="disabled")
+            button.setText.assert_called_with("GPU runtime 45%")
+            button.setEnabled.assert_called_with(False)
             runner.is_running.return_value = False
             mekicopy.DetachedOcrButtonApp._refresh_realtime_lock(window)
-            button.config.assert_called_with(text="translate", state="normal")
+            button.setText.assert_called_with("translate")
+            button.setEnabled.assert_called_with(True)

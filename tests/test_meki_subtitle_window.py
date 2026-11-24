@@ -5,11 +5,13 @@ import json
 import queue
 import tempfile
 import threading
-import tkinter as tk
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+from PySide6.QtWidgets import QWidget
+from mekicopy_theme import ensure_application
 
 import meki_subtitle_window as subtitle_ui
 from meki_subtitle_pipeline import SubtitleCancelledError
@@ -26,6 +28,7 @@ class SubtitleJobOrderingTests(unittest.TestCase):
             _emit_log=mock.Mock(),
             _cancel_event=threading.Event(),
             _events=queue.Queue(),
+            _wakeup=mock.Mock(),
         )
 
     def test_local_model_readiness_precedes_any_video_processing(self) -> None:
@@ -132,12 +135,9 @@ class SubtitleReadinessTests(unittest.TestCase):
 
 class SubtitleOptionsUiTests(unittest.TestCase):
     def setUp(self) -> None:
-        try:
-            self.root = tk.Tk()
-        except tk.TclError as exc:
-            self.skipTest(f"Tk display unavailable: {exc}")
-        self.root.withdraw()
-        self.addCleanup(self.root.destroy)
+        self.application = ensure_application()
+        self.root = QWidget()
+        self.addCleanup(self.root.deleteLater)
         self.start_hytrans = mock.Mock(return_value=True)
         self.settings = SimpleNamespace(
             audio_stt_precision="int8", audio_stt_model="parakeet",
@@ -147,18 +147,17 @@ class SubtitleOptionsUiTests(unittest.TestCase):
             self.root, settings=self.settings,
             hytrans_url=lambda: "http://localhost:6996", start_hytrans=self.start_hytrans,
         )
-        self.window.withdraw()
-        self.addCleanup(self.window.destroy)
+        self.addCleanup(self.window.deleteLater)
 
     def _start(self, *, japanese_only: bool, backend: str = "local"):
         self.settings.hytrans_backend = backend
-        self.window.skip_translation_var.set(japanese_only)
+        self.window.skip_translation_check.setChecked(japanese_only)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "video.mp4"
             source.touch()
-            self.window.input_var.set(str(source))
-            self.window.output_var.set(str(root / ("video.ja.srt" if japanese_only else "video.ko.srt")))
+            self.window.input_entry.setText(str(source))
+            self.window.output_entry.setText(str(root / ("video.ja.srt" if japanese_only else "video.ko.srt")))
             with mock.patch.object(subtitle_ui.threading, "Thread") as thread:
                 thread.return_value.is_alive.return_value = False
                 self.window._start()
@@ -182,17 +181,15 @@ class SubtitleOptionsUiTests(unittest.TestCase):
         self.assertEqual(args[4:], (True, False))
 
     def test_translation_option_updates_output_language_and_action(self) -> None:
-        self.assertFalse(self.window.skip_translation_var.get())
-        self.window.output_var.set("video.ko.srt")
-        self.window.skip_translation_var.set(True)
-        self.window._on_translation_changed()
-        self.assertEqual(self.window.output_var.get(), "video.ja.srt")
-        self.assertIn("일본어", self.window.start_button.cget("text"))
-        self.assertEqual(self.window.translation_model_var.get(), "사용하지 않음 · 일본어 SRT만 생성")
-        self.window.skip_translation_var.set(False)
-        self.window._on_translation_changed()
-        self.assertEqual(self.window.output_var.get(), "video.ko.srt")
-        self.assertIn("한국어", self.window.start_button.cget("text"))
+        self.assertFalse(self.window.skip_translation_check.isChecked())
+        self.window.output_entry.setText("video.ko.srt")
+        self.window.skip_translation_check.setChecked(True)
+        self.assertEqual(self.window.output_entry.text(), "video.ja.srt")
+        self.assertIn("일본어", self.window.start_button.text())
+        self.assertEqual(self.window.translation_model_label.text(), "사용하지 않음 · 일본어 SRT만 생성")
+        self.window.skip_translation_check.setChecked(False)
+        self.assertEqual(self.window.output_entry.text(), "video.ko.srt")
+        self.assertIn("한국어", self.window.start_button.text())
 
 
 if __name__ == "__main__":

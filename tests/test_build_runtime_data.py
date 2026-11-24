@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from build_runtime_data import ssl_runtime_data
+from build_runtime_data import ssl_runtime_data, without_windows_icu
 
 
 class SslRuntimeDataTests(unittest.TestCase):
@@ -24,3 +24,14 @@ class SslRuntimeDataTests(unittest.TestCase):
             root = Path(temporary)
             (root / "codex-rejected-cas.pem").mkdir()
             self.assertEqual(ssl_runtime_data(root / "ssl.py"), [])
+
+
+class QtRuntimeDataTests(unittest.TestCase):
+    def test_external_icu_cannot_shadow_the_windows_runtime(self):
+        qt = (r"PySide6\Qt6Core.dll", "qt/Qt6Core.dll", "BINARY")
+        binaries = [
+            ("ICUUC.dll", "poppler/icuuc.dll", "BINARY"),
+            ("icudt78.dll", "poppler/icudt78.dll", "BINARY"),
+            qt,
+        ]
+        self.assertEqual(without_windows_icu(binaries), [qt])

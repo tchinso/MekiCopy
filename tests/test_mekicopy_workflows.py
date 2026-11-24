@@ -95,7 +95,8 @@ class TranslationStatusTests(unittest.TestCase):
     def test_live_status_discards_a_probe_completed_after_settings_change(self) -> None:
         window = SimpleNamespace(
             _closing=False, _workflow_mode="audio", active_tab_name="소리 번역",
-            state=lambda: "normal", settings=AppSettings(hytrans_backend="groq"),
+            isVisible=lambda: True, isMinimized=lambda: False,
+            settings=AppSettings(hytrans_backend="groq"),
             _hytrans_base_url=lambda: "http://127.0.0.1:5000", hytrans_process=None,
             _hytrans_config_fingerprint="original", _hytrans_restart_after_id=None,
             _translation_status_api_model="model", _translation_status_last_target=None,

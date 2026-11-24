@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import queue
 import threading
 from types import SimpleNamespace
 import unittest
@@ -8,33 +7,30 @@ from unittest import mock
 
 import mekicopy_companions as companions
 from companion_watchdog import default_health_evaluator
-from meki_overlayer import OverlayerApp
+from meki_overlayer import OverlayConfig, OverlayerApp
+from mekicopy_theme import ensure_application
 from overlay_receipts import DisplayReceipts
 
 
 class OverlayDisplayReceiptTests(unittest.TestCase):
     def app(self):
-        app = object.__new__(OverlayerApp)
-        app.events = queue.Queue()
-        app._text_lock = threading.Lock()
-        app._pending_text = None
-        app._pending_request_id = None
-        app.display_receipts = DisplayReceipts()
-        app.label = SimpleNamespace(configure=mock.Mock())
-        app.root = SimpleNamespace(deiconify=mock.Mock(), lift=mock.Mock(),
-                                   update_idletasks=mock.Mock(), after=mock.Mock())
+        ensure_application()
+        with mock.patch("meki_overlayer.TopmostWindowController"):
+            app = OverlayerApp(OverlayConfig())
+        self.addCleanup(app.deleteLater)
+        self.addCleanup(app.hide)
         return app
 
-    def test_receipt_waits_until_tk_redraw_has_completed(self):
+    def test_receipt_waits_until_qt_redraw_has_completed(self):
         app = self.app()
         receipt = app.display_receipts.create("one")
         app.enqueue_text("translation", "one")
         self.assertFalse(receipt.event.is_set())
-        app.root.update_idletasks.side_effect = lambda: self.assertFalse(receipt.event.is_set())
-        app._drain_events()
+        with mock.patch.object(app.label, "repaint", side_effect=lambda: self.assertFalse(receipt.event.is_set())):
+            app._drain_events()
         self.assertTrue(receipt.displayed)
         self.assertIsNotNone(receipt.completed_at)
-        app.label.configure.assert_called_once_with(text="translation")
+        self.assertEqual(app.label.text(), "translation")
 
     def test_superseded_text_fails_receipt_instead_of_claiming_display(self):
         app = self.app()
@@ -47,13 +43,13 @@ class OverlayDisplayReceiptTests(unittest.TestCase):
         app._drain_events()
         self.assertTrue(second.displayed)
 
-    def test_cancelled_pending_text_never_touches_tk(self):
+    def test_cancelled_pending_text_leaves_widget_unchanged(self):
         app = self.app()
         receipt = app.display_receipts.create("one")
         app.enqueue_text("stale", "one")
         app.cancel_display("one")
         app._drain_events()
-        app.label.configure.assert_not_called()
+        self.assertEqual(app.label.text(), "")
         self.assertFalse(receipt.displayed)
         self.assertTrue(receipt.event.is_set())
 
@@ -61,8 +57,8 @@ class OverlayDisplayReceiptTests(unittest.TestCase):
         app = self.app()
         receipt = app.display_receipts.create("one")
         app.enqueue_text("text", "one")
-        app.label.configure.side_effect = RuntimeError("destroyed")
-        with mock.patch("meki_overlayer.log_error"):
+        with mock.patch.object(app.label, "setText", side_effect=RuntimeError("destroyed")), \
+             mock.patch("meki_overlayer.log_error"):
             app._drain_events()
         self.assertEqual(receipt.error, "destroyed")
         self.assertFalse(receipt.displayed)

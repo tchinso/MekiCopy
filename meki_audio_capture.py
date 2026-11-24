@@ -21,7 +21,11 @@ from typing import Any, Callable, NamedTuple
 import numpy as np
 import soundcard as sc
 
-from app_identity import apply_tk_icon, set_windows_app_id
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+
+from app_identity import apply_qt_icon, set_windows_app_id
+from qt_companion import UiWakeup
 from companion_liveness import UiHeartbeat
 from companion_json import read_json, write_json
 from companion_manual_close import MANUAL_CLOSE_EXIT_CODE, publish_manual_close_signal
@@ -50,7 +54,7 @@ from audio_capture_core import (
     translate_text,
     wav_to_mono_16k,
 )
-from runtime_paths import prepare_tk_environment, writable_app_subdir
+from runtime_paths import writable_app_subdir
 from meki_subtitle_vad import (
     SileroProbabilityModel,
     VadBoundary,
@@ -59,18 +63,8 @@ from meki_subtitle_vad import (
     settings_for_preset,
 )
 from mekicopy_theme import (
-    BG,
-    BORDER,
-    BUTTON_FONT,
-    DEFAULT_FONT,
-    INK,
-    MUTED,
-    ROSE,
-    SOFT,
-    SURFACE,
-    TITLE_FONT,
-    RoundedButton,
-    configure_window_theme,
+    ACCENT_INK, INK, RoundedButton, TimerHost, configure_window_theme,
+    ensure_application, make_font, messagebox,
 )
 from service_ports import (
     AUDIO_CAPTURE_DEFAULT_PORT,
@@ -81,16 +75,10 @@ from system_logging import (
     capture_windowed_streams,
     configure_system_logging,
     install_exception_hooks,
-    install_tk_exception_hook,
     log_debug,
     log_error,
     set_debug_enabled,
 )
-
-prepare_tk_environment("MekiCopyRuntime")
-import tkinter as tk
-from tkinter import messagebox
-
 
 DEFAULT_PORT = AUDIO_CAPTURE_DEFAULT_PORT
 DEFAULT_SCRIPT_URL = f"http://127.0.0.1:{SCRIPT_DEFAULT_PORT}"
@@ -681,10 +669,11 @@ class CaptureController:
         self.script_url = script_url.rstrip("/")
         self.hytrans_url = hytrans_url.rstrip("/")
         # The UI only renders the latest status.  Coalesce updates so a slow
-        # Tk repaint during a download or realtime translation cannot retain
+        # repaint during a download or realtime translation cannot retain
         # an unbounded history of already-obsolete messages.
         self.events: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=1)
         self._events_lock = threading.Lock()
+        self._status_listener: Callable[[], None] | None = None
         self.stop_event = threading.Event()
         self.record_thread: threading.Thread | None = None
         self.process_thread: threading.Thread | None = None
@@ -734,12 +723,13 @@ class CaptureController:
                 self.events.get_nowait()
             except queue.Empty:
                 pass
-            try:
-                self.events.put_nowait(("status", status))
-            except queue.Full:
-                # A Tk consumer can race the removal above.  The current UI
-                # update is still valid, and a later status will supersede it.
-                pass
+            self.events.put_nowait(("status", status))
+            if self._status_listener is not None:
+                self._status_listener()
+
+    def set_status_listener(self, listener: Callable[[], None] | None) -> None:
+        with self._events_lock:
+            self._status_listener = listener
 
     def configure(self, payload: dict[str, Any]) -> None:
         if any(
@@ -821,7 +811,7 @@ class CaptureController:
         return True
 
     def prepare_models(self) -> None:
-        """Prepare models immediately without blocking the Tk event loop."""
+        """Prepare models immediately without blocking the event loop."""
         with self._lock:
             if self.model_thread and self.model_thread.is_alive():
                 return
@@ -1527,231 +1517,136 @@ def make_handler(
     return Handler
 
 
-class CaptureWindow:
-    """The intentionally small, local controller for a capture session.
-
-    Unlike the MekiCopy settings window, this dialog does not expose saved
-    audio settings.  Its optional live translation switch only applies to the
-    next recording and is reset as soon as that recording reaches a terminal
-    state.
-    """
-
-    ACTIVE_POLL_INTERVAL_MS = 100
-    IDLE_POLL_INTERVAL_MS = 250
+class CaptureWindow(QWidget, TimerHost):
+    """Local recording controls with a one-session realtime translation option."""
 
     def __init__(
         self,
-        root: tk.Tk,
         controller: CaptureController,
         *,
         on_confirmed_close: Callable[[], None] | None = None,
     ) -> None:
-        self.root = root
+        super().__init__()
         self.controller = controller
         self._on_confirmed_close = on_confirmed_close
-        self._last_state = controller.state
-        root.title("MekiAudioCapture")
-        root.geometry("480x350")
-        root.resizable(False, False)
-        root.protocol("WM_DELETE_WINDOW", self.close)
-        configure_window_theme(root)
+        self._last_state = ""
+        self.setWindowTitle("MekiAudioCapture")
+        self.setMinimumSize(390, 260)
+        self.resize(440, 265)
+        apply_qt_icon(self)
+        configure_window_theme(self)
 
-        body = tk.Frame(root, bg=BG, padx=18, pady=16)
-        body.pack(fill=tk.BOTH, expand=True)
+        body = QVBoxLayout(self)
+        body.setContentsMargins(15, 13, 15, 13)
+        body.setSpacing(8)
+        title = QLabel("MekiAudioCapture")
+        title.setProperty("role", "accent")
+        title.setFont(make_font(("Malgun Gothic", 17, "bold")))
+        body.addWidget(title)
+        description = QLabel("시스템 소리를 녹음해 음성 인식 결과를 MekiScript에 보냅니다.")
+        description.setWordWrap(True)
+        description.setProperty("role", "muted")
+        body.addWidget(description)
 
-        tk.Label(
-            body,
-            text="MekiAudioCapture",
-            bg=BG,
-            fg=ROSE,
-            font=TITLE_FONT,
-            anchor=tk.W,
-        ).pack(fill=tk.X)
-        tk.Label(
-            body,
-            text="시스템 소리를 녹음해 음성 인식 결과를 MekiScript에 보냅니다.",
-            bg=BG,
-            fg=MUTED,
-            font=DEFAULT_FONT,
-            anchor=tk.W,
-        ).pack(fill=tk.X, pady=(2, 12))
+        status_card = QFrame()
+        status_card.setProperty("role", "card")
+        card_layout = QVBoxLayout(status_card)
+        card_layout.setContentsMargins(12, 8, 12, 8)
+        card_layout.setSpacing(3)
+        caption = QLabel("현재 상태")
+        caption.setProperty("role", "muted")
+        card_layout.addWidget(caption)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        card_layout.addWidget(self.status)
+        body.addWidget(status_card)
 
-        status_card = tk.Frame(
-            body,
-            bg=SURFACE,
-            padx=12,
-            pady=10,
-            highlightthickness=1,
-            highlightbackground=BORDER,
-        )
-        status_card.pack(fill=tk.X)
-        tk.Label(
-            status_card,
-            text="현재 상태",
-            bg=SURFACE,
-            fg=MUTED,
-            font=DEFAULT_FONT,
-            anchor=tk.W,
-        ).pack(fill=tk.X)
-        self.status = tk.Label(
-            status_card,
-            text=controller.status,
-            wraplength=410,
-            justify=tk.LEFT,
-            bg=SURFACE,
-            fg=INK,
-            font=DEFAULT_FONT,
-            anchor=tk.W,
-        )
-        self.status.pack(fill=tk.X, pady=(3, 0))
+        options = QFrame()
+        options.setProperty("role", "note")
+        options_layout = QVBoxLayout(options)
+        options_layout.setContentsMargins(12, 8, 12, 8)
+        options_layout.setSpacing(4)
+        self.realtime_translation_check = QCheckBox("실시간 음성 번역")
+        self.realtime_translation_check.clicked.connect(self._on_realtime_translation_changed)
+        options_layout.addWidget(self.realtime_translation_check)
+        option_hint = QLabel("선택은 이번 녹음에만 적용됩니다.")
+        option_hint.setProperty("role", "muted")
+        options_layout.addWidget(option_hint)
+        body.addWidget(options)
+        body.addStretch()
 
-        options = tk.LabelFrame(
-            body,
-            text="녹음 옵션",
-            bg=SURFACE,
-            fg=ROSE,
-            font=BUTTON_FONT,
-            padx=10,
-            pady=8,
-            highlightthickness=1,
-            highlightbackground=BORDER,
-        )
-        options.pack(fill=tk.X, pady=(12, 0))
-        # This variable is intentionally local to this window.  It is neither
-        # accepted from MekiCopy nor written to any settings file.
-        self.realtime_translation_var = tk.BooleanVar(value=False)
-        self.realtime_translation_check = tk.Checkbutton(
-            options,
-            text="실시간 음성 번역(저사양에서 비권장)",
-            variable=self.realtime_translation_var,
-            bg=SOFT,
-            fg=INK,
-            activebackground=SOFT,
-            activeforeground=ROSE,
-            selectcolor=SURFACE,
-            font=DEFAULT_FONT,
-            anchor="w",
-            command=self._on_realtime_translation_changed,
-        )
-        self.realtime_translation_check.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(
-            options,
-            text="선택은 저장되지 않으며, 녹음이 끝나면 자동으로 해제됩니다.",
-            bg=SURFACE,
-            fg=MUTED,
-            font=DEFAULT_FONT,
-            justify=tk.LEFT,
-            anchor=tk.W,
-        ).pack(fill=tk.X)
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.start_button = RoundedButton(text="녹음 시작", command=self.start, variant="primary", height=38)
+        self.stop_button = RoundedButton(text="녹음 종료", command=self.stop, height=38)
+        actions.addWidget(self.start_button)
+        actions.addWidget(self.stop_button)
+        body.addLayout(actions)
 
-        actions = tk.Frame(body, bg=BG)
-        actions.pack(fill=tk.X, pady=(14, 0))
-        actions.columnconfigure(0, weight=1)
-        actions.columnconfigure(1, weight=1)
-        self.start_button = RoundedButton(
-            actions,
-            text="녹음 시작",
-            command=self.start,
-            variant="primary",
-            width=1,
-            height=40,
-            radius=18,
-        )
-        self.start_button.grid(row=0, column=0, sticky=tk.EW, padx=(0, 5))
-        self.stop_button = RoundedButton(
-            actions,
-            text="녹음 종료",
-            command=self.stop,
-            width=1,
-            height=40,
-            radius=18,
-        )
-        self.stop_button.grid(row=0, column=1, sticky=tk.EW, padx=(5, 0))
+        self._wakeup = UiWakeup(self, self._refresh_status)
+        controller.set_status_listener(self._wakeup.schedule)
+        self._refresh_status()
 
-        root.after(self.IDLE_POLL_INTERVAL_MS, self.poll)
-
-    def _on_realtime_translation_changed(self) -> None:
-        if not self.realtime_translation_var.get():
-            return
-        messagebox.showwarning(
-            "MekiAudioCapture",
-            "실시간 음성 번역은 음성 인식과 번역을 동시에 처리합니다.\n\n"
-            "저사양 컴퓨터에서는 번역이 느리거나 실패할 수 있어 권장하지 않습니다.",
-            parent=self.root,
-        )
-
-    def start(self) -> None:
-        self.controller.start(realtime_translation=bool(self.realtime_translation_var.get()))
-
-    def stop(self) -> None:
-        if self.controller.state == "PROCESSING":
-            confirmed = messagebox.askyesno(
-                "MekiAudioCapture",
-                "아직 대기 중인 실시간 번역을 취소할까요?\n\n"
-                "현재 진행 중인 번역 요청은 응답 또는 시간 초과 뒤에 종료됩니다.",
-                parent=self.root,
-            )
-            if not confirmed:
-                return
-        self.controller.stop()
-
-    def close(self) -> None:
-        if self.controller.state not in {"READY", "ERROR"}:
+    def _on_realtime_translation_changed(self, enabled: bool) -> None:
+        if enabled:
             messagebox.showwarning(
                 "MekiAudioCapture",
-                "녹음과 후처리가 끝난 뒤 창을 닫아주세요.",
-                parent=self.root,
+                "실시간 음성 번역은 음성 인식과 번역을 동시에 처리합니다.\n\n"
+                "저사양 컴퓨터에서는 번역이 느리거나 실패할 수 있어 권장하지 않습니다.",
+                parent=self,
             )
-            return
-        if not messagebox.askyesno(
-            "MekiAudioCapture 종료",
-            "MekiAudioCapture 창을 닫을까요?",
-            parent=self.root,
+
+    def start(self) -> None:
+        self.controller.start(realtime_translation=self.realtime_translation_check.isChecked())
+        self._refresh_status()
+
+    def stop(self) -> None:
+        if self.controller.state == "PROCESSING" and not messagebox.askyesno(
+            "MekiAudioCapture",
+            "아직 대기 중인 실시간 번역을 취소할까요?\n\n"
+            "현재 진행 중인 번역 요청은 응답 또는 시간 초과 뒤에 종료됩니다.",
+            parent=self,
         ):
             return
+        self.controller.stop()
+        self._refresh_status()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.controller.state not in {"READY", "ERROR"}:
+            messagebox.showwarning(
+                "MekiAudioCapture", "녹음과 후처리가 끝난 뒤 창을 닫아주세요.", parent=self
+            )
+            event.ignore()
+            return
+        if not messagebox.askyesno(
+            "MekiAudioCapture 종료", "MekiAudioCapture 창을 닫을까요?", parent=self
+        ):
+            event.ignore()
+            return
+        self.controller.set_status_listener(None)
         if self._on_confirmed_close is not None:
             try:
                 self._on_confirmed_close()
             except Exception as exc:
                 log_error("manual_close_signal", exc)
-        self.root.destroy()
+        event.accept()
 
-    def poll(self) -> None:
-        handled_event = False
-        while True:
-            try:
-                _, text = self.controller.events.get_nowait()
-                self.status.configure(text=text)
-                handled_event = True
-            except queue.Empty:
-                break
-        state = self.controller.state
-        self.start_button.configure(state=tk.NORMAL if state in {"READY", "ERROR"} else tk.DISABLED)
-        if state == "PROCESSING":
-            stop_text = "남은 번역 취소"
-        elif state == "CANCELLING":
-            stop_text = "취소 중…"
-        else:
-            stop_text = "녹음 종료"
-        self.stop_button.configure(
-            text=stop_text,
-            state=tk.NORMAL if state in {"RECORDING", "PROCESSING"} else tk.DISABLED,
+    def _refresh_status(self) -> None:
+        snapshot = self.controller.health()
+        state = snapshot["state"]
+        self.status.setText(snapshot["status"])
+        ready = state in {"READY", "ERROR"}
+        self.start_button.setEnabled(ready)
+        self.stop_button.setText(
+            {"PROCESSING": "남은 번역 취소", "CANCELLING": "취소 중…"}.get(state, "녹음 종료")
         )
-        self.realtime_translation_check.configure(
-            state=tk.NORMAL if state in {"READY", "ERROR"} else tk.DISABLED
-        )
-        self.status.configure(fg=ROSE if state == "ERROR" else INK)
-        if state in {"READY", "ERROR"} and self._last_state not in {"READY", "ERROR"}:
-            # Choosing it applies to one recording only.  A later session must
-            # be explicitly opted into again.
-            self.realtime_translation_var.set(False)
+        self.stop_button.setEnabled(state in {"RECORDING", "PROCESSING"})
+        self.realtime_translation_check.setEnabled(ready)
+        if state != self._last_state:
+            self.status.setStyleSheet(f"color: {ACCENT_INK if state == 'ERROR' else INK};")
+        if ready and self._last_state not in {"READY", "ERROR"}:
+            self.realtime_translation_check.setChecked(False)
         self._last_state = state
-        self.root.after(
-            self.ACTIVE_POLL_INTERVAL_MS
-            if handled_event or state not in {"READY", "ERROR"}
-            else self.IDLE_POLL_INTERVAL_MS,
-            self.poll,
-        )
 
 
 def _load_model_test_wav(wav_path: Path) -> np.ndarray:
@@ -1779,30 +1674,25 @@ def _load_model_test_wav(wav_path: Path) -> np.ndarray:
 
 def run_capture_window_self_test() -> None:
     """Exercise the packaged CaptureWindow and its shared MekiCopy theme."""
-    root = tk.Tk()
-    root.withdraw()
+    application = ensure_application()
+    controller = CaptureController(
+        "int8", "BALANCED", DEFAULT_SCRIPT_URL, DEFAULT_HYTRANS_URL,
+        prepare_models_on_start=False,
+    )
+    window = CaptureWindow(controller)
     try:
-        controller = CaptureController(
-            "int8",
-            "BALANCED",
-            DEFAULT_SCRIPT_URL,
-            DEFAULT_HYTRANS_URL,
-            prepare_models_on_start=False,
-        )
-        window = CaptureWindow(root, controller)
-        # Grid-weighted Canvas controls receive their final width only after
-        # Tk maps the window at least once.
-        root.deiconify()
-        root.update_idletasks()
-        root.update()
-        if root.winfo_width() != 480 or root.winfo_height() != 350:
+        window.show()
+        application.processEvents()
+        if window.width() != 440 or window.height() != 265:
             raise RuntimeError("MekiAudioCapture 창 레이아웃 크기가 올바르지 않습니다.")
-        if window.realtime_translation_var.get():
+        if window.realtime_translation_check.isChecked():
             raise RuntimeError("실시간 음성 번역 옵션의 기본값은 꺼짐이어야 합니다.")
-        if min(window.start_button.winfo_width(), window.stop_button.winfo_width()) < 150:
+        if min(window.start_button.width(), window.stop_button.width()) < 150:
             raise RuntimeError("MekiAudioCapture 작업 버튼 레이아웃이 올바르지 않습니다.")
     finally:
-        root.destroy()
+        controller.set_status_listener(None)
+        window.hide()
+        window.deleteLater()
 
 
 def parse_args() -> argparse.Namespace:
@@ -1889,9 +1779,7 @@ def main() -> int:
     )
     try:
         set_windows_app_id("MekiAudioCapture")
-        root = tk.Tk()
-        install_tk_exception_hook(root)
-        apply_tk_icon(root)
+        application = ensure_application()
         manual_close_confirmed = threading.Event()
 
         def on_confirmed_close() -> None:
@@ -1902,9 +1790,9 @@ def main() -> int:
                 app_name="MekiAudioCapture",
             )
 
-        CaptureWindow(root, controller, on_confirmed_close=on_confirmed_close)
+        window = CaptureWindow(controller, on_confirmed_close=on_confirmed_close)
         ui_heartbeat = UiHeartbeat()
-        ui_heartbeat.schedule(root)
+        ui_heartbeat.schedule(window)
         server = ThreadingHTTPServer(
             ("127.0.0.1", args.port),
             make_handler(controller, ui_heartbeat),
@@ -1912,7 +1800,8 @@ def main() -> int:
         server.daemon_threads = True
         server.block_on_close = False
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        root.mainloop()
+        window.show()
+        application.exec()
         server.shutdown()
         server.server_close()
         return MANUAL_CLOSE_EXIT_CODE if manual_close_confirmed.is_set() else 0

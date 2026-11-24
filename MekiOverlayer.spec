@@ -1,13 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
-from build_runtime_data import ssl_runtime_data
+from build_runtime_data import qt_license_data, ssl_runtime_data, without_windows_icu
 
-datas = ssl_runtime_data()
+datas = ssl_runtime_data() + qt_license_data()
 binaries = []
 hiddenimports = [
     "meki_overlayer",
-    "tkinter",
-    "tkinter.constants",
 ]
 
 if Path("MekiCopy.ico").exists():
@@ -22,10 +20,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["PyQt5", "PyQt6", "PySide2", "PySide6"],
+    excludes=["PyQt5", "PyQt6", "PySide2", "tkinter"],
     noarchive=False,
     optimize=0,
 )
+a.binaries = without_windows_icu(a.binaries)
 pyz = PYZ(a.pure)
 
 exe = EXE(

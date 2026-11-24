@@ -32,11 +32,6 @@ function Test-BuildPython {
 import sys
 if not ((3, 12) <= sys.version_info[:2] < (3, 15)):
     raise SystemExit("Python 3.12 through 3.14 is required")
-import tkinter as tk
-root = tk.Tk()
-root.withdraw()
-root.update_idletasks()
-root.destroy()
 '@
 
     try {
@@ -117,13 +112,13 @@ function Resolve-BuildPython {
         if (Test-BuildPython -Candidate $expanded) {
             return (Resolve-Path -LiteralPath $expanded).Path
         }
-        Write-Warning "Rejected Python because its version or Tk runtime is unsupported: $expanded"
+        Write-Warning "Rejected Python because its version is unsupported: $expanded"
     }
 
     if ($RequestedPython) {
-        throw "The requested Python cannot create a Tk window: $RequestedPython"
+        throw "The requested Python is unusable or unsupported: $RequestedPython"
     }
-    throw "No usable Python with Tk was found. Install Python 3.12-3.14 with Tcl/Tk, or pass -PythonExe."
+    throw "No usable Python was found. Install Python 3.12-3.14 or pass -PythonExe."
 }
 
 function Invoke-CheckedPython {
@@ -219,33 +214,29 @@ function Assert-BundledPythonRuntime {
         -Description "$AppName bundled Python runtime"
 }
 
-function Assert-TkRuntime {
+function Assert-QtRuntime {
     param(
         [Parameter(Mandatory = $true)][string]$AppRoot,
         [Parameter(Mandatory = $true)][string]$AppName
     )
 
-    Assert-ArtifactPattern `
-        -AppRoot $AppRoot `
-        -RelativeDirectory "_internal" `
-        -FilePattern "_tkinter*.pyd" `
-        -Description "$AppName Tk extension"
-    Assert-ArtifactFile `
-        -AppRoot $AppRoot `
-        -RelativePath "_internal\tcl86t.dll" `
-        -Description "$AppName Tcl runtime"
-    Assert-ArtifactFile `
-        -AppRoot $AppRoot `
-        -RelativePath "_internal\tk86t.dll" `
-        -Description "$AppName Tk runtime"
-    Assert-ArtifactFile `
-        -AppRoot $AppRoot `
-        -RelativePath "_internal\_tcl_data\init.tcl" `
-        -Description "$AppName Tcl script library"
-    Assert-ArtifactFile `
-        -AppRoot $AppRoot `
-        -RelativePath "_internal\_tk_data\tk.tcl" `
-        -Description "$AppName Tk script library"
+    foreach ($relativePath in @(
+        "_internal\PySide6\QtCore.pyd",
+        "_internal\PySide6\QtGui.pyd",
+        "_internal\PySide6\QtWidgets.pyd",
+        "_internal\PySide6\Qt6Core.dll",
+        "_internal\PySide6\Qt6Gui.dll",
+        "_internal\PySide6\Qt6Widgets.dll",
+        "_internal\PySide6\plugins\platforms\qwindows.dll"
+    )) {
+        Assert-ArtifactFile -AppRoot $AppRoot -RelativePath $relativePath -Description "$AppName Qt runtime"
+    }
+    $appLocalIcu = Get-ChildItem -LiteralPath (Join-Path $AppRoot "_internal") -Recurse -File -Filter "icu*.dll" |
+        Where-Object Name -Match '^icu(?:dt|in|uc)\d*\.dll$' |
+        Select-Object -First 1
+    if ($appLocalIcu) {
+        throw "$AppName must use Windows ICU. Unexpected app-local library: $($appLocalIcu.FullName)"
+    }
 }
 
 function New-ReleaseZip {
@@ -632,9 +623,7 @@ if ($ReuseLiteBuild) {
 }
 $versionProbe = @'
 import sys
-import tkinter
 print(sys.version)
-print(f"Tk {tkinter.TkVersion}")
 '@
 Invoke-CheckedPythonScript $versionProbe
 
@@ -655,7 +644,8 @@ if (-not $SkipDependencyInstall -and -not $ReuseLiteBuild) {
 }
 
 $dependencyProbe = @'
-import tkinter as tk
+from PySide6.QtCore import qVersion
+from PySide6.QtWidgets import QApplication, QWidget
 from importlib.metadata import version
 import PyInstaller
 import fastapi
@@ -674,10 +664,10 @@ import cv2
 from importlib.util import find_spec
 if not callable(getattr(sherpa_onnx.OfflineRecognizer, "from_nemo_ctc", None)):
     raise SystemExit("sherpa-onnx does not provide OfflineRecognizer.from_nemo_ctc")
-root = tk.Tk()
-root.withdraw()
-root.update_idletasks()
-root.destroy()
+app = QApplication([])
+window = QWidget()
+window.winId()
+print(f"Qt {qVersion()} ({app.platformName()})")
 from pathlib import Path
 import re
 expected = {}
@@ -713,7 +703,7 @@ if missing_gpu_runtime_packages:
         + ", ".join(missing_gpu_runtime_packages)
     )
 print(f"ONNX Runtime providers: {onnxruntime.get_available_providers()}")
-print("Pinned build dependencies and Tk are ready")
+print("Pinned build dependencies and Qt are ready")
 '@
 Invoke-CheckedPythonScript $dependencyProbe
 
@@ -905,11 +895,11 @@ foreach ($exe in $expectedExecutables) {
 }
 
 # Validate the runtime resources that a successful PyInstaller command alone
-# cannot guarantee: Tk for GUI companions, native OCR, native STT, and the
+# cannot guarantee: Qt for GUI companions, native OCR, native STT, and the
 # HYTrans private-worker assets.
-Assert-TkRuntime -AppRoot $mekiCopyRoot -AppName "MekiCopy"
-Assert-TkRuntime -AppRoot $displayRoot -AppName "MekiDisplay"
-Assert-TkRuntime -AppRoot $audioCaptureRoot -AppName "MekiAudioCapture"
+Assert-QtRuntime -AppRoot $mekiCopyRoot -AppName "MekiCopy"
+Assert-QtRuntime -AppRoot $displayRoot -AppName "MekiDisplay"
+Assert-QtRuntime -AppRoot $audioCaptureRoot -AppName "MekiAudioCapture"
 
 Assert-ArtifactPattern `
     -AppRoot $mekiCopyRoot `

@@ -7,17 +7,17 @@ if errorlevel 1 (
   exit /b 1
 )
 
-python -c "import sys, tkinter; raise SystemExit(0 if (3, 12) <= sys.version_info[:2] < (3, 15) else 1)"
+python -c "import sys; raise SystemExit(0 if (3, 12) <= sys.version_info[:2] < (3, 15) else 1)"
 if errorlevel 1 (
-  echo Python 3.12~3.14와 Tcl/Tk가 필요합니다.
+  echo Python 3.12~3.14가 필요합니다.
   exit /b 1
 )
 
-python -m pip install --upgrade pip==26.2.2
+python -m pip install --upgrade pip==26.3
 if errorlevel 1 exit /b 1
 python -m pip install --upgrade --upgrade-strategy eager --requirement "%~dp0requirements-build.txt"
 if errorlevel 1 exit /b 1
-python -m pip install --force-reinstall --no-deps onnxruntime-gpu[cuda,cudnn]==1.31.0
+python -m pip install --force-reinstall --no-deps onnxruntime-gpu[cuda,cudnn]==1.31.1
 if errorlevel 1 exit /b 1
 
 echo 설치가 완료되었습니다.

@@ -190,7 +190,7 @@ class ApiTranslationIntegrationTests(unittest.TestCase):
             _global_hotkey_configuration=lambda value: (value.global_hotkey_enabled, value.global_hotkey),
             _configure_global_hotkey=mock.Mock(return_value=(True, "")),
             subtitle_window=None,
-            attributes=mock.Mock(),
+            _apply_main_topmost=mock.Mock(),
             _apply_overlay_mode_ui=mock.Mock(),
             _sync_realtime_ocr=mock.Mock(),
             _send_overlayer_config=mock.Mock(),

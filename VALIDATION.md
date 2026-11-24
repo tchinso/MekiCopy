@@ -1,5 +1,19 @@
 # MekiCopy 검증
 
+## 2026-11-24 PySide6 전환과 Lite·Full 빌드
+
+- 본체, 분리 버튼, 설정, 캡처 영역, 오버레이, 대본, 녹음, 자막 창을 PySide6로 전환했다. 홈 창 기본 크기는 534×338 논리 픽셀이며, Windows 125% 배율에서 홈·작업·설정과 최소 크기의 주요 버튼 배치를 확인했다.
+- Python 회귀 465개 중 461개가 통과했고, 별도 활성화가 필요한 4개를 건너뛰었다. 이후 Qt에 Windows ICU를 사용하도록 패키징 정책을 보완하고 관련 테스트 4개를 통과했다. 소스와 실행 파일을 다시 컴파일할 필요가 없는 DLL 수집 변경은 준비된 실행 파일을 재사용해 배포물을 조립하고 스모크 테스트를 수행했다.
+- 실제 MSS·GDI 캡처, hdTrans 번역과 Qt 오버레이 표시 완료 응답, FFmpeg의 16 kHz 모노 PCM 출력을 확인했다. AMD 장비의 CPU OCR에서 동일한 샘플의 첫 호출은 6.898초, 재호출은 0.014초였다. CUDA 검증은 실행 제공자 선택과 CPU 폴백 테스트로 수행했다.
+- Lite·Full 스모크 테스트와 Full의 모델·hdTrans 자체 검사를 통과했다. 트레이 등록이 차단되는 Windows 세션에서 `tray-stress`를 제외했으며 두 manifest에 기록했다. Python을 PATH에서 뺀 환경의 두 실행 파일, ZIP 전체 SHA-256·파일별 크기·SHA-256·CRC, Lite·Full 공통 파일 일치를 확인했다. 기존 Full 실행 폴더의 개인 설정 5개는 ZIP 검증 뒤 복원했다.
+
+| 배포본 | ZIP 크기 | SHA-256 |
+|---|---:|---|
+| Lite | 478,042,972 bytes | `d5d578b7fc36d3af3f669fd96f858f26d22988c34fd9c5de8ded6fceb49d718e` |
+| Full | 4,800,370,527 bytes | `fa4f4e5cd83db80ed7bcf993f7248979cc662927925a269e90094f20fec8205a` |
+
+- 증거는 `.cache/pyside6-release-20261124`의 `lite-final.log`, `icu-regression.log`, `lite-verified.log`, `full-final.log`, `release-verification.json`에 있다.
+
 ## 2026-11-10 영상 자막 저장·번역 순서
 
 - HY-MT1.5 한국어 자막 작업은 `/ready`의 모델 준비 완료와 worker 연결을 확인한 뒤 음성 인식을 시작한다. 준비 중 취소·시간 초과 시 인식을 시작하지 않는다.

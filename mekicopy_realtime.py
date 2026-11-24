@@ -1,4 +1,4 @@
-"""Sequential, cancellation-safe realtime OCR scheduling, independent of Tk widgets."""
+"""Sequential, cancellation-safe realtime OCR scheduling, independent of GUI widgets."""
 
 from __future__ import annotations
 
@@ -44,17 +44,35 @@ def japanese_character_count(text: str) -> int:
     return len(_JAPANESE.findall(text))
 
 
-def levenshtein_distance(first: str, second: str) -> int:
-    if len(first) < len(second):
-        first, second = second, first
-    previous = list(range(len(second) + 1))
-    for row, a in enumerate(first, 1):
-        current = [row]
-        for column, b in enumerate(second, 1):
-            current.append(min(current[-1] + 1, previous[column] + 1,
-                               previous[column - 1] + (a != b)))
+def _within_edit_distance(first: str, second: str, limit: int) -> bool:
+    if abs(len(first) - len(second)) > limit:
+        return False
+    common = min(len(first), len(second))
+    start = 0
+    while start < common and first[start] == second[start]:
+        start += 1
+    end = 0
+    while end < common - start and first[-1 - end] == second[-1 - end]:
+        end += 1
+    first, second = first[start:len(first) - end], second[start:len(second) - end]
+    if max(len(first), len(second)) <= limit:
+        return True
+
+    # An edit path within the threshold stays in this diagonal band.
+    outside = limit + 1
+    previous = {column: column for column in range(min(len(second), limit) + 1)}
+    for row, char in enumerate(first, 1):
+        current = {0: row} if row <= limit else {}
+        for column in range(max(1, row - limit), min(len(second), row + limit) + 1):
+            current[column] = min(
+                current.get(column - 1, outside) + 1,
+                previous.get(column, outside) + 1,
+                previous.get(column - 1, outside) + (char != second[column - 1]),
+            )
+        if min(current.values(), default=outside) > limit:
+            return False
         previous = current
-    return previous[-1]
+    return previous.get(len(second), outside) <= limit
 
 
 def is_duplicate(previous: str | None, current: str) -> bool:
@@ -66,8 +84,7 @@ def is_duplicate(previous: str | None, current: str) -> bool:
     if japanese_character_count(previous) < 15 or japanese_character_count(current) < 15:
         return False
     # Integer arithmetic includes the exact 92% boundary without float error.
-    distance = levenshtein_distance(before, after)
-    return distance * 100 <= max(len(before), len(after)) * 8
+    return _within_edit_distance(before, after, max(len(before), len(after)) * 8 // 100)
 
 
 def next_start(started_at: float, interval: float, displayed_at: float | None) -> float:
@@ -116,9 +133,9 @@ def perform_cycle(
 
 
 class RealtimeOcrController:
-    """Own one OCR → translation → display operation and its next Tk timer.
+    """Own one OCR → translation → display operation and its next GUI timer.
 
-    Configuration and result callbacks run on Tk's thread. Workers never access
+    Configuration and result callbacks run on the GUI thread. Workers never access
     widgets. An obsolete worker must finish before a new session may submit work.
     """
 

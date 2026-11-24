@@ -1,7 +1,7 @@
 """Small, dependency-free UI heartbeat shared by desktop companion apps.
 
 Their HTTP servers run on background threads, so a successful ``/health``
-request alone does not prove that the Tk event loop can still redraw or handle
+request alone does not prove that the GUI event loop can still redraw or handle
 input.  The parent process uses this heartbeat to distinguish a responsive
 desktop app from one whose UI thread has stopped pumping messages.
 """
@@ -18,7 +18,7 @@ DEFAULT_UI_HEARTBEAT_INTERVAL_MS = 1_000
 
 
 class UiHeartbeat:
-    """Expose recent Tk event-loop activity safely to an HTTP worker thread."""
+    """Expose recent GUI event-loop activity safely to an HTTP worker thread."""
 
     def __init__(self, *, max_age_seconds: float = DEFAULT_MAX_UI_HEARTBEAT_AGE_SECONDS) -> None:
         self._max_age_seconds = max(1.0, float(max_age_seconds))
@@ -35,7 +35,7 @@ class UiHeartbeat:
         *,
         interval_ms: int = DEFAULT_UI_HEARTBEAT_INTERVAL_MS,
     ) -> None:
-        """Refresh on Tk's event loop until that loop is no longer alive."""
+        """Refresh on the GUI event loop until that loop is no longer alive."""
 
         delay = max(25, int(interval_ms))
 
@@ -44,7 +44,7 @@ class UiHeartbeat:
             try:
                 root.after(delay, pulse)
             except Exception:
-                # Tk raises during teardown.  A stale heartbeat is precisely
+                # Timer creation can fail during teardown. A stale heartbeat is
                 # what a still-running parent needs to see in that case.
                 return
 

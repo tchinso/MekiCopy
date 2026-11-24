@@ -6,9 +6,10 @@ import ctypes
 import os
 import subprocess
 import time
-import tkinter as tk
 from ctypes import wintypes
 from typing import Any, Callable
+
+from PySide6.QtWidgets import QWidget
 
 import mekicopy_settings
 from mekicopy_capture import Region
@@ -20,6 +21,7 @@ from mekicopy_companions import (
 )
 from mekicopy_ocr import _get_ocr_engine, _log_runtime_error, _log_runtime_message
 from mekicopy_runtime import _get_app_dir, _get_icon_path
+from mekicopy_theme import ensure_application
 from mekicopy_settings import (
     Bookmark,
     _font_has_character,
@@ -33,27 +35,26 @@ def run_detached_button_self_test(create_app: Callable[[], Any]) -> None:
     app = None
     try:
         app = create_app()
-        app.root.update_idletasks()
-        if not app.root.winfo_exists() or not app.button.winfo_exists():
+        ensure_application().processEvents()
+        if not app.root.isVisible() or not app.button.isVisible():
             raise RuntimeError("detached button UI was not created")
-        if app.root.title() != DETACHED_WINDOW_TITLE:
+        if app.root.windowTitle() != DETACHED_WINDOW_TITLE:
             raise RuntimeError("detached button window title is not stable")
-        if app.button.cget("text") != app.ocr_action_label():
+        if app.button.text() != app.ocr_action_label():
             raise RuntimeError("detached button label does not match settings")
         command = _mekicopy_process_command("--detached-button")
         if "--detached-button" not in command:
             raise RuntimeError("detached process command is invalid")
         _log_runtime_message(
             "self_test_detached_button",
-            f"command: {command}\nwindow: {app.root.geometry()}",
+            f"command: {command}\nwindow: {app.capture_geometry(persist=False)}",
         )
     except Exception as exc:
         _log_runtime_error("self_test_detached_button", exc)
         raise SystemExit(1)
     finally:
-        if app and app.root.winfo_exists():
-            app._closing = True
-            app.root.destroy()
+        if app is not None:
+            app.close()
 
 
 def run_detached_survival_self_test() -> None:
@@ -103,8 +104,7 @@ def run_detached_survival_self_test() -> None:
         "self_test_detached_survival",
         f"launcher_pid: {launcher.pid}\ndetached_pid: {process_id.value}",
     )
-    # FindWindow can succeed while Tk is still finishing constructor work,
-    # before mainloop has started dispatching WM_CLOSE.
+    # The native window may exist before Qt starts dispatching WM_CLOSE.
     time.sleep(1.0)
     _close_detached_window()
     deadline = time.monotonic() + 30.0
@@ -114,13 +114,14 @@ def run_detached_survival_self_test() -> None:
         raise RuntimeError("detached button did not close after survival test")
 
 
-def run_tray_stress_self_test(create_window: Callable[[], tk.Tk], cycles: int = 100) -> None:
+def run_tray_stress_self_test(create_window: Callable[[], QWidget], cycles: int = 100) -> None:
     _log_runtime_message("self_test_tray_stress", f"starting cycles={cycles}")
     app = None
     try:
         app = create_window()
         app.settings.minimize_to_tray = True
-        app.update_idletasks()
+        app.show()
+        ensure_application().processEvents()
         if os.name != "nt":
             return
 
@@ -134,16 +135,16 @@ def run_tray_stress_self_test(create_window: Callable[[], tk.Tk], cycles: int = 
         user32.PostMessageW.restype = wintypes.BOOL
         tray_hwnd = None
         for cycle in range(1, cycles + 1):
-            app.iconify()
+            app.showMinimized()
             minimize_deadline = time.monotonic() + 3.0
             while time.monotonic() < minimize_deadline:
-                app.update()
-                if app.tray_icon._active and app.state() == "withdrawn":
+                ensure_application().processEvents()
+                if app.tray_icon._active and not app.isVisible():
                     break
                 time.sleep(0.005)
-            if not app.tray_icon._active or app.state() != "withdrawn":
+            if not app.tray_icon._active or app.isVisible():
                 raise RuntimeError(
-                    f"cycle {cycle}: minimize-to-tray failed (state={app.state()})"
+                    f"cycle {cycle}: minimize-to-tray failed (state={app.windowState()})"
                 )
 
             current_hwnd = app.tray_icon._hwnd
@@ -167,18 +168,18 @@ def run_tray_stress_self_test(create_window: Callable[[], tk.Tk], cycles: int = 
 
             restore_deadline = time.monotonic() + 3.0
             while time.monotonic() < restore_deadline:
-                app.update()
+                ensure_application().processEvents()
                 if (
-                    app.state() == "normal"
+                    app.isVisible() and not app.isMinimized()
                     and not app.tray_icon._active
                     and not app._restoring_from_tray
                 ):
                     break
                 time.sleep(0.005)
-            if app.state() != "normal" or app.tray_icon._active:
+            if (not app.isVisible() or app.isMinimized()) or app.tray_icon._active:
                 raise RuntimeError(
                     f"cycle {cycle}: tray restore failed "
-                    f"(state={app.state()}, active={app.tray_icon._active})"
+                    f"(state={app.windowState()}, active={app.tray_icon._active})"
                 )
 
         _log_runtime_message(
@@ -189,12 +190,8 @@ def run_tray_stress_self_test(create_window: Callable[[], tk.Tk], cycles: int = 
         _log_runtime_error("self_test_tray_stress", exc)
         raise SystemExit(1)
     finally:
-        if app:
-            try:
-                app.tray_icon.close()
-                app.destroy()
-            except tk.TclError:
-                pass
+        if app is not None:
+            app.close()
 
 
 def _snapshot_runtime_state(paths: tuple[str, ...]) -> dict[str, bytes | None]:
@@ -225,7 +222,7 @@ def _restore_runtime_state(snapshot: dict[str, bytes | None]) -> None:
 
 
 def run_ui_self_test(
-    create_window: Callable[[], tk.Tk],
+    create_window: Callable[[], QWidget],
     *,
     window_size: tuple[int, int],
     expected_ocr_button_height: int,
@@ -242,27 +239,28 @@ def run_ui_self_test(
     )
     try:
         app = create_window()
-        app.update_idletasks()
-        if app.winfo_height() != window_height:
+        app.show()
+        ensure_application().processEvents()
+        if app.height() != window_height:
             raise RuntimeError(
-                f"main window height is {app.winfo_height()}, expected {window_height}"
+                f"main window height is {app.height()}, expected {window_height}"
             )
         expected_tabs = {"영역 설정", "캡쳐 설정", "도구", "행동", "소리 번역", "영상 자막 생성", "설정"}
         if set(app.tab_frames) != expected_tabs:
             raise RuntimeError(f"unexpected main tabs: {set(app.tab_frames)}")
         if app._workflow_mode is not None:
             raise RuntimeError("main window did not open at the translation workflow picker")
-        if any(frame.winfo_ismapped() for frame in app.tab_frames.values()):
+        if any(frame.isVisible() for frame in app.tab_frames.values()):
             raise RuntimeError("workflow content is visible before a workflow is selected")
 
         app._select_workflow("screen")
-        app.update_idletasks()
-        visible_tabs = {name for name, button in app.tab_buttons.items() if button.winfo_ismapped()}
+        ensure_application().processEvents()
+        visible_tabs = {name for name, button in app.tab_buttons.items() if button.isVisible()}
         if visible_tabs != {"영역 설정", "캡쳐 설정", "도구", "행동", "설정"}:
             raise RuntimeError(f"unexpected screen translation tabs: {visible_tabs}")
         app._select_tab("행동")
-        app.update_idletasks()
-        ocr_button_height = app.ocr_button.master.winfo_height()
+        ensure_application().processEvents()
+        ocr_button_height = app.ocr_button.height()
         if ocr_button_height != expected_ocr_button_height:
             raise RuntimeError(
                 f"main OCR button height is {ocr_button_height}, expected {expected_ocr_button_height}"
@@ -273,50 +271,49 @@ def run_ui_self_test(
         for realtime_enabled, expected_label in ((False, "번역 후 표시"), (True, "실시간 OCR 시작")):
             app.settings.realtime_ocr_enabled = realtime_enabled
             app._sync_realtime_ocr()
-            app.update_idletasks()
-            if app.ocr_button.cget("text") != expected_label:
-                raise RuntimeError(f"unexpected translation action: {app.ocr_button.cget('text')}")
-            expected_detach_state = tk.DISABLED if realtime_enabled else tk.NORMAL
-            if app.detach_button.cget("state") != expected_detach_state:
+            ensure_application().processEvents()
+            if app.ocr_button.text() != expected_label:
+                raise RuntimeError(f"unexpected translation action: {app.ocr_button.text()}")
+            if app.detach_button.isEnabled() == realtime_enabled:
                 raise RuntimeError("detached button availability does not match translation mode")
         app.settings.realtime_ocr_enabled = initial_realtime_enabled
         app._sync_realtime_ocr()
         app._select_tab("도구")
-        app.update_idletasks()
-        if app.hytrans_button.cget("state") != tk.NORMAL:
+        ensure_application().processEvents()
+        if not app.hytrans_button.isEnabled():
             raise RuntimeError("translation engine launch button is disabled")
-        if app.overlayer_button.cget("state") != tk.NORMAL:
+        if not app.overlayer_button.isEnabled():
             raise RuntimeError("translation display launch button is disabled")
         for workflow, frame_name in (("audio", "소리 번역"), ("subtitle", "영상 자막 생성")):
             app._select_workflow(workflow)
-            app.update_idletasks()
-            if app._workflow_mode != workflow or not app.tab_frames[frame_name].winfo_ismapped():
+            ensure_application().processEvents()
+            if app._workflow_mode != workflow or not app.tab_frames[frame_name].isVisible():
                 raise RuntimeError(f"{workflow} workflow did not show its content")
-            if app.tab_frames["행동"].winfo_ismapped():
+            if app.tab_frames["행동"].isVisible():
                 raise RuntimeError(f"screen translation actions are visible in {workflow} workflow")
             app._show_workflow_picker()
-            app.update_idletasks()
+            ensure_application().processEvents()
             if app._workflow_mode is not None:
                 raise RuntimeError(f"{workflow} workflow could not return to the picker")
         app._select_workflow("screen")
         app._select_tab("영역 설정")
-        app.update_idletasks()
+        ensure_application().processEvents()
 
         bookmark = Bookmark(name="self-test", left=11, top=22, width=333, height=44)
         expected_region = Region(left=11, top=22, width=333, height=44)
         app._load_bookmark_region(bookmark)
         if app.active_region != expected_region:
             raise RuntimeError(f"bookmark did not populate active region: {app.active_region}")
-        if "확정 영역 :\n설정되지 않음" in app.status_label.cget("text"):
+        if "확정 영역 · 설정되지 않음" in app.status_label.text():
             raise RuntimeError("bookmark status still reports no active region")
         app._select_tab("행동")
-        app.geometry("500x420")
-        app.update_idletasks()
-        action_frame = app.tab_frames["행동"]
-        action_bottom = app.ocr_button.master.winfo_y() + app.ocr_button.master.winfo_height()
-        if action_bottom > action_frame.winfo_height():
+        app.resize(app.minimumSize())
+        ensure_application().processEvents()
+        action_viewport = app._tab_scroll_areas["행동"].viewport()
+        action_bottom = app.ocr_button.mapTo(action_viewport, app.ocr_button.rect().bottomRight()).y()
+        if action_bottom >= action_viewport.height():
             raise RuntimeError("translation action is clipped at the minimum window size")
-        app.geometry(f"{window_width}x{window_height}")
+        app.resize(window_width, window_height)
 
         tray_roundtrip = False
         tray_message_window_reused = False
@@ -331,8 +328,8 @@ def run_ui_self_test(
                     tray_hwnd = current_hwnd
                 elif current_hwnd != tray_hwnd:
                     raise RuntimeError("tray message window was recreated during restore")
-                app.withdraw()
-                app.update_idletasks()
+                app.hide()
+                ensure_application().processEvents()
                 ctypes.windll.user32.SendMessageW(
                     current_hwnd,
                     app.tray_icon.WM_TRAY_CALLBACK,
@@ -346,11 +343,11 @@ def run_ui_self_test(
                     app.tray_icon.WM_LBUTTONDBLCLK,
                 )
                 deadline = time.monotonic() + 2.0
-                while app.state() != "normal" and time.monotonic() < deadline:
-                    app.update()
+                while (not app.isVisible() or app.isMinimized()) and time.monotonic() < deadline:
+                    ensure_application().processEvents()
                     time.sleep(0.01)
-                if app.state() != "normal":
-                    raise RuntimeError(f"tray restore left app in state: {app.state()}")
+                if (not app.isVisible() or app.isMinimized()):
+                    raise RuntimeError(f"tray restore left app in state: {app.windowState()}")
             tray_message_window_reused = bool(
                 tray_roundtrip
                 and app.tray_icon._window_class_atom
@@ -365,27 +362,23 @@ def run_ui_self_test(
             raise RuntimeError("detached OCR button process command was not created")
 
         app._on_open_settings()
-        app.update_idletasks()
-        if not app.settings_window or not app.settings_window.winfo_exists():
+        ensure_application().processEvents()
+        if not app.settings_window or not app.settings_window.isVisible():
             raise RuntimeError("settings window was not created")
-        if not app.settings_window.korean_font_names:
+        font_picker = app.settings_window.overlayer_text_font
+        korean_font_count = sum(
+            _font_has_character(font_picker.itemText(index)) for index in range(font_picker.count())
+        )
+        if not korean_font_count:
             raise RuntimeError("font menu contains no Korean-capable fonts")
-        unsupported_fonts = [
-            name
-            for name in app.settings_window.korean_font_names
-            if not _font_has_character(name)
-        ]
-        if unsupported_fonts:
-            raise RuntimeError(f"font menu contains unsupported fonts: {unsupported_fonts}")
-        korean_font_count = len(app.settings_window.korean_font_names)
 
-        app.settings_window._on_close()
+        app.settings_window.close()
         save_settings(app.settings)
         _log_runtime_message(
             "self_test_ui",
             (
                 f"main_ocr_button_height: {ocr_button_height}\n"
-                f"main_window_height: {app.winfo_height()}\n"
+                f"main_window_height: {app.height()}\n"
                 f"tray_roundtrip: {tray_roundtrip}\n"
                 f"tray_message_window_reused: {tray_message_window_reused}\n"
                 f"korean_font_count: {korean_font_count}\n"
@@ -397,9 +390,8 @@ def run_ui_self_test(
         _log_runtime_error("self_test_ui", exc)
         raise SystemExit(1)
     finally:
-        if app and app.winfo_exists():
-            app.tray_icon.close()
-            app.destroy()
+        if app is not None:
+            app.close()
         _restore_runtime_state(runtime_snapshot)
 
 def run_runtime_self_test() -> None:

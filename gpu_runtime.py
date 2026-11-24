@@ -12,6 +12,7 @@ import time
 import urllib.request
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from importlib.metadata import PackageNotFoundError, distribution
@@ -90,14 +91,18 @@ def _valid_file(path: Path, item: dict) -> bool:
 
 
 def _valid_installation(root: Path, manifest: dict, *, bundled: bool = False) -> bool:
-    for package in manifest["packages"]:
-        for item in package["files"]:
-            if bundled and not item["path"].endswith(".dll"):
-                continue
-            path = root / item["path"]
-            if not path.resolve().is_relative_to(root.resolve()) or not _valid_file(path, item):
-                return False
-    return True
+    root = root.resolve()
+    items = [
+        item for package in manifest["packages"] for item in package["files"]
+        if not bundled or item["path"].endswith(".dll")
+    ]
+    paths = [root / item["path"] for item in items]
+    if any(not path.is_file() or not path.resolve().is_relative_to(root) for path in paths):
+        return False
+    # Full ships several GiB of independent DLLs. Hash two at a time to
+    # overlap reads and hashing without saturating the machine with threads.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="MekiGpuVerify") as pool:
+        return all(pool.map(_valid_file, paths, items))
 
 
 def _dll_directories(root: Path, manifest: dict) -> list[Path]:
@@ -112,6 +117,7 @@ def _download(package: dict, destination: Path, progress: Progress | None) -> No
         try:
             request = urllib.request.Request(package["url"], headers={"User-Agent": "MekiCopy/1"})
             size = 0
+            digest = hashlib.sha256()
             notified = 0.0
             with urllib.request.urlopen(request, timeout=30) as response, destination.open("wb") as target:
                 if not response.geturl().startswith("https://"):
@@ -121,6 +127,7 @@ def _download(package: dict, destination: Path, progress: Progress | None) -> No
                     if size > package["size"]:
                         raise ValueError("GPU runtime download exceeds the expected size")
                     target.write(chunk)
+                    digest.update(chunk)
                     now = time.monotonic()
                     if progress and (now - notified >= 1 or size == package["size"]):
                         try:
@@ -129,7 +136,7 @@ def _download(package: dict, destination: Path, progress: Progress | None) -> No
                         except Exception as error:
                             raise _CallbackError(error) from error
                         notified = now
-            if not _valid_file(destination, package):
+            if size != package["size"] or digest.hexdigest() != package["sha256"]:
                 raise ValueError("GPU runtime wheel checksum mismatch")
             return
         except _CallbackError as error:
@@ -151,14 +158,16 @@ def _extract(wheel: Path, root: Path, package: dict, progress: Progress | None =
                 raise ValueError("GPU runtime wheel member size mismatch")
             target = root / item["path"]
             target.parent.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256()
             with archive.open(member) as source, target.open("wb") as output:
                 while chunk := source.read(1024 * 1024):
                     output.write(chunk)
+                    digest.update(chunk)
                     now = time.monotonic()
                     if progress and now - notified >= 1:
                         progress(f"GPU 구성요소 압축 해제: {package['package']}")
                         notified = now
-            if not _valid_file(target, item):
+            if target.stat().st_size != item["size"] or digest.hexdigest() != item["sha256"]:
                 raise ValueError(f"GPU runtime DLL checksum mismatch: {item['path']}")
 
 
@@ -181,6 +190,23 @@ def validate_gpu_runtime(resource_root: Path, runtime_root: Path | None = None) 
     """Verify all bundled DLLs against the resource manifest without downloading."""
     manifest, _ = _load_manifest(Path(resource_root))
     return _valid_installation(Path(runtime_root or resource_root), manifest, bundled=True)
+
+
+def _publish_runtime(stage: Path, installed: Path, progress: Progress | None) -> None:
+    # A Windows scanner or sync client may briefly hold a freshly extracted
+    # DLL without delete sharing. Keep the verified stage and retry the rename.
+    for delay in (0.05, 0.1, 0.2, 0.4):
+        try:
+            os.replace(stage, installed)
+            return
+        except OSError as exc:
+            if (getattr(exc, "winerror", None) not in (5, 32, 33)
+                    or not stage.is_dir() or installed.exists()):
+                raise
+        if progress:
+            progress("GPU 구성요소 설치를 마무리하는 중")
+        time.sleep(delay)
+    os.replace(stage, installed)
 
 
 def prepare_gpu_runtime(resource_root: Path, progress: Progress | None = None) -> list[Path]:
@@ -221,7 +247,7 @@ def prepare_gpu_runtime(resource_root: Path, progress: Progress | None = None) -
                 _extract(wheel, stage, package, progress)
                 wheel.unlink()
             installed = cache / f"{generation}-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
-            os.replace(stage, installed)
+            _publish_runtime(stage, installed, progress)
         if progress:
             progress("GPU 구성요소 준비 완료")
         return _dll_directories(installed, manifest)

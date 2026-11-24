@@ -10,34 +10,30 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
-from app_identity import apply_tk_icon, set_windows_app_id
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QCloseEvent, QFont, QPalette, QTextBlock, QTextBlockFormat, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import QTextEdit, QVBoxLayout, QWidget
+
+from app_identity import apply_qt_icon, set_windows_app_id
+from mekicopy_theme import TimerHost, ensure_application, messagebox
+from qt_companion import UiWakeup
 from companion_json import MAX_REQUEST_BYTES, read_json as _read_json, write_json as _write_json
-from display_config import apply_display_config, normalize_font_name, validate_display_colors
+from display_config import apply_display_config, normalize_font_name
 from companion_liveness import UiHeartbeat
 from companion_manual_close import MANUAL_CLOSE_EXIT_CODE, publish_manual_close_signal
-from runtime_paths import prepare_tk_environment
 from service_ports import SCRIPT_DEFAULT_PORT
 from system_logging import (
     capture_windowed_streams,
     configure_system_logging,
     is_debug_enabled,
     install_exception_hooks,
-    install_tk_exception_hook,
     log_debug,
     log_directory,
     log_error,
     set_debug_enabled,
 )
 
-prepare_tk_environment("MekiCopyRuntime")
-import tkinter as tk
-from tkinter import messagebox
-
-
 DEFAULT_PORT = SCRIPT_DEFAULT_PORT
-DEFAULT_GEOMETRY = "780x560+120+120"
-
-
 
 
 @dataclass
@@ -60,20 +56,16 @@ class ScriptConfig:
 
 @dataclass
 class _TranscriptHistoryEntry:
-    """One displayed transcript entry and its stable end boundary."""
+    """One entry with a stable document block for its translation."""
 
     entry_id: str
-    end_mark: str
+    translation: QTextBlock
+    pending: bool
     text_length: int
 
 
-class ScriptWindow:
-    # Slow idle polling avoids unnecessary wakeups; active bursts drain promptly.
-    ACTIVE_EVENT_POLL_MS = 50
-    IDLE_EVENT_POLL_MS = 200
-    # A remote producer must never be able to retain an unlimited transcript
-    # backlog while Tk is busy repainting.  This still covers far more events
-    # than a normal visual-novel line/translation burst.
+class ScriptWindow(QWidget, TimerHost):
+    # Bounds keep the transcript responsive even when producers run ahead of the UI.
     MAX_PENDING_EVENTS = 128
     MAX_EVENTS_PER_DRAIN = 24
     MAX_TRANSCRIPT_CHARS = 32 * 1024
@@ -88,12 +80,12 @@ class ScriptWindow:
 
     def __init__(
         self,
-        root: tk.Tk,
         config: ScriptConfig,
         *,
         on_confirmed_close: Callable[[], None] | None = None,
     ) -> None:
-        self.root = root
+        super().__init__()
+        self._wakeup = UiWakeup(self, self.drain)
         self.config = config
         self._on_confirmed_close = on_confirmed_close
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue(
@@ -106,32 +98,77 @@ class ScriptWindow:
         self._history: deque[_TranscriptHistoryEntry] = deque()
         self._history_by_id: dict[str, _TranscriptHistoryEntry] = {}
         self._history_chars = 0
-        self._history_mark_serial = 0
         self.last_original = ""
         self.last_translation = ""
         self.translation_count = 0
-        root.title("MekiScript")
-        root.geometry(DEFAULT_GEOMETRY)
-        root.protocol("WM_DELETE_WINDOW", self.close)
-        frame = tk.Frame(root)
-        frame.pack(fill=tk.BOTH, expand=True)
-        self.text = tk.Text(frame, wrap=tk.WORD, padx=18, pady=14, spacing3=5, cursor="arrow")
-        scrollbar = tk.Scrollbar(frame, command=self.text.yview)
-        self.text.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._applied_appearance: tuple[Any, ...] | None = None
+        self.setWindowTitle("MekiScript")
+        self.setMinimumSize(280, 160)
+        self.resize(720, 480)
+        self.move(120, 120)
+        apply_qt_icon(self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        self.text = QTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setUndoRedoEnabled(False)
+        self.text.setFrameShape(QTextEdit.Shape.NoFrame)
+        self.text.document().setDocumentMargin(7)
+        layout.addWidget(self.text)
         self.apply_config()
-        root.after(self.IDLE_EVENT_POLL_MS, self.drain)
 
     def apply_config(self) -> None:
         cfg = self.config
-        self.root.attributes("-topmost", cfg.topmost)
-        self.root.attributes("-alpha", cfg.opacity)
-        self.root.configure(bg=cfg.bg_color)
-        self.text.configure(bg=cfg.bg_color, fg=cfg.original_color, insertbackground=cfg.original_color)
-        self.text.tag_configure("original", foreground=cfg.original_color, font=(normalize_font_name(cfg.original_font), cfg.original_size, "bold"), spacing1=8)
-        self.text.tag_configure("translated", foreground=cfg.translated_color, font=(normalize_font_name(cfg.translated_font), cfg.translated_size), spacing3=10)
-        self.text.tag_configure("pending", foreground=cfg.translated_color, font=(normalize_font_name(cfg.translated_font), max(8, cfg.translated_size - 2), "italic"))
+        changes_topmost = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint) != cfg.topmost
+        if changes_topmost:
+            visible = self.isVisible()
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, cfg.topmost)
+            if visible:
+                self.show()
+        self.setWindowOpacity(cfg.opacity)
+        appearance = (
+            cfg.bg_color, cfg.original_color, cfg.original_size, cfg.original_font,
+            cfg.translated_color, cfg.translated_size, cfg.translated_font,
+        )
+        if appearance == self._applied_appearance:
+            return
+        self._applied_appearance = appearance
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(cfg.bg_color))
+        palette.setColor(QPalette.ColorRole.Base, QColor(cfg.bg_color))
+        palette.setColor(QPalette.ColorRole.Text, QColor(cfg.original_color))
+        self.setPalette(palette)
+        self.setAutoFillBackground(True)
+        self.text.setStyleSheet(
+            f"QTextEdit {{ background: {QColor(cfg.bg_color).name()}; border: 0; border-radius: 14px; }}"
+        )
+        formats = {kind: self._line_format(kind) for kind in ("original", "pending", "translated")}
+        cursor = QTextCursor(self.text.document())
+        cursor.beginEditBlock()
+        for entry in self._history:
+            self._format_line(entry.translation.previous(), formats["original"])
+            self._format_line(entry.translation, formats["pending" if entry.pending else "translated"])
+        cursor.endEditBlock()
+
+    def _line_format(self, kind: str) -> QTextCharFormat:
+        cfg = self.config
+        original = kind == "original"
+        pending = kind == "pending"
+        font = QFont(
+            normalize_font_name(cfg.original_font if original else cfg.translated_font),
+            cfg.original_size if original else max(8, cfg.translated_size - (2 if pending else 0)),
+        )
+        font.setBold(original)
+        font.setItalic(pending)
+        char_format = QTextCharFormat()
+        char_format.setFont(font)
+        char_format.setForeground(QColor(cfg.original_color if original else cfg.translated_color))
+        return char_format
+
+    def _format_line(self, block: QTextBlock, char_format: QTextCharFormat) -> None:
+        cursor = QTextCursor(block)
+        cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+        cursor.setCharFormat(char_format)
 
     @staticmethod
     def _should_report_count(count: int) -> bool:
@@ -221,10 +258,26 @@ class ScriptWindow:
         event = (kind, self._compact_event_payload(kind, payload))
         try:
             self.events.put_nowait(event)
+            self._wakeup.schedule()
             return True
         except queue.Full:
             self._record_queue_overflow(kind)
             return False
+
+    def _at_bottom(self) -> bool:
+        scrollbar = self.text.verticalScrollBar()
+        return scrollbar.value() >= scrollbar.maximum() - 2
+
+    def _follow_bottom(self, was_at_bottom: bool) -> None:
+        if was_at_bottom:
+            scrollbar = self.text.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+    @staticmethod
+    def _inline_lines(text: str) -> str:
+        # Separate paragraphs identify entries; line separators keep multiline
+        # source text within the same paragraph.
+        return text.replace("\r\n", "\n").replace("\r", "\n").replace("\u2029", "\n").replace("\n", "\u2028")
 
     def _append(self, payload: dict[str, Any]) -> None:
         entry_id = str(payload.get("id", "")).strip()
@@ -233,160 +286,115 @@ class ScriptWindow:
             return
         self.entry_ids.add(entry_id)
         self.last_original = original
-        self.text.configure(state=tk.NORMAL)
-        if self.text.index("end-1c") != "1.0":
-            self.text.insert(tk.END, "\n")
-        self.text.insert(tk.END, original + "\n", ("original",))
-        start_mark = f"translation_start_{entry_id}"
-        end_mark = f"translation_end_{entry_id}"
-        self.text.mark_set(start_mark, tk.END + "-1c")
-        self.text.mark_gravity(start_mark, tk.LEFT)
-        self.text.insert(tk.END, self._PENDING_TRANSLATION_TEXT + "\n", ("pending",))
-        self.text.mark_set(end_mark, tk.END + "-1c")
-        # LEFT gravity keeps this entry's boundary before later transcript appends.
-        self.text.mark_gravity(end_mark, tk.LEFT)
-        self._remember_history_entry(
-            entry_id,
-            # Account for the original, placeholder, line endings, and a
-            # possible blank separator before this entry. Exact character
-            # accounting is not required for the cap; translation replacement
-            # below keeps the value aligned with the displayed text.
-            len(original) + len(self._PENDING_TRANSLATION_TEXT) + 3,
+        at_bottom = self._at_bottom()
+        cursor = QTextCursor(self.text.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.beginEditBlock()
+        original_block = QTextBlockFormat()
+        if self._history:
+            original_block.setTopMargin(10)
+            cursor.insertBlock(original_block)
+        else:
+            cursor.setBlockFormat(original_block)
+        cursor.insertText(self._inline_lines(original), self._line_format("original"))
+        translation_block = QTextBlockFormat()
+        translation_block.setTopMargin(4)
+        cursor.insertBlock(translation_block)
+        cursor.insertText(self._PENDING_TRANSLATION_TEXT, self._line_format("pending"))
+        entry = _TranscriptHistoryEntry(
+            entry_id, cursor.block(), True, len(original) + len(self._PENDING_TRANSLATION_TEXT) + 2
         )
+        self._history.append(entry)
+        self._history_by_id[entry_id] = entry
+        self._history_chars += entry.text_length
         self._trim_history()
-        self.text.see(tk.END)
-        self.text.configure(state=tk.DISABLED)
+        cursor.endEditBlock()
+        self._follow_bottom(at_bottom)
 
     def _translation(self, payload: dict[str, Any]) -> None:
         entry_id = str(payload.get("id", "")).strip()
-        start_mark = f"translation_start_{entry_id}"
-        end_mark = f"translation_end_{entry_id}"
-        if start_mark not in self.text.mark_names() or end_mark not in self.text.mark_names():
+        entry = self._history_by_id.get(entry_id)
+        if entry is None or not entry.pending:
             return
         translated = str(payload.get("text", "")).strip() or "(번역 결과 없음)"
         self.last_translation = translated
         self.translation_count += 1
-        self.text.configure(state=tk.NORMAL)
-        self.text.delete(start_mark, end_mark)
-        # Let the end mark follow only the replacement text, then pin it again
-        # so later transcript appends can never expand this entry's range.
-        self.text.mark_set(end_mark, start_mark)
-        self.text.mark_gravity(end_mark, tk.RIGHT)
-        self.text.insert(start_mark, translated + "\n", ("translated",))
-        history_entry = self._history_by_id.get(entry_id)
-        if history_entry is not None:
-            # ``end_mark`` now sits after the replacement because it has
-            # right gravity. Keep the persistent scrollback boundary there;
-            # a delayed trim can then remove a whole original/translation pair
-            # without leaving a stale translation marker at the document head.
-            self.text.mark_set(history_entry.end_mark, end_mark)
-            self.text.mark_gravity(history_entry.end_mark, tk.LEFT)
-            change = len(translated) - len(self._PENDING_TRANSLATION_TEXT)
-            history_entry.text_length += change
-            self._history_chars += change
-        self.text.mark_unset(start_mark, end_mark)
+        at_bottom = self._at_bottom()
+        block = entry.translation
+        cursor = QTextCursor(block)
+        cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+        cursor.beginEditBlock()
+        cursor.insertText(self._inline_lines(translated), self._line_format("translated"))
+        entry.pending = False
+        change = len(translated) - len(self._PENDING_TRANSLATION_TEXT)
+        entry.text_length += change
+        self._history_chars += change
         self._trim_history()
-        self.text.see(tk.END)
-        self.text.configure(state=tk.DISABLED)
-
-    def _remember_history_entry(self, entry_id: str, text_length: int) -> None:
-        self._history_mark_serial += 1
-        end_mark = f"history_end_{self._history_mark_serial}"
-        # ``tk.END`` is a stable boundary after the entry's final newline. A
-        # left-gravity mark stays before later transcript appends; replacement
-        # of this entry's pending translation resets it explicitly above.
-        self.text.mark_set(end_mark, tk.END)
-        self.text.mark_gravity(end_mark, tk.LEFT)
-        entry = _TranscriptHistoryEntry(entry_id, end_mark, max(0, text_length))
-        self._history.append(entry)
-        self._history_by_id[entry_id] = entry
-        self._history_chars += entry.text_length
+        cursor.endEditBlock()
+        self._follow_bottom(at_bottom)
 
     def _trim_history(self) -> None:
-        """Discard whole oldest entries once bounded scrollback is exceeded."""
-
+        removed = False
         while self._history and (
             len(self._history) > self.MAX_HISTORY_ENTRIES
             or self._history_chars > self.MAX_HISTORY_CHARS
         ):
             entry = self._history.popleft()
-            self._history_by_id.pop(entry.entry_id, None)
+            self._history_by_id.pop(entry.entry_id)
             self.entry_ids.discard(entry.entry_id)
-            try:
-                # The end index is exclusive, so this removes exactly the
-                # oldest entry (including its trailing newline) while all
-                # newer boundary marks shift down with the remaining text.
-                self.text.delete("1.0", entry.end_mark)
-            except tk.TclError:
-                # A destroyed or externally reset widget is handled by its
-                # owner; still release the Python-side references below.
-                pass
-            self.text.mark_unset(
-                entry.end_mark,
-                f"translation_start_{entry.entry_id}",
-                f"translation_end_{entry.entry_id}",
-            )
-            self._history_chars = max(0, self._history_chars - entry.text_length)
+            self._history_chars -= entry.text_length
+            removed = True
+        if not removed:
+            return
+        cursor = QTextCursor(self.text.document())
+        if self._history:
+            first_original = self._history[0].translation.previous()
+            cursor.setPosition(first_original.position(), QTextCursor.MoveMode.KeepAnchor)
+        else:
+            cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
 
     def _clear_transcript(self) -> None:
-        self.text.configure(state=tk.NORMAL)
-        self.text.delete("1.0", tk.END)
-        marks = [
-            name
-            for name in self.text.mark_names()
-            if name.startswith(("translation_start_", "translation_end_", "history_end_"))
-        ]
-        if marks:
-            self.text.mark_unset(*marks)
-        self.text.configure(state=tk.DISABLED)
+        self.text.clear()
         self.entry_ids.clear()
         self._history.clear()
         self._history_by_id.clear()
         self._history_chars = 0
 
     def drain(self) -> None:
-        handled_event = False
         for _ in range(self.MAX_EVENTS_PER_DRAIN):
             try:
                 kind, payload = self.events.get_nowait()
             except queue.Empty:
                 break
-            handled_event = True
             try:
                 if kind == "append":
                     self._append(payload)
                 elif kind == "translation":
                     self._translation(payload)
                 elif kind == "config":
-                    validate_display_colors(self.root, payload)
                     self.config.update(payload)
                     self.apply_config()
                 elif kind == "clear":
                     self._clear_transcript()
             except Exception as exc:
                 log_error("ui_event", exc)
-        self.root.after(
-            (
-                self.ACTIVE_EVENT_POLL_MS
-                if handled_event or not self.events.empty()
-                else self.IDLE_EVENT_POLL_MS
-            ),
-            self.drain,
-        )
+        if not self.events.empty():
+            self._wakeup.schedule()
 
-    def close(self) -> None:
+    def closeEvent(self, event: QCloseEvent) -> None:
         if not messagebox.askyesno(
-            "MekiScript 종료",
-            "MekiScript 창을 닫을까요?",
-            parent=self.root,
+            "MekiScript 종료", "MekiScript 창을 닫을까요?", parent=self
         ):
+            event.ignore()
             return
         if self._on_confirmed_close is not None:
             try:
                 self._on_confirmed_close()
             except Exception as exc:
                 log_error("manual_close_signal", exc)
-        self.root.destroy()
+        event.accept()
+
 
 
 def make_handler(
@@ -478,10 +486,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_transcript_self_test() -> None:
-    root = tk.Tk()
-    root.withdraw()
+    application = ensure_application()
+    window = ScriptWindow(ScriptConfig(topmost=False))
     try:
-        window = ScriptWindow(root, ScriptConfig(topmost=False))
         originals = [f"원문 {index}" for index in range(1, 9)]
         translations = [f"번역 {index}" for index in range(1, 9)]
         for index, original in enumerate(originals, 1):
@@ -489,7 +496,7 @@ def run_transcript_self_test() -> None:
         for index in range(8, 0, -1):
             window._translation({"id": f"chunk-{index}", "text": translations[index - 1]})
 
-        transcript = window.text.get("1.0", "end-1c")
+        transcript = window.text.toPlainText()
         for original, translated in zip(originals, translations):
             if transcript.count(original) != 1 or transcript.count(translated) != 1:
                 raise RuntimeError("MekiScript 누적 대본 자체 검증에 실패했습니다.")
@@ -502,7 +509,7 @@ def run_transcript_self_test() -> None:
 
         # Verify that a long-running live session retains only bounded
         # scrollback and that removing an entry also removes its late-result
-        # markers. This exercises the same Tk mark behavior used in production.
+        # references to the corresponding document blocks.
         window._clear_transcript()
         total_history_entries = window.MAX_HISTORY_ENTRIES + 8
         for index in range(total_history_entries):
@@ -511,11 +518,12 @@ def run_transcript_self_test() -> None:
             window._translation({"id": entry_id, "text": f"번역 history {index}"})
         if len(window.entry_ids) != window.MAX_HISTORY_ENTRIES:
             raise RuntimeError("MekiScript 누적 대본 메모리 제한 검증에 실패했습니다.")
-        transcript = window.text.get("1.0", "end-1c")
+        transcript = window.text.toPlainText()
         if "원문 history 0" in transcript or f"원문 history {total_history_entries - 1}" not in transcript:
             raise RuntimeError("MekiScript 누적 대본 스크롤백 정리에 실패했습니다.")
     finally:
-        root.destroy()
+        window.deleteLater()
+        application.processEvents()
 
 
 def main() -> int:
@@ -534,9 +542,7 @@ def main() -> int:
         debug_log=args.debug_log,
     )
     set_windows_app_id("MekiScript")
-    root = tk.Tk()
-    install_tk_exception_hook(root)
-    apply_tk_icon(root)
+    application = ensure_application()
     manual_close_confirmed = threading.Event()
 
     def on_confirmed_close() -> None:
@@ -547,9 +553,9 @@ def main() -> int:
             app_name="MekiScript",
         )
 
-    window = ScriptWindow(root, config, on_confirmed_close=on_confirmed_close)
+    window = ScriptWindow(config, on_confirmed_close=on_confirmed_close)
     ui_heartbeat = UiHeartbeat()
-    ui_heartbeat.schedule(root)
+    ui_heartbeat.schedule(window)
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port),
         make_handler(window, ui_heartbeat),
@@ -557,7 +563,8 @@ def main() -> int:
     server.daemon_threads = True
     server.block_on_close = False
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    root.mainloop()
+    window.show()
+    application.exec()
     server.shutdown()
     server.server_close()
     return MANUAL_CLOSE_EXIT_CODE if manual_close_confirmed.is_set() else 0

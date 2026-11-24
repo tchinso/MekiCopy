@@ -6,7 +6,7 @@ an ordinary :class:`queue.Queue`.  The owning UI can drain that queue from its
 own event loop, decide how to terminate/restart the child, and then acknowledge
 the outcome.
 
-This module deliberately has no Tk or MekiCopy imports.  It can also be used by
+This module deliberately has no GUI or MekiCopy imports.  It can also be used by
 command-line launchers and is safe to unit-test without starting child
 processes.
 """
@@ -297,7 +297,7 @@ class CompanionWatchdog:
         """Atomically reserve a queued recovery request for its owner.
 
         A companion can recover naturally after the watchdog queued a request
-        but before Tk drains it.  In that case :meth:`_record_success` clears
+        but before the GUI drains it.  In that case :meth:`_record_success` clears
         the unclaimed request and this method returns ``False``.  Once claimed,
         a later probe cannot cancel a recovery already being performed by the
         owner.

@@ -5,12 +5,12 @@ from PyInstaller.utils.hooks import collect_all
 from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import copy_metadata
-from build_runtime_data import ssl_runtime_data
+from build_runtime_data import qt_license_data, ssl_runtime_data, without_windows_icu
 
 # Optional native libraries and models are attached only to Full. Both
 # distributions retain the same application executable and Python modules.
 datas = [('MekiCopy.ico', '.'), ('assets/gpu_runtime_manifest.json', 'assets')]
-datas += ssl_runtime_data()
+datas += ssl_runtime_data() + qt_license_data()
 binaries = []
 hiddenimports = [
     'mekicopy',
@@ -19,10 +19,6 @@ hiddenimports = [
     'meki_subtitle_pipeline',
     'meki_subtitle_window',
     'onnxruntime.capi.onnxruntime_pybind11_state',
-    'tkinter',
-    'tkinter.constants',
-    'tkinter.messagebox',
-    'tkinter.simpledialog',
 ]
 datas += collect_data_files('huggingface_hub')
 datas += copy_metadata('meikiocr')
@@ -52,13 +48,13 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'pyperclip'],
+    excludes=['PyQt5', 'PyQt6', 'PySide2', 'tkinter', 'pyperclip'],
     noarchive=False,
     optimize=0,
 )
 # Hooks and native dependency scanning may discover installed CUDA libraries.
 # These are supplied by the verified optional runtime installer or Full payload.
-a.binaries = [entry for entry in a.binaries
+a.binaries = [entry for entry in without_windows_icu(a.binaries)
               if not entry[0].replace('\\', '/').lower().startswith('nvidia/')
               and '/nvidia/' not in entry[1].replace('\\', '/').lower()]
 pyz = PYZ(a.pure)

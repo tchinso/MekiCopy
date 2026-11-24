@@ -103,6 +103,42 @@ class GpuRuntimeTests(unittest.TestCase):
             self.assertEqual(runtime.prepare_gpu_runtime(self.resources), directories)
         self.assertFalse(abandoned.parent.exists())
 
+    def test_publish_retries_windows_file_locks_then_renames_verified_stage(self) -> None:
+        stage, installed = self.root / "stage", self.root / "installed"
+        stage.mkdir()
+        (stage / "verified.dll").write_bytes(b"verified")
+        original_replace = runtime.os.replace
+        codes = iter((5, 32, 33))
+
+        def temporarily_locked(source, target):
+            code = next(codes, None)
+            if code is None:
+                return original_replace(source, target)
+            exc = PermissionError("locked")
+            exc.winerror = code
+            raise exc
+
+        with mock.patch.object(runtime.os, "replace", side_effect=temporarily_locked), \
+             mock.patch.object(runtime.time, "sleep") as sleep:
+            runtime._publish_runtime(stage, installed, None)
+        self.assertEqual(sleep.call_count, 3)
+        self.assertFalse(stage.exists())
+        self.assertEqual((installed / "verified.dll").read_bytes(), b"verified")
+
+    def test_publish_fails_promptly_for_permanent_errors(self) -> None:
+        stage, installed = self.root / "stage", self.root / "installed"
+        stage.mkdir()
+        for code, attempts in ((5, 5), (112, 1)):
+            exc = OSError("publish failed")
+            exc.winerror = code
+            with self.subTest(code=code), mock.patch.object(runtime.os, "replace", side_effect=exc) as rename, \
+                 mock.patch.object(runtime.time, "sleep") as sleep:
+                with self.assertRaises(OSError) as raised:
+                    runtime._publish_runtime(stage, installed, None)
+                self.assertIs(raised.exception, exc)
+                self.assertEqual(rename.call_count, attempts)
+                self.assertEqual(sleep.call_count, attempts - 1)
+
     def test_staging_cleanup_does_not_follow_junctions(self) -> None:
         staging = self.cache / ".staging-junction"
         staging.mkdir(parents=True)

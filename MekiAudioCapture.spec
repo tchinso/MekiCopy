@@ -1,17 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
-from build_runtime_data import ssl_runtime_data
+from build_runtime_data import qt_license_data, ssl_runtime_data, without_windows_icu
 from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
-datas = ssl_runtime_data()
+datas = ssl_runtime_data() + qt_license_data()
 if Path("MekiCopy.ico").exists():
     datas.append(("MekiCopy.ico", "."))
 
 binaries = collect_dynamic_libs("sherpa_onnx")
 hiddenimports = [
     "meki_audio_capture",
-    "tkinter",
-    "tkinter.constants",
     "numpy",
     "soundcard",
     "onnxruntime.capi.onnxruntime_pybind11_state",
@@ -27,14 +25,14 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["PyQt5", "PyQt6", "PySide2", "PySide6"],
+    excludes=["PyQt5", "PyQt6", "PySide2", "tkinter"],
     noarchive=False,
     optimize=0,
 )
 # Shared Silero probability inference is CPU-only. Do not duplicate the GPU
 # provider plugins or optional NVIDIA payload already owned by MekiCopy.
 a.binaries = [
-    entry for entry in a.binaries
+    entry for entry in without_windows_icu(a.binaries)
     if Path(entry[0]).name.lower() not in {
         "onnxruntime_providers_cuda.dll", "onnxruntime_providers_tensorrt.dll"
     }

@@ -1,201 +1,279 @@
 from __future__ import annotations
 
 import ctypes
-import tkinter as tk
+import os
 from ctypes import wintypes
-from typing import Callable
 
 import mss
-from tkinter import messagebox
-from system_logging import install_tk_exception_hook
-from mekicopy_capture import MIN_SIZE_PX, Region, enable_dpi_awareness as _enable_dpi_awareness
+from PySide6.QtCore import QEventLoop, QRectF, Qt
+from PySide6.QtGui import QColor, QCursor, QFontMetrics, QPainter, QPen
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QListWidget, QVBoxLayout, QWidget
+
+from mekicopy_capture import MIN_SIZE_PX, Region, enable_dpi_awareness
 from mekicopy_ocr import ocr_and_translate
-from mekicopy_runtime import _prepare_tk_library_paths, _set_window_icon
-from mekicopy_settings import Bookmark, Rect, load_bookmarks, save_detached_region
+from mekicopy_runtime import _set_window_icon
+from mekicopy_settings import Bookmark, Rect, load_bookmarks
+from mekicopy_theme import (
+    ACCENT_INK,
+    BG,
+    OUTLINE,
+    RoundedButton,
+    configure_window_theme,
+    ensure_application,
+    make_font,
+    messagebox,
+)
 
 EDGE_GRAB_PX = 8
-SELECTION_INSTRUCTION_FONT_SIZE = 36
 
-class SelectionUI:
+
+class _DesktopPane(QWidget):
+    """Draw a single screen in Qt coordinates while the selection stays in pixels."""
+
+    def __init__(self, owner: _DesktopOverlay, screen, bounds: Rect, parent: QWidget | None) -> None:
+        flags = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        super().__init__(parent, flags)
+        self.owner = owner
+        self.bounds = bounds
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        if owner.selecting:
+            self.setMouseTracking(True)
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setScreen(screen)
+        self.setGeometry(screen.geometry())
+
+    def _rect_on_screen(self, rect: Rect) -> QRectF:
+        sx = self.width() / self.bounds.width
+        sy = self.height() / self.bounds.height
+        return QRectF(
+            (rect.left - self.bounds.left) * sx,
+            (rect.top - self.bounds.top) * sy,
+            rect.width * sx,
+            rect.height * sy,
+        )
+
+    def _physical_pointer(self, event) -> tuple[int, int]:
+        if os.name == "nt":
+            point = wintypes.POINT()
+            # Qt logical desktop coordinates can have gaps on mixed-DPI
+            # Windows desktops. Capture coordinates are always physical.
+            if ctypes.windll.user32.GetPhysicalCursorPos(ctypes.byref(point)):
+                return point.x, point.y
+        pos = event.position()
+        return (
+            self.bounds.left + round(pos.x() * self.bounds.width / self.width()),
+            self.bounds.top + round(pos.y() * self.bounds.height / self.height()),
+        )
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor(24, 12, 24, 95)
+        painter.fillRect(event.rect(), color)
+
+        selected = self.owner.selection
+        if self.owner.selecting and selected is not None:
+            selected_rect = self._rect_on_screen(selected.normalized())
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            # Keep a nearly transparent pixel so Windows still delivers mouse
+            # input inside the selected area of this layered window.
+            painter.fillRect(selected_rect, QColor(0, 0, 0, 3))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            self._outline(painter, selected_rect, "#ffbad0", 2)
+            for point in (
+                (selected_rect.left(), selected_rect.center().y()),
+                (selected_rect.right(), selected_rect.center().y()),
+                (selected_rect.center().x(), selected_rect.top()),
+                (selected_rect.center().x(), selected_rect.bottom()),
+            ):
+                x, y = point
+                painter.setBrush(QColor(BG))
+                painter.drawEllipse(QRectF(x - 4, y - 4, 8, 8))
+
+        for region, outline, width in self.owner.annotations:
+            rect = Rect(region.left, region.top, region.left + region.width, region.top + region.height)
+            self._outline(painter, self._rect_on_screen(rect), outline, width)
+
+        font = make_font(("Malgun Gothic", 11, "bold"))
+        metrics = QFontMetrics(font)
+        box = QRectF(14, 14, metrics.horizontalAdvance(self.owner.instruction) + 24, 33)
+        painter.setPen(QPen(QColor(OUTLINE), 1.0))
+        painter.setBrush(QColor(BG))
+        painter.drawRoundedRect(box, 12, 12)
+        painter.setFont(font)
+        painter.setPen(QColor(ACCENT_INK))
+        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, self.owner.instruction)
+        painter.end()
+
+    @staticmethod
+    def _outline(painter: QPainter, rectangle: QRectF, outline: str, width: int) -> None:
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#59213a"), width + 2))
+        painter.drawRect(rectangle)
+        painter.setPen(QPen(QColor(outline), width))
+        painter.drawRect(rectangle)
+
+    def mousePressEvent(self, event) -> None:
+        if self.owner.selecting and event.button() == Qt.MouseButton.LeftButton:
+            self.owner.start_drag(*self._physical_pointer(event))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.owner.selecting:
+            x, y = self._physical_pointer(event)
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self.owner.drag_to(x, y)
+            else:
+                hit = self.owner.edge_at(x, y)
+                cursor = {
+                    "left": Qt.CursorShape.SizeHorCursor,
+                    "right": Qt.CursorShape.SizeHorCursor,
+                    "top": Qt.CursorShape.SizeVerCursor,
+                    "bottom": Qt.CursorShape.SizeVerCursor,
+                    "move": Qt.CursorShape.SizeAllCursor,
+                }.get(hit, Qt.CursorShape.CrossCursor)
+                self.setCursor(cursor)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self.owner.selecting and event.button() == Qt.MouseButton.LeftButton:
+            self.owner.drag_to(*self._physical_pointer(event))
+            self.owner.end_drag()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.owner.finish()
+        elif self.owner.selecting and event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+            self.owner.confirm()
+        else:
+            super().keyPressEvent(event)
+
+    def closeEvent(self, event) -> None:
+        self.owner.finish()
+        super().closeEvent(event)
+
+
+class _DesktopOverlay:
     def __init__(
         self,
-        root: tk.Tk,
-        initial_rect: Rect | None = None,
-        on_confirm: Callable[[Region], None] | None = None,
-        capture_on_enter: bool = False,
-    ):
-        self.root = root
-        self.canvas = None
-        self.rect_id = None
-        self.handle_ids: dict[str, int] = {}
-        self.start_point: tuple[int, int] | None = None
-        self.selection: Rect | None = None
+        parent: QWidget | None,
+        instruction: str,
+        *,
+        selecting: bool = False,
+        initial_region: Region | Bookmark | None = None,
+        annotations: tuple[tuple[Region, str, int], ...] = (),
+    ) -> None:
+        app = ensure_application()
+        with mss.mss() as capture:
+            monitors = list(capture.monitors[1:])
+
+        self.annotations = annotations
+        self.instruction = instruction
+        self.selecting = selecting
+        self.selection = (
+            Rect(initial_region.left, initial_region.top,
+                 initial_region.left + initial_region.width, initial_region.top + initial_region.height)
+            if initial_region is not None else None
+        )
+        self.drawn_selection = self.selection.normalized() if self.selection is not None else None
+        self.result: Region | None = None
         self.drag_mode: str | None = None
-        self.initial_rect = initial_rect
-        self.on_confirm = on_confirm
-        self.capture_on_enter = capture_on_enter
-
-        with mss.mss() as sct:
-            monitor = sct.monitors[0]
-            self.monitors = list(sct.monitors[1:])
-        self.virtual_left = monitor["left"]
-        self.virtual_top = monitor["top"]
-        self.virtual_width = monitor["width"]
-        self.virtual_height = monitor["height"]
-        if not self.monitors:
-            self.monitors = [monitor]
-
-        self._setup_root()
-        self._setup_canvas()
-        self._bind_events()
-        self._draw_instructions()
-        if self.initial_rect:
-            self._set_selection(self.initial_rect)
-
-    def _setup_root(self) -> None:
-        self.root.attributes("-topmost", True)
-        self.root.attributes("-fullscreen", False)
-        self.root.overrideredirect(True)
-        geometry = (
-            f"{self.virtual_width}x{self.virtual_height}"
-            f"+{self.virtual_left}+{self.virtual_top}"
-        )
-        self.root.geometry(geometry)
-        self.root.configure(bg="black")
-        self.root.attributes("-alpha", 0.25)
-        self.root.focus_force()
-
-    def _setup_canvas(self) -> None:
-        self.canvas = tk.Canvas(
-            self.root,
-            bg="black",
-            highlightthickness=0,
-            width=self.virtual_width,
-            height=self.virtual_height,
-        )
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-
-    def _bind_events(self) -> None:
-        self.canvas.bind("<ButtonPress-1>", self._on_mouse_down)
-        self.canvas.bind("<B1-Motion>", self._on_mouse_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._on_mouse_up)
-        self.root.bind("<Return>", self._on_capture)
-        self.root.bind("<Escape>", self._on_cancel)
-
-    def _draw_instructions(self) -> None:
-        if self.capture_on_enter:
-            text = "드래그로 미세 조정, <Enter> 번역 후 표시"
-        else:
-            text = "드래그로 미세 조정, <Enter> 설정"
-        for monitor in self.monitors:
-            x = monitor["left"] - self.virtual_left + 24
-            y = monitor["top"] - self.virtual_top + 24
-            self.canvas.create_text(
-                x + 4,
-                y + 4,
-                anchor="nw",
-                text=text,
-                fill="black",
-                font=("Segoe UI", SELECTION_INSTRUCTION_FONT_SIZE, "bold"),
+        self.start_point: tuple[int, int] | None = None
+        self.loop = QEventLoop()
+        self.panes = []
+        screens = app.screens()
+        for screen in screens:
+            geometry = screen.geometry()
+            ratio = screen.devicePixelRatio()
+            monitor = min(
+                monitors,
+                key=lambda item: (
+                    abs(item["left"] - geometry.x()) + abs(item["top"] - geometry.y()),
+                    abs(item["width"] - geometry.width() * ratio) +
+                    abs(item["height"] - geometry.height() * ratio),
+                ),
+                default=None,
             )
-            self.canvas.create_text(
-                x,
-                y,
-                anchor="nw",
-                text=text,
-                fill="white",
-                font=("Segoe UI", SELECTION_INSTRUCTION_FONT_SIZE, "bold"),
-            )
+            if monitor is None:
+                left, top = geometry.x(), geometry.y()
+                width, height = round(geometry.width() * ratio), round(geometry.height() * ratio)
+            else:
+                left, top = monitor["left"], monitor["top"]
+                width, height = monitor["width"], monitor["height"]
+                monitors.remove(monitor)
+            self.panes.append(_DesktopPane(self, screen, Rect(left, top, left + width, top + height), parent))
 
-    def _canvas_coords(self, x: int, y: int) -> tuple[int, int]:
-        return x - self.virtual_left, y - self.virtual_top
+    def exec(self) -> Region | None:
+        if not self.panes:
+            return None
+        for pane in self.panes:
+            pane.show()
+            pane.raise_()
+        pointer = QCursor.pos()
+        active_pane = next((pane for pane in self.panes if pane.geometry().contains(pointer)), self.panes[0])
+        active_pane.activateWindow()
+        active_pane.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        self.loop.exec()
+        for pane in self.panes:
+            pane.deleteLater()
+        ensure_application().processEvents()
+        return self.result
 
-    def _screen_coords(self, x: int, y: int) -> tuple[int, int]:
-        return x + self.virtual_left, y + self.virtual_top
+    def finish(self) -> None:
+        for pane in self.panes:
+            pane.hide()
+        self.loop.quit()
 
-    def _set_selection(self, rect: Rect) -> None:
-        rect = rect.normalized()
-        self.selection = rect
-        self._draw_selection()
-
-    def _draw_selection(self) -> None:
-        if not self.selection:
+    def confirm(self) -> None:
+        if self.selection is None:
             return
         rect = self.selection.normalized()
-        if self.rect_id:
-            self.canvas.delete(self.rect_id)
-        for handle_id in self.handle_ids.values():
-            self.canvas.delete(handle_id)
-        self.rect_id = self.canvas.create_rectangle(
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom,
-            outline="yellow",
-            width=2,
-        )
-        self.handle_ids = {}
-        self._draw_handles(rect)
+        if rect.width < MIN_SIZE_PX or rect.height < MIN_SIZE_PX:
+            return
+        self.result = Region(rect.left, rect.top, rect.width, rect.height)
+        self.finish()
 
-    def _draw_handles(self, rect: Rect) -> None:
-        cx = (rect.left + rect.right) // 2
-        cy = (rect.top + rect.bottom) // 2
-        self.handle_ids["left"] = self._draw_handle(rect.left, cy)
-        self.handle_ids["right"] = self._draw_handle(rect.right, cy)
-        self.handle_ids["top"] = self._draw_handle(cx, rect.top)
-        self.handle_ids["bottom"] = self._draw_handle(cx, rect.bottom)
-
-    def _draw_handle(self, x: int, y: int) -> int:
-        size = 6
-        return self.canvas.create_rectangle(
-            x - size,
-            y - size,
-            x + size,
-            y + size,
-            outline="yellow",
-            fill="black",
-        )
-
-    def _edge_hit_test(self, x: int, y: int) -> str | None:
-        if not self.selection:
+    def edge_at(self, x: int, y: int) -> str | None:
+        if self.selection is None:
             return None
         rect = self.selection.normalized()
-        if abs(x - rect.left) <= EDGE_GRAB_PX and rect.top <= y <= rect.bottom:
-            return "left"
-        if abs(x - rect.right) <= EDGE_GRAB_PX and rect.top <= y <= rect.bottom:
-            return "right"
-        if abs(y - rect.top) <= EDGE_GRAB_PX and rect.left <= x <= rect.right:
-            return "top"
-        if abs(y - rect.bottom) <= EDGE_GRAB_PX and rect.left <= x <= rect.right:
-            return "bottom"
-        if rect.left <= x <= rect.right and rect.top <= y <= rect.bottom:
-            return "move"
+        if rect.top <= y <= rect.bottom:
+            if abs(x - rect.left) <= EDGE_GRAB_PX:
+                return "left"
+            if abs(x - rect.right) <= EDGE_GRAB_PX:
+                return "right"
+        if rect.left <= x <= rect.right:
+            if abs(y - rect.top) <= EDGE_GRAB_PX:
+                return "top"
+            if abs(y - rect.bottom) <= EDGE_GRAB_PX:
+                return "bottom"
+            if rect.top <= y <= rect.bottom:
+                return "move"
         return None
 
-    def _on_mouse_down(self, event: tk.Event) -> None:
-        x, y = event.x, event.y
-        if self.selection:
-            hit = self._edge_hit_test(x, y)
-            if hit:
-                self.drag_mode = hit
-                self.start_point = (x, y)
-                return
-        self.drag_mode = "new"
+    def start_drag(self, x: int, y: int) -> None:
+        self.drag_mode = self.edge_at(x, y) or "new"
         self.start_point = (x, y)
-        self.selection = Rect(x, y, x, y)
-        self._draw_selection()
+        if self.drag_mode == "new":
+            self.selection = Rect(x, y, x, y)
+            self._redraw()
 
-    def _on_mouse_drag(self, event: tk.Event) -> None:
-        if not self.start_point or not self.selection:
+    def drag_to(self, x: int, y: int) -> None:
+        if self.start_point is None or self.selection is None:
             return
-        x, y = event.x, event.y
         rect = self.selection
         if self.drag_mode == "new":
-            rect.right = x
-            rect.bottom = y
+            rect.right, rect.bottom = x, y
         elif self.drag_mode == "move":
-            dx = x - self.start_point[0]
-            dy = y - self.start_point[1]
+            dx, dy = x - self.start_point[0], y - self.start_point[1]
             rect.left += dx
             rect.right += dx
             rect.top += dy
@@ -209,281 +287,107 @@ class SelectionUI:
             rect.top = y
         elif self.drag_mode == "bottom":
             rect.bottom = y
-        self.selection = rect
-        self._draw_selection()
+        self._redraw()
 
-    def _on_mouse_up(self, event: tk.Event) -> None:
-        if not self.selection:
-            return
-        rect = self.selection.normalized()
-        if rect.width < MIN_SIZE_PX or rect.height < MIN_SIZE_PX:
-            self.selection = None
-            if self.rect_id:
-                self.canvas.delete(self.rect_id)
-            return
-        self.selection = rect
-        self.drag_mode = None
+    def end_drag(self) -> None:
         self.start_point = None
-        self._draw_selection()
+        self.drag_mode = None
+        if self.selection is not None:
+            rect = self.selection.normalized()
+            self.selection = rect if rect.width >= MIN_SIZE_PX and rect.height >= MIN_SIZE_PX else None
+        self._redraw()
 
-    def _on_capture(self, event: tk.Event | None = None) -> None:
-        if not self.selection:
-            return
-        rect = self.selection.normalized()
-        left, top = self._screen_coords(rect.left, rect.top)
-        width = rect.width
-        height = rect.height
-        if self.capture_on_enter:
-            self.root.withdraw()
-            self.root.update_idletasks()
-            ocr_and_translate(left, top, width, height, parent=self.root)
-        elif self.on_confirm:
-            self.on_confirm(Region(left=left, top=top, width=width, height=height))
-        self.root.destroy()
-
-    def _on_cancel(self, event: tk.Event | None = None) -> None:
-        self.root.destroy()
+    def _redraw(self) -> None:
+        before = self.drawn_selection
+        after = self.selection.normalized() if self.selection is not None else None
+        self.drawn_selection = after
+        changed = [rect for rect in (before, after) if rect is not None]
+        for pane in self.panes:
+            for rect in changed:
+                dirty = pane._rect_on_screen(rect).adjusted(-8, -8, 8, 8).toAlignedRect()
+                pane.update(dirty.intersected(pane.rect()))
 
 
-class RegionViewUI:
-    def __init__(
-        self,
-        root: tk.Toplevel | tk.Tk,
-        draft_region: Region | None,
-        active_region: Region | None,
-    ):
-        self.root = root
-        self.canvas = None
-        self.draft_region = draft_region
-        self.active_region = active_region
-
-        with mss.mss() as sct:
-            monitor = sct.monitors[0]
-            self.monitors = list(sct.monitors[1:])
-        self.virtual_left = monitor["left"]
-        self.virtual_top = monitor["top"]
-        self.virtual_width = monitor["width"]
-        self.virtual_height = monitor["height"]
-        if not self.monitors:
-            self.monitors = [monitor]
-
-        self._setup_root()
-        self._setup_canvas()
-        self._bind_events()
-        self._draw_regions()
-
-    def _setup_root(self) -> None:
-        self.root.attributes("-topmost", True)
-        self.root.attributes("-fullscreen", False)
-        self.root.overrideredirect(True)
-        geometry = (
-            f"{self.virtual_width}x{self.virtual_height}"
-            f"+{self.virtual_left}+{self.virtual_top}"
-        )
-        self.root.geometry(geometry)
-        self.root.configure(bg="black")
-        self.root.attributes("-alpha", 0.30)
-        self.root.focus_force()
-
-    def _setup_canvas(self) -> None:
-        self.canvas = tk.Canvas(
-            self.root,
-            bg="black",
-            highlightthickness=0,
-            width=self.virtual_width,
-            height=self.virtual_height,
-        )
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-
-    def _bind_events(self) -> None:
-        self.root.bind("<Escape>", self._on_cancel)
-
-    def _to_canvas_rect(self, region: Region) -> Rect:
-        return Rect(
-            region.left - self.virtual_left,
-            region.top - self.virtual_top,
-            region.left + region.width - self.virtual_left,
-            region.top + region.height - self.virtual_top,
-        )
-
-    def _draw_regions(self) -> None:
-        self.canvas.create_text(
-            20,
-            20,
-            anchor="nw",
-            text="임시 영역: 파란색 / 확정 영역: 빨간색 / Esc 닫기",
-            fill="white",
-            font=("Segoe UI", 12, "bold"),
-        )
-        if self.draft_region:
-            self._draw_region(self.draft_region, outline="#00d7ff", width=3)
-        if self.active_region:
-            self._draw_region(self.active_region, outline="#ff405c", width=5)
-
-    def _draw_region(self, region: Region, outline: str, width: int) -> None:
-        rect = self._to_canvas_rect(region).normalized()
-        self.canvas.create_rectangle(
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom,
-            outline=outline,
-            width=width,
-        )
-
-    def _on_cancel(self, event: tk.Event | None = None) -> None:
-        self.root.destroy()
-
-class BookmarkPicker(tk.Toplevel):
-    def __init__(self, owner: tk.Misc, bookmarks: dict[str, Bookmark]):
-        super().__init__(owner)
-        self.title("MekiCopy 북마크 선택")
+class BookmarkPicker(QDialog):
+    def __init__(self, bookmarks: dict[str, Bookmark], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        configure_window_theme(self)
         _set_window_icon(self)
+        self.setWindowTitle("MekiCopy 북마크 선택")
+        self.resize(334, min(285, 102 + 24 * len(bookmarks)))
         self.bookmarks = bookmarks
         self.selected: Bookmark | None = None
-        self._build_ui()
-        self.transient(owner)
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
-    def _build_ui(self) -> None:
-        self.geometry("320x240")
-        self.indicator = tk.Label(self, text="북마크를 선택하세요")
-        self.indicator.pack(pady=10)
-        self.listbox = tk.Listbox(self)
-        for name in sorted(self.bookmarks):
-            self.listbox.insert(tk.END, name)
-        self.listbox.pack(fill=tk.BOTH, expand=True, padx=10)
-        if self.listbox.size():
-            self.listbox.selection_set(0)
-            self.listbox.activate(0)
-            self.listbox.focus_set()
-        button = tk.Button(self, text="선택", command=self._on_select)
-        button.pack(pady=10)
-        self.bind("<Return>", lambda _event: self._on_select())
-        self.bind("<Escape>", lambda _event: self.destroy())
-        self.listbox.bind("<Return>", lambda _event: self._on_select())
-        self.listbox.bind("<Double-Button-1>", lambda _event: self._on_select())
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+        layout.addWidget(QLabel("북마크를 선택하세요", self))
+        self.listbox = QListWidget(self)
+        self.listbox.setStyleSheet("QListWidget::item { padding: 3px 5px; border-radius: 4px; }")
+        self.listbox.addItems(sorted(bookmarks))
+        self.listbox.setCurrentRow(0)
+        self.listbox.itemDoubleClicked.connect(lambda _item: self._on_select())
+        layout.addWidget(self.listbox)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(RoundedButton(self, "취소", self.reject, height=31, radius=11, variant="subtle"))
+        choose = RoundedButton(self, "선택", self._on_select, height=31, radius=11, variant="primary")
+        choose.setDefault(True)
+        actions.addWidget(choose)
+        layout.addLayout(actions)
+        self.listbox.setFocus()
 
     def _on_select(self) -> None:
-        selection = self.listbox.curselection()
-        if not selection:
-            return
-        name = self.listbox.get(selection[0])
-        self.selected = self.bookmarks[name]
-        self.destroy()
+        item = self.listbox.currentItem()
+        if item is not None:
+            self.selected = self.bookmarks[item.text()]
+            self.accept()
 
 
-def _show_bookmark_picker(
-    bookmarks: dict[str, Bookmark],
-    parent: tk.Misc | None = None,
-) -> Bookmark | None:
-    _prepare_tk_library_paths()
-    temporary_root: tk.Tk | None = None
-    owner = parent
-    if owner is None:
-        temporary_root = tk.Tk()
-        install_tk_exception_hook(temporary_root)
-        temporary_root.withdraw()
-        owner = temporary_root
-
-    picker = BookmarkPicker(owner, bookmarks)
-    try:
-        picker.grab_set()
-    except tk.TclError:
-        pass
-    picker.focus_force()
-    owner.wait_window(picker)
-    selected = picker.selected
-    if temporary_root and temporary_root.winfo_exists():
-        temporary_root.destroy()
-    return selected
-
-
-def run_picker_and_capture(parent: tk.Misc | None = None) -> None:
+def pick_bookmark(parent: QWidget | None = None) -> Bookmark | None:
     bookmarks = load_bookmarks()
     if not bookmarks:
         messagebox.showerror("MekiCopy", "저장된 북마크가 없습니다.", parent=parent)
-        return
-    bookmark = _show_bookmark_picker(bookmarks, parent=parent)
+        return None
+    ensure_application()
+    dialog = BookmarkPicker(bookmarks, parent)
+    dialog.exec()
+    return dialog.selected
+
+
+def run_picker_and_capture(parent: QWidget | None = None) -> None:
+    bookmark = pick_bookmark(parent=parent)
     if bookmark:
-        ocr_and_translate(
-            bookmark.left, bookmark.top, bookmark.width, bookmark.height, parent=parent
-        )
-
-
-def pick_bookmark(parent: tk.Misc | None = None) -> Bookmark | None:
-    bookmarks = load_bookmarks()
-    if not bookmarks:
-        messagebox.showerror("MekiCopy", "저장된 북마크가 없습니다.", parent=parent)
-        return None
-    return _show_bookmark_picker(bookmarks, parent=parent)
-
-
-def build_initial_rect(region: Region | Bookmark | None) -> Rect | None:
-    _enable_dpi_awareness()
-    if not region:
-        return None
-    rect_left = region.left
-    rect_top = region.top
-    rect_right = rect_left + region.width
-    rect_bottom = rect_top + region.height
-    with mss.mss() as sct:
-        monitor = sct.monitors[0]
-    left_offset = monitor["left"]
-    top_offset = monitor["top"]
-    return Rect(
-        rect_left - left_offset,
-        rect_top - top_offset,
-        rect_right - left_offset,
-        rect_bottom - top_offset,
-    )
+        ocr_and_translate(bookmark.left, bookmark.top, bookmark.width, bookmark.height, parent=parent)
 
 
 def run_selection(
     initial_region: Region | Bookmark | None = None,
     capture_on_enter: bool = True,
-    parent: tk.Tk | None = None,
+    parent: QWidget | None = None,
 ) -> Region | None:
-    _enable_dpi_awareness()
-    _prepare_tk_library_paths()
-    selection: Region | None = None
-
-    def store_selection(region: Region) -> None:
-        nonlocal selection
-        selection = region
-
-    initial_rect = build_initial_rect(initial_region)
-    if parent:
-        root = tk.Toplevel(parent)
-    else:
-        root = tk.Tk()
-        install_tk_exception_hook(root)
-    SelectionUI(
-        root,
-        initial_rect=initial_rect,
-        on_confirm=store_selection,
-        capture_on_enter=capture_on_enter,
+    enable_dpi_awareness()
+    instruction = "드래그로 영역 조정  ·  Enter 번역 후 표시  ·  Esc 취소" if capture_on_enter else (
+        "드래그로 영역 조정  ·  Enter 선택  ·  Esc 취소"
     )
-    if parent:
-        parent.wait_window(root)
-    else:
-        root.mainloop()
-    return selection
+    region = _DesktopOverlay(parent, instruction, selecting=True, initial_region=initial_region).exec()
+    if region is not None and capture_on_enter:
+        if os.name == "nt":
+            ctypes.windll.dwmapi.DwmFlush()
+        ocr_and_translate(region.left, region.top, region.width, region.height, parent=parent)
+    return region
 
 
 def run_region_view(
     draft_region: Region | None,
     active_region: Region | None,
-    parent: tk.Tk | None = None,
+    parent: QWidget | None = None,
 ) -> None:
-    _prepare_tk_library_paths()
-    if parent:
-        root = tk.Toplevel(parent)
-    else:
-        root = tk.Tk()
-        install_tk_exception_hook(root)
-    RegionViewUI(root, draft_region=draft_region, active_region=active_region)
-    if parent:
-        parent.wait_window(root)
-    else:
-        root.mainloop()
+    enable_dpi_awareness()
+    annotations = tuple(
+        (region, color, width) for region, color, width in (
+            (draft_region, "#82dcff", 3), (active_region, "#ff9ab8", 3),
+        ) if region is not None
+    )
+    _DesktopOverlay(parent, "하늘색 임시 영역  ·  분홍색 확정 영역  ·  Esc 닫기", annotations=annotations).exec()

@@ -14,30 +14,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-from runtime_paths import prepare_tk_environment
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QColor, QCloseEvent, QFont, QKeySequence, QMouseEvent, QPalette, QShortcut
+from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
+
+from app_identity import apply_qt_icon, set_windows_app_id
+from mekicopy_theme import TimerHost, ensure_application, messagebox
 from overlay_receipts import DisplayReceipts
-
-TK_RUNTIME_DIRNAME = "MekiCopyRuntime"
-_DLL_DIR_HANDLES = []
-
-if getattr(sys, "frozen", False):
-    _frozen_resource_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-    if os.name == "nt":
-        path_items = os.environ.get("PATH", "").split(os.pathsep)
-        if _frozen_resource_dir not in path_items:
-            os.environ["PATH"] = os.pathsep.join([_frozen_resource_dir, *path_items])
-        if hasattr(os, "add_dll_directory"):
-            try:
-                _DLL_DIR_HANDLES.append(os.add_dll_directory(_frozen_resource_dir))
-            except OSError:
-                pass
-prepare_tk_environment(TK_RUNTIME_DIRNAME)
-import tkinter as tk
-from tkinter import messagebox
-
-from app_identity import apply_tk_icon, set_windows_app_id
+from qt_companion import UiWakeup
 from companion_json import MAX_REQUEST_BYTES, read_json as _read_request_json, write_json as _write_json
-from display_config import apply_display_config, normalize_font_name, validate_display_colors
+from display_config import apply_display_config, normalize_font_name
 from companion_liveness import UiHeartbeat
 from companion_manual_close import MANUAL_CLOSE_EXIT_CODE, publish_manual_close_signal
 from service_ports import OVERLAYER_DEFAULT_PORT
@@ -45,7 +31,6 @@ from system_logging import (
     capture_windowed_streams,
     configure_system_logging,
     install_exception_hooks,
-    install_tk_exception_hook,
     log_directory,
     log_debug as system_debug,
     log_error as system_error,
@@ -54,7 +39,6 @@ from system_logging import (
 from win32_overlay import TopmostWindowController, get_top_level_hwnd
 
 DEFAULT_PORT = OVERLAYER_DEFAULT_PORT
-DEFAULT_GEOMETRY = "780x180+120+120"
 WDA_NONE = 0x00000000
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
@@ -90,14 +74,10 @@ class OverlayConfig:
         set_debug_enabled(self.debug_log)
 
 
-class OverlayerApp:
-    # Keep translation display responsive during a burst without burning a
-    # 20 Hz Tk timer while the overlay is unchanged.
-    ACTIVE_EVENT_POLL_MS = 50
-    IDLE_EVENT_POLL_MS = 200
+class OverlayerApp(QWidget, TimerHost):
     # Text updates are coalesced into one latest-value slot.  Configuration
     # changes retain their ordering, but their queue is bounded so a stalled
-    # Tk window cannot consume unbounded memory.
+    # window cannot consume unbounded memory.
     MAX_PENDING_CONFIG_EVENTS = 32
     MAX_CONFIG_EVENTS_PER_DRAIN = 8
     MAX_TEXT_CHARS = 32 * 1024
@@ -105,12 +85,12 @@ class OverlayerApp:
 
     def __init__(
         self,
-        root: tk.Tk,
         config: OverlayConfig,
         *,
         on_confirmed_close: Callable[[], None] | None = None,
     ) -> None:
-        self.root = root
+        super().__init__()
+        self._wakeup = UiWakeup(self, self._drain_events)
         self.config = config
         self._on_confirmed_close = on_confirmed_close
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue(
@@ -124,43 +104,35 @@ class OverlayerApp:
         self._dropped_config_count = 0
         self._trimmed_payload_count = 0
         self.last_text = ""
-        self._drag_start: tuple[int, int] | None = None
-        self._window_start: tuple[int, int] | None = None
+        self._drag_start: QPoint | None = None
+        self._window_start: QPoint | None = None
         self._topmost_controller: TopmostWindowController | None = None
         self._applied_config: dict[str, Any] = {}
 
-        self.root.title("MekiOverlayer")
-        self.root.geometry(DEFAULT_GEOMETRY)
-        self.root.protocol("WM_DELETE_WINDOW", self.close)
-        self.root.bind("<Destroy>", self._on_root_destroy, add="+")
-
-        self.label = tk.Label(
-            self.root,
-            text="",
-            justify="center",
-            anchor="center",
-            padx=18,
-            pady=14,
-        )
-        self.label.pack(fill=tk.BOTH, expand=True)
-        self.root.bind("<Configure>", self._on_configure)
-        self.root.bind("<ButtonPress-1>", self._on_drag_start)
-        self.root.bind("<B1-Motion>", self._on_drag_move)
-        self.label.bind("<ButtonPress-1>", self._on_drag_start)
-        self.label.bind("<B1-Motion>", self._on_drag_move)
+        self.setWindowTitle("MekiOverlayer")
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.resize(720, 152)
+        self.move(120, 120)
+        apply_qt_icon(self)
+        self.label = QLabel()
+        self.label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.label.setTextFormat(Qt.TextFormat.PlainText)
+        self.label.setWordWrap(True)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.addWidget(self.label)
+        shortcut = QShortcut(QKeySequence("Escape"), self)
+        shortcut.activated.connect(self.close)
         self.apply_config()
-        # Preserve the overlay's established drag interaction.  Its native
-        # topmost updates still use SWP_NOACTIVATE; WS_EX_NOACTIVATE is reserved
-        # for the detached OCR button, where keeping the game foreground is
-        # more important than keyboard interaction with the overlay itself.
         self._topmost_controller = TopmostWindowController(
-            self.root,
+            self,
             enabled=self.config.topmost,
             no_activate=False,
             debug_log=self.config.debug_log,
         )
         self._topmost_controller.start()
-        self.root.after(self.IDLE_EVENT_POLL_MS, self._drain_events)
 
     @staticmethod
     def _should_report_count(count: int) -> bool:
@@ -220,8 +192,7 @@ class OverlayerApp:
 
     def enqueue_text(self, text: str, request_id: str | None = None) -> None:
         # Showing an outdated translation is worse than skipping intermediate
-        # frames.  One locked slot bounds memory and always lets Tk consume the
-        # newest available text on its next tick.
+        # frames. One locked slot lets the GUI consume the newest text.
         value = self._bounded_text("text", text, self.MAX_TEXT_CHARS)
         with self._text_lock:
             self.display_receipts.complete(
@@ -230,6 +201,7 @@ class OverlayerApp:
             self.last_text = value
             self._pending_text = value
             self._pending_request_id = request_id
+        self._wakeup.schedule()
 
     def cancel_display(self, request_id: str) -> None:
         with self._text_lock:
@@ -241,16 +213,11 @@ class OverlayerApp:
     def enqueue_config(self, data: dict[str, Any]) -> bool:
         try:
             self.events.put_nowait(("config", self._compact_config(data)))
+            self._wakeup.schedule()
             return True
         except queue.Full:
             self._record_config_overflow()
             return False
-
-    def _take_pending_text(self) -> str | None:
-        with self._text_lock:
-            text = self._pending_text
-            self._pending_text = None
-            return text
 
     def _has_pending_text(self) -> bool:
         with self._text_lock:
@@ -264,43 +231,31 @@ class OverlayerApp:
         if not changed:
             return
 
-        # Every translation may include the same config.  Remapping the native
-        # window for those requests disturbs dragging and generates unnecessary
-        # WinEvent callbacks; only a titlebar change requires withdrawing Tk.
-        frame_changed = "hide_titlebar" in changed
-        geometry = self.root.geometry() if previous and frame_changed else None
+        frame_changed = bool(changed & {"hide_titlebar", "topmost"})
         if frame_changed:
-            self.root.withdraw()
-            self.root.overrideredirect(cfg.hide_titlebar)
-            if geometry is not None:
-                self.root.geometry(geometry)
-        if "bg_color" in changed:
-            self.root.configure(bg=cfg.bg_color)
+            geometry = self.geometry()
+            visible = self.isVisible()
+            self.setWindowFlag(Qt.WindowType.FramelessWindowHint, cfg.hide_titlebar)
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, cfg.topmost)
+            self.setGeometry(geometry)
+            if visible:
+                self.show()
         if "opacity" in changed:
-            self.root.attributes("-alpha", cfg.opacity)
-        if "topmost" in changed:
-            self.root.attributes("-topmost", cfg.topmost)
+            self.setWindowOpacity(cfg.opacity)
         if "fixed_size" in changed:
-            self.root.resizable(not cfg.fixed_size, not cfg.fixed_size)
             if cfg.fixed_size:
-                self.root.update_idletasks()
-                width = max(240, self.root.winfo_width())
-                height = max(80, self.root.winfo_height())
-                self.root.minsize(width, height)
-                self.root.maxsize(width, height)
+                self.setFixedSize(self.size().expandedTo(self.minimumSizeHint()))
             else:
-                self.root.minsize(240, 80)
-                self.root.maxsize(10000, 10000)
-        if changed & {"bg_color", "text_color", "text_font", "text_size"}:
-            self.label.configure(
-                bg=cfg.bg_color,
-                fg=cfg.text_color,
-                font=(normalize_font_name(cfg.text_font), cfg.text_size, "bold"),
-            )
-            self._update_wraplength()
-        if frame_changed:
-            self.root.deiconify()
-        self.root.update_idletasks()
+                self.setMinimumSize(220, 68)
+                self.setMaximumSize(16777215, 16777215)
+        if changed & {"bg_color", "text_color"}:
+            palette = self.palette()
+            palette.setColor(QPalette.ColorRole.Window, QColor(cfg.bg_color))
+            self.setPalette(palette)
+            self.setAutoFillBackground(True)
+            self.label.setStyleSheet(f"color: {QColor(cfg.text_color).name()};")
+        if changed & {"text_font", "text_size"}:
+            self.label.setFont(QFont(normalize_font_name(cfg.text_font), cfg.text_size, QFont.Weight.Bold))
         if frame_changed or "exclude_from_capture" in changed:
             self._apply_capture_exclusion()
         if self._topmost_controller is not None:
@@ -308,6 +263,8 @@ class OverlayerApp:
                 self._topmost_controller.set_debug_log(cfg.debug_log)
             if "topmost" in changed:
                 self._topmost_controller.set_enabled(cfg.topmost)
+            elif frame_changed:
+                self._topmost_controller.refresh()
         self._applied_config = current
 
     def _apply_capture_exclusion(self) -> bool:
@@ -319,7 +276,7 @@ class OverlayerApp:
             set_window_display_affinity = user32.SetWindowDisplayAffinity
             set_window_display_affinity.argtypes = [wintypes.HWND, wintypes.DWORD]
             set_window_display_affinity.restype = wintypes.BOOL
-            top_level_hwnd = get_top_level_hwnd(self.root)
+            top_level_hwnd = get_top_level_hwnd(self)
             if not top_level_hwnd:
                 return False
             if set_window_display_affinity(top_level_hwnd, affinity):
@@ -335,37 +292,27 @@ class OverlayerApp:
             log_error("set_window_display_affinity", exc)
             return False
 
-    def _on_configure(self, event: tk.Event) -> None:
-        if event.widget == self.root:
-            self._update_wraplength()
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self.config.hide_titlebar and event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.globalPosition().toPoint()
+            self._window_start = self.pos()
+        super().mousePressEvent(event)
 
-    def _on_root_destroy(self, event: tk.Event) -> None:
-        if event.widget == self.root and self._topmost_controller is not None:
-            self._topmost_controller.close()
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._drag_start is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(self._window_start + event.globalPosition().toPoint() - self._drag_start)
+        super().mouseMoveEvent(event)
 
-    def _update_wraplength(self) -> None:
-        width = max(80, self.root.winfo_width() - 36)
-        self.label.configure(wraplength=width)
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._drag_start = None
+        self._window_start = None
+        super().mouseReleaseEvent(event)
 
-    def _on_drag_start(self, event: tk.Event) -> None:
-        if not self.config.hide_titlebar:
-            return
-        self._drag_start = (event.x_root, event.y_root)
-        self._window_start = (self.root.winfo_x(), self.root.winfo_y())
-
-    def _on_drag_move(self, event: tk.Event) -> None:
-        if not self._drag_start or not self._window_start:
-            return
-        dx = event.x_root - self._drag_start[0]
-        dy = event.y_root - self._drag_start[1]
-        self.root.geometry(f"+{self._window_start[0] + dx}+{self._window_start[1] + dy}")
-
-    def close(self) -> None:
+    def closeEvent(self, event: QCloseEvent) -> None:
         if not messagebox.askyesno(
-            "MekiOverlayer 종료",
-            "MekiOverlayer 창을 닫을까요?",
-            parent=self.root,
+            "MekiOverlayer 종료", "MekiOverlayer 창을 닫을까요?", parent=self
         ):
+            event.ignore()
             return
         if self._on_confirmed_close is not None:
             try:
@@ -374,19 +321,16 @@ class OverlayerApp:
                 log_error("manual_close_signal", exc)
         if self._topmost_controller is not None:
             self._topmost_controller.close()
-        self.root.destroy()
+        event.accept()
 
     def _drain_events(self) -> None:
-        handled_event = False
         for _ in range(self.MAX_CONFIG_EVENTS_PER_DRAIN):
             try:
                 event_type, payload = self.events.get_nowait()
             except queue.Empty:
                 break
-            handled_event = True
             try:
                 if event_type == "config":
-                    validate_display_colors(self.root, payload)
                     self.config.update_from_dict(payload)
                     self.apply_config()
             except Exception as exc:
@@ -399,28 +343,25 @@ class OverlayerApp:
         if self.display_receipts.cancelled(request_id):
             text = None
         if text is not None:
-            handled_event = True
             try:
                 # Keep cancellation and UI application in one critical section.
-                # A receipt is acknowledged only after Tk has flushed redraws.
+                # A receipt is acknowledged only after the widget has repainted.
                 with self._text_lock:
                     if not self.display_receipts.cancelled(request_id):
-                        self.label.configure(text=text)
-                        self.root.deiconify()
-                        self.root.lift()
-                        self.root.update_idletasks()
+                        self.label.setText(text)
+                        if self.isMinimized():
+                            self.showNormal()
+                        elif not self.isVisible():
+                            self.show()
+                        self.raise_()
+                        self.label.repaint()
                         self.display_receipts.complete(request_id)
             except Exception as exc:
                 self.display_receipts.complete(request_id, error=str(exc))
                 log_error("display_text", exc)
-        self.root.after(
-            (
-                self.ACTIVE_EVENT_POLL_MS
-                if handled_event or not self.events.empty() or self._has_pending_text()
-                else self.IDLE_EVENT_POLL_MS
-            ),
-            self._drain_events,
-        )
+        if not self.events.empty() or self._has_pending_text():
+            self._wakeup.schedule()
+
 
 
 def make_handler(
@@ -494,7 +435,7 @@ def make_handler(
                     return
                 if parsed.path == "/config":
                     if not app_ref.enqueue_config(payload):
-                        # Settings must not look persisted when Tk has fallen
+                        # Settings must not look persisted when the GUI has fallen
                         # behind its bounded queue. Native callers can retry
                         # this transient condition just like text delivery.
                         _write_json(
@@ -579,9 +520,7 @@ def main() -> int:
     server: ThreadingHTTPServer | None = None
     server_started = False
     try:
-        root = tk.Tk()
-        install_tk_exception_hook(root)
-        apply_tk_icon(root)
+        application = ensure_application()
         manual_close_confirmed = threading.Event()
 
         def on_confirmed_close() -> None:
@@ -592,9 +531,9 @@ def main() -> int:
                 app_name="MekiOverlayer",
             )
 
-        app_ref = OverlayerApp(root, config, on_confirmed_close=on_confirmed_close)
+        app_ref = OverlayerApp(config, on_confirmed_close=on_confirmed_close)
         ui_heartbeat = UiHeartbeat()
-        ui_heartbeat.schedule(root)
+        ui_heartbeat.schedule(app_ref)
         try:
             server = ThreadingHTTPServer(
                 ("127.0.0.1", args.port),
@@ -613,7 +552,8 @@ def main() -> int:
         )
         thread.start()
         server_started = True
-        root.mainloop()
+        app_ref.show()
+        application.exec()
         return MANUAL_CLOSE_EXIT_CODE if manual_close_confirmed.is_set() else 0
     except Exception as exc:
         log_error("main", exc)

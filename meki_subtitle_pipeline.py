@@ -128,10 +128,15 @@ def probe_media(input_path: Path, ffprobe_path: Path) -> MediaInfo:
         if not streams:
             raise ValueError("audio stream missing")
         stream = streams[0]
-        raw_duration = stream.get("duration") or payload.get("format", {}).get("duration")
-        duration = float(raw_duration or 0.0)
-        if not math.isfinite(duration):
-            raise ValueError("non-finite media duration")
+        duration = 0.0
+        for raw_duration in (stream.get("duration"), payload.get("format", {}).get("duration")):
+            try:
+                candidate = float(raw_duration)
+            except (ValueError, TypeError):
+                continue
+            if math.isfinite(candidate) and candidate > 0:
+                duration = candidate
+                break
         return MediaInfo(
             duration=max(0.0, duration),
             audio_stream_index=int(stream.get("index", 0)),
@@ -149,13 +154,12 @@ def extract_original_audio(
     *,
     progress: StatusCallback | None = None,
     cancel_event: Any = None,
+    raw_float: bool = False,
 ) -> None:
     """Decode the first original audio stream into timeline-preserving PCM.
 
-    Audio is deliberately decoded at 48 kHz because the shared audio pipeline
-    owns the tested 48 kHz -> 16 kHz conversion.  ``aresample`` preserves any
-    timestamp gaps as silence, so later SRT times remain tied to the source
-    video rather than the speech-only segments.
+    The subtitle pipeline maps raw 16 kHz float samples directly. WAV callers
+    receive 48 kHz PCM16. Both retain timestamp gaps for source-aligned cues.
     """
 
     wav_path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,11 +182,11 @@ def extract_original_audio(
         "-ac",
         "1",
         "-ar",
-        "48000",
+        str(SAMPLE_RATE) if raw_float else "48000",
         "-c:a",
-        "pcm_s16le",
+        "pcm_f32le" if raw_float else "pcm_s16le",
         "-f",
-        "wav",
+        "f32le" if raw_float else "wav",
         "-progress",
         "pipe:1",
         "-nostats",
@@ -234,7 +238,9 @@ def extract_original_audio(
     finally:
         process.stdout.close()
 
-    if return_code != 0 or not wav_path.is_file() or wav_path.stat().st_size <= 44:
+    size = wav_path.stat().st_size if wav_path.is_file() else 0
+    valid_audio = size > 0 and size % 4 == 0 if raw_float else size > 44
+    if return_code != 0 or not valid_audio:
         detail = "\n".join(messages).strip()
         raise RuntimeError(detail or "FFmpeg 오디오 추출에 실패했습니다.")
     _status(progress, 1.0, "원본 오디오 추출을 완료했습니다.")
@@ -528,7 +534,6 @@ def process_video(
     from audio_capture_core import (
         create_recognizer,
         normalize_stt_model,
-        wav_to_mono_16k,
     )
 
     started = time.perf_counter()
@@ -552,7 +557,10 @@ def process_video(
         check_cancel=lambda: _check_cancel(cancel_event),
     )
     _check_cancel(cancel_event)
-    _status(status, 0.0, "MekiAudioCapture 공용 음성 모델을 확인하고 있습니다.")
+    _status(status, 0.01, "영상의 원본 오디오 스트림을 확인하고 있습니다.")
+    media = probe_media(source, tools.ffprobe)
+    _check_cancel(cancel_event)
+    _status(status, 0.02, "MekiAudioCapture 공용 음성 모델을 확인하고 있습니다.")
 
     def report_stt_download(message: str) -> None:
         # ``ensure_models`` reports archive progress from its download loop.
@@ -568,8 +576,6 @@ def process_video(
         progress=report_stt_download,
     )
     _check_cancel(cancel_event)
-    _status(status, 0.03, "영상의 원본 오디오 스트림을 확인하고 있습니다.")
-    media = probe_media(source, tools.ffprobe)
     if log:
         log(
             f"오디오 스트림 #{media.audio_stream_index} ({media.codec_name}), "
@@ -581,21 +587,19 @@ def process_video(
     work_root = writable_app_subdir("MekiSubtitle", "work")
     with tempfile.TemporaryDirectory(prefix="subtitle-", dir=work_root) as temporary:
         temporary_dir = Path(temporary)
-        wav_path = temporary_dir / "source-audio-48k.wav"
         raw_path = temporary_dir / "source-audio-16k.f32"
         try:
             extract_original_audio(
                 source,
-                wav_path,
+                raw_path,
                 tools.ffmpeg,
                 media.duration,
-                progress=lambda ratio, message: _status(status, 0.04 + ratio * 0.13, message),
+                progress=lambda ratio, message: _status(status, 0.04 + ratio * 0.15, message),
                 cancel_event=cancel_event,
+                raw_float=True,
             )
             _check_cancel(cancel_event)
-            _status(status, 0.18, "추출한 오디오를 정밀 타임라인으로 변환하고 있습니다.")
-            audio = wav_to_mono_16k(wav_path, raw_path)
-            _check_cancel(cancel_event)
+            audio = np.memmap(raw_path, mode="r", dtype="<f4")
             _status(status, 0.20, "FAST VAD로 음성과 타임스탬프를 추적하고 있습니다.")
             interval_count, segments = collect_subtitle_segments(
                 audio,

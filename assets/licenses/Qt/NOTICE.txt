@@ -1,0 +1,16 @@
+MekiCopy includes dynamic libraries from Qt and the Qt for Python project.
+The libraries come from the Windows PyPI wheels of PySide6-Essentials 6.12.0
+and shiboken6 6.12.0. Qt DLLs and plugins are distributed as separate files.
+
+Qt library sources, licensing information and third-party notices for 6.12.0:
+https://github.com/qt/qtbase/tree/v6.12.0
+https://github.com/qt/qtsvg/tree/v6.12.0
+https://download.qt.io/official_releases/qt/6.12/6.12.0/submodules/
+https://doc.qt.io/qt-6/licensing.html
+https://doc.qt.io/qt-6/licenses-used-in-qt.html
+
+PySide6 and Shiboken sources and licensing information:
+https://code.qt.io/cgit/pyside/pyside-setup.git/tag/?h=v6.12.0
+https://doc.qt.io/qtforpython-6/licenses.html
+https://pypi.org/project/PySide6-Essentials/6.12.0/
+https://pypi.org/project/shiboken6/6.12.0/
