@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import json
+import os
 import secrets
 import socket
 import sys
 import threading
 import time
+from pathlib import Path
 from companion_http import urlopen
 
 import uvicorn
@@ -24,11 +27,41 @@ from hytrans.browser import BrowserManager
 from hytrans.api_settings import BACKEND_LABELS, BROWSER_BACKENDS
 from hytrans.config import DEFAULT_OVERLAY_URL, DEFAULT_PORT, HOST, configure_server
 from hytrans.logging_setup import configure_logging, debug, error
-from hytrans.model_files import DEFAULT_MODEL_ID, SUPPORTED_MODEL_IDS
+from hytrans.model_files import DEFAULT_MODEL_ID, SUPPORTED_MODEL_IDS, normalize_model_id
+from runtime_paths import DATA_DIR_ENV, FORCE_DATA_DIR_ENV, app_root, fallback_app_data_dirs
 from system_logging import capture_windowed_streams, install_exception_hooks
 
 def prepare_windowed_streams() -> None:
     capture_windowed_streams()
+
+
+def _saved_model_id() -> str:
+    override = os.environ.get(DATA_DIR_ENV)
+    forced = os.environ.get(FORCE_DATA_DIR_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+    if override and forced:
+        directories = [Path(override).expanduser() / "MekiCopy"]
+    else:
+        root = app_root()
+        controller = root
+        if getattr(sys, "frozen", False) and root.name.casefold() == "hytrans":
+            controller = root.parent / "MekiCopy"
+        directories = [controller]
+        for directory in fallback_app_data_dirs("MekiCopy"):
+            if directory == root / "runtime_data" / "MekiCopy":
+                directory = controller / "runtime_data" / "MekiCopy"
+            directories.append(directory)
+
+    for directory in directories:
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            with (directory / "settings.cfg").open(encoding="utf-8-sig") as stream:
+                parser.read_file(stream)
+        except OSError:
+            continue
+        except (UnicodeError, configparser.Error):
+            return DEFAULT_MODEL_ID
+        return normalize_model_id(parser.get("settings", "hytrans_model_id", fallback=DEFAULT_MODEL_ID))
+    return DEFAULT_MODEL_ID
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,7 +78,6 @@ def parse_args() -> argparse.Namespace:
         "--model-id",
         dest="model_id",
         choices=SUPPORTED_MODEL_IDS,
-        default=DEFAULT_MODEL_ID,
     )
     parser.add_argument("--debug-log", action="store_true")
     parser.add_argument(
@@ -55,7 +87,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="start only the loopback server; do not launch the private worker",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.model_id is None:
+        args.model_id = _saved_model_id()
+    return args
 
 
 def ensure_port_available(host: str, port: int) -> None:

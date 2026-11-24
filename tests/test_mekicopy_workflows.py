@@ -202,6 +202,44 @@ class CompanionActionFeedbackTests(unittest.TestCase):
             _begin_hytrans_restart=mock.Mock(),
         )
 
+    def test_plamo_launch_passes_its_model_and_displays_its_name(self) -> None:
+        window = self._hytrans_window("local")
+        window.settings.hytrans_model_id = "plamo3"
+        window.settings.debug_logging = False
+        window._overlayer_show_url = lambda: "http://127.0.0.1:6000/show"
+        window._watch_started_process = mock.Mock()
+        window._track_owned_companion = mock.Mock()
+        with (
+            mock.patch.object(mekicopy, "_find_companion_executable", return_value=["HYTrans.exe"]),
+            mock.patch.object(mekicopy.subprocess, "Popen") as popen,
+            mock.patch.object(mekicopy.messagebox, "showinfo") as info,
+        ):
+            self.assertTrue(mekicopy.MainWindow._launch_hytrans(window))
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("--model") + 1], "plamo3")
+        self.assertIn("pLaMo-3", info.call_args.args[1])
+
+    def test_plamo_start_rejects_running_mt15_if_restart_fails(self) -> None:
+        window = self._hytrans_window("local")
+        window.settings.hytrans_model_id = "plamo3"
+        window._begin_hytrans_restart.return_value = False
+        mt15 = mekicopy.get_model_profile("mt1.5")
+        running = {
+            "ok": True, "app": "HYTrans", "backend": "local",
+            "model": mt15.model_id, "dtype": mt15.dtype,
+        }
+        with (
+            mock.patch.object(mekicopy, "_json_request", return_value=running) as request,
+            mock.patch.object(mekicopy.messagebox, "showinfo") as info,
+        ):
+            self.assertFalse(mekicopy.MainWindow._on_start_hytrans(window))
+
+        window._begin_hytrans_restart.assert_called_once_with(5000, "running-profile-mismatch")
+        request.assert_called_once_with("http://127.0.0.1:5000/health", timeout=1)
+        info.assert_not_called()
+        window._launch_hytrans.assert_not_called()
+
     def test_hytrans_readiness_error_reports_failure_without_launching(self) -> None:
         window = self._hytrans_window("hdtrans")
         health = {"ok": True, "app": "HYTrans", "backend": "hdtrans", "model": "hdTrans"}

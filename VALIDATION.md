@@ -1,5 +1,19 @@
 # MekiCopy 검증
 
+## 2026-11-24 pLaMo 시작 모델 선택
+
+- MekiCopy의 실행 안내가 실제 선택한 모델을 표시한다. 같은 포트에 다른 모델이 실행 중이면 해당 서버를 교체하며, 교체 실패는 실행 실패로 처리한다.
+- 번들 `HYTrans.exe`를 직접 시작해 옆 MekiCopy 폴더에 저장한 `plamo3`가 `/health`와 `/config`에 보고되는 것을 확인했다. `--model mt1.5`를 명시하면 명령줄 설정이 우선했다.
+- 소스 HYTrans도 `--model` 없이 저장된 pLaMo-3 q4f16을 읽고 일본어 문장을 한국어로 번역했다. 제한된 Windows 호스트에서 브라우저 구동에 필요한 옵션은 테스트에만 적용했고, 캐시 모델과 WASM을 사용했다. Python 회귀 470개 중 466개가 통과했고 4개를 건너뛰었다.
+- Lite와 Full의 실행 검사, Python을 PATH에서 뺀 런타임 검사, ZIP 무결성 및 공통 파일 일치 검증을 통과했다. 트레이 반복 검사 제외는 기존 Windows 권한 제약을 이어받았다. 기존 Full의 개인 상태 파일 5개를 복원했다.
+
+| 배포본 | ZIP 크기 | SHA-256 |
+|---|---:|---|
+| Lite | 478,046,091 bytes | `032ddb325be299cc80ea7820cfc6ff3865d1a4b4529ebaeb53753646806f538a` |
+| Full | 4,800,373,663 bytes | `6b7b67be62bdd6b92a70abe1da2f486a4d8b6683702b4346901a8461f3ba989b` |
+
+- 증거는 `.cache/plamo-launch-20261124`의 `source-tests.log`, `frozen-models.log`, `release-verification.json`, `source-smoke-browser-wasm/debug_log/hytrans.log`에 있다.
+
 ## 2026-11-24 PySide6 전환과 Lite·Full 빌드
 
 - 본체, 분리 버튼, 설정, 캡처 영역, 오버레이, 대본, 녹음, 자막 창을 PySide6로 전환했다. 홈 창 기본 크기는 534×338 논리 픽셀이며, Windows 125% 배율에서 홈·작업·설정과 최소 크기의 주요 버튼 배치를 확인했다.

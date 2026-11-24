@@ -2108,11 +2108,10 @@ class MainWindow(TimerHost, QWidget):
                 or health.get("model") != expected_model
                 or (backend == "local" and health.get("dtype") != expected_profile.dtype)
             ):
-                if self._begin_hytrans_restart(
+                return self._begin_hytrans_restart(
                     self.settings.hytrans_port,
                     "running-profile-mismatch",
-                ):
-                    return True
+                )
             self._send_hytrans_logging_config(log_errors=False)
             try:
                 ready = _json_request(f"{self._hytrans_base_url()}/ready", timeout=1)
@@ -2183,15 +2182,17 @@ class MainWindow(TimerHost, QWidget):
                 messagebox.showerror("MekiCopy", detail, parent=self)
             return False
 
+        backend = normalize_backend(self.settings.hytrans_backend)
+        profile = get_model_profile(self.settings.hytrans_model_id)
         command += [
             "--port",
             str(self.settings.hytrans_port),
             "--overlay-url",
             self._overlayer_show_url(),
             "--model",
-            self.settings.hytrans_model_id,
+            profile.key,
             "--backend",
-            normalize_backend(self.settings.hytrans_backend),
+            backend,
             "--api-config",
             str(api_settings_path()),
         ]
@@ -2217,10 +2218,10 @@ class MainWindow(TimerHost, QWidget):
             )
             action = "재시작했습니다" if restarted else "실행했습니다"
             if notify:
+                engine = profile.display_label if backend == "local" else BACKEND_LABELS[backend]
                 messagebox.showinfo(
                     "MekiCopy",
-                    f"HYTrans 서버를 {action}.\n번역 방식: "
-                    f"{BACKEND_LABELS[normalize_backend(self.settings.hytrans_backend)]}",
+                    f"HYTrans 서버를 {action}.\n번역 방식: {engine}",
                     parent=self,
                 )
             return True

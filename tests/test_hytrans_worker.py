@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -48,7 +49,9 @@ class HytransDefaultsTests(unittest.TestCase):
         )
 
     def test_cli_uses_mt15_by_default_and_keeps_no_browser_alias(self) -> None:
-        with mock.patch.object(sys, "argv", ["HYTrans.exe"]):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(os.environ, {
+            "MEKICOPY_DATA_DIR": temporary, "MEKICOPY_FORCE_DATA_DIR": "1",
+        }), mock.patch.object(sys, "argv", ["HYTrans.exe"]):
             defaults = hytrans_main.parse_args()
         self.assertEqual(defaults.model_id, "mt1.5")
         with mock.patch.object(sys, "argv", ["HYTrans.exe", "--no-worker"]):
@@ -56,6 +59,45 @@ class HytransDefaultsTests(unittest.TestCase):
         self.assertTrue(alias.no_browser)
         with mock.patch.object(sys, "argv", ["HYTrans.exe", "--model", "plamo3"]):
             self.assertEqual(hytrans_main.parse_args().model_id, "plamo3")
+
+    def test_direct_launch_reads_controller_settings_and_honors_cli_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            suite = Path(temporary)
+            controller = suite / "MekiCopy"
+            controller.mkdir()
+            (controller / "settings.cfg").write_text(
+                "[settings]\nhytrans_model_id = plamo-3\n", encoding="utf-8"
+            )
+            for frozen, root in ((True, suite / "HYTrans"), (False, controller)):
+                with (
+                    self.subTest(frozen=frozen),
+                    mock.patch.object(sys, "frozen", frozen, create=True),
+                    mock.patch.object(hytrans_main, "app_root", return_value=root),
+                    mock.patch.dict(os.environ, {"MEKICOPY_FORCE_DATA_DIR": ""}),
+                    mock.patch.object(sys, "argv", ["HYTrans"]),
+                ):
+                    self.assertEqual(hytrans_main.parse_args().model_id, "plamo3")
+                    for flag in ("--model", "--model-id"):
+                        with mock.patch.object(sys, "argv", ["HYTrans", flag, "mt1.5"]):
+                            self.assertEqual(hytrans_main.parse_args().model_id, "mt1.5")
+                    with mock.patch.dict(os.environ, {
+                        "MEKICOPY_DATA_DIR": str(suite / "isolated"), "MEKICOPY_FORCE_DATA_DIR": "1",
+                    }):
+                        self.assertEqual(hytrans_main.parse_args().model_id, "mt1.5")
+
+    def test_direct_launch_reads_fallback_when_portable_settings_are_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fallback = Path(temporary) / "MekiCopy"
+            fallback.mkdir()
+            (fallback / "settings.cfg").write_text("[settings]\nhytrans_model_id=plamo3\n", encoding="utf-8")
+            with (
+                mock.patch.object(hytrans_main, "app_root", return_value=Path(temporary) / "source"),
+                mock.patch.dict(os.environ, {"MEKICOPY_DATA_DIR": temporary, "MEKICOPY_FORCE_DATA_DIR": ""}),
+                mock.patch.object(sys, "argv", ["HYTrans"]),
+            ):
+                self.assertEqual(hytrans_main.parse_args().model_id, "plamo3")
+                with mock.patch.dict(os.environ, {"MEKICOPY_FORCE_DATA_DIR": "1"}):
+                    self.assertEqual(hytrans_main.parse_args().model_id, "plamo3")
 
     def test_plamo_runtime_config_selects_pfml3_and_q4f16(self) -> None:
         with (
